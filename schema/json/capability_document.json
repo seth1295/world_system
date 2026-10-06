@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veyra.invalid/schema/capability-document/1",
+  "title": "VEYRA capability schema document V1",
+  "type": "object",
+  "required": ["id", "version", "compat", "requires", "params_schema", "field_templates", "feature_tables", "vocab", "derived_views", "explain_recipes", "required_reference_surface_kinds", "display"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^veyra\\.cap\\.[a-z0-9_]+/1$"},
+    "version": {"const": 1},
+    "compat": {"enum": ["critical", "ancillary"]},
+    "requires": {"type": "array", "items": {"type": "string"}},
+    "params_schema": {"type": "object"},
+    "field_templates": {"type": "array", "items": {"type": "object"}},
+    "feature_tables": {"type": "array", "items": {"type": "object"}},
+    "vocab": {"type": "array"},
+    "derived_views": {"type": "array"},
+    "explain_recipes": {"type": "array"},
+    "required_reference_surface_kinds": {"type": "array", "items": {"type": "string"}},
+    "display": {"type": "object", "required": ["group", "label", "order"], "properties": {"group": {"type": "string"}, "label": {"type": "string"}, "order": {"type": "integer"}}, "additionalProperties": true}
+  },
+  "additionalProperties": true
+}

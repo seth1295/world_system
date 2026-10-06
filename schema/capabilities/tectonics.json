@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "id": "veyra.cap.tectonics/1", "version": 1, "compat": "critical", "requires": ["veyra.cap.solid_surface/1"],
+  "params_schema": {"type": "object", "properties": {"domain": {"type": "string"}}, "additionalProperties": true},
+  "field_templates": [{"local_id": 1, "name": "tectonics.plate", "semantic": "feature_ref", "storage": {"dtype": "u16", "nodata": 0}, "domain_kind": "surface", "temporal": {"kind": "static"}, "sampling": {"interp": "nearest"}, "downsample": "mode_lowest_tiebreak"}],
+  "feature_tables": [{"id": "tectonics.plate"}, {"id": "tectonics.boundary"}], "vocab": [{"id": "tectonics.crust_type/1"}], "derived_views": [], "explain_recipes": [],
+  "required_reference_surface_kinds": [], "display": {"group": "Tectonics", "label": "Tectonics", "order": 30}
+}

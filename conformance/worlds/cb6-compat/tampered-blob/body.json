@@ -1,0 +1,81 @@
+{
+  "capabilities": [
+    {
+      "compat": "ancillary",
+      "id": "veyra.cap.conformance_probe/1",
+      "params": {}
+    },
+    {
+      "compat": "ancillary",
+      "id": "x-veyra.future/1",
+      "params": {}
+    }
+  ],
+  "classification": {
+    "tags": []
+  },
+  "codec": "zstd+shuffle2",
+  "domains": [
+    {
+      "frame": "body_fixed",
+      "id": "surface",
+      "max_level": 5,
+      "tile_log2": 3,
+      "topology": "veyra.topo.dir_cube/1",
+      "vertical": {
+        "kind": "none"
+      }
+    }
+  ],
+  "dynamics": {
+    "descriptor": {
+      "hash": "b3:6d4f51c059b4b1c6d773772e4df06376b88c658de836fdb48a4d71799d090970",
+      "path": "dynamics/descriptor.json"
+    },
+    "origin_keyframe": {
+      "hash": "b3:fc1bdd45418ef243d05ba74121f44aa207eef579ade34df14cbbaf6fc41276a9",
+      "path": "dynamics/origin.json"
+    }
+  },
+  "figure": {
+    "kind": "sphere",
+    "radius_m": "1"
+  },
+  "format_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "frames": {
+    "body_fixed": {
+      "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed"
+    }
+  },
+  "identity": {
+    "object_id": "obj:18dec96278ecb002f2ef912fe2eeee5a",
+    "origin": {
+      "kind": "fixture",
+      "name": "cb5-hashing"
+    }
+  },
+  "indexes": {
+    "0x7ffe0001": "b3:edc7225fd2b127092e2f092902c3e2b079aca923e6c777d06a7f564462f7d968"
+  },
+  "physical": {
+    "gm_m3_s2": "1",
+    "gravity_model": "point_mass"
+  },
+  "reference_surfaces": [],
+  "required_features": [
+    "veyra.body/1",
+    "veyra.canon.jcs/1",
+    "veyra.codec.zstd-shuffle2/1",
+    "veyra.topo.dir_cube/1"
+  ],
+  "schema": "veyra.body/1",
+  "sections": {
+    "registry": {
+      "hash": "b3:e0812f92fbe882131a2e6d91ed20032850e30d5740acb2ff6762ffe8a0a41f50",
+      "path": "registry/fields.json"
+    }
+  }
+}

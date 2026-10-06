@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install schema validator
+        run: python -m pip install -r requirements-dev.txt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Prove determinism lint guardrails
+        shell: pwsh
+        run: ./scripts/check_lint_guardrails.ps1
+      - name: Test
+        run: cargo test --workspace
+      - name: Check independently derived adjacency
+        run: python scripts/derive_adjacency.py --check
+      - name: Validate schemas and body fixtures
+        run: python scripts/validate_schemas.py
+      - name: Build WebAssembly targets
+        run: cargo build --target wasm32-unknown-unknown -p veyra-core -p veyra-wasm
+
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: cargo deny check

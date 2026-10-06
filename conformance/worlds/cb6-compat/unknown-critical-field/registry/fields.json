@@ -1,0 +1,27 @@
+{
+  "fields": [
+    {
+      "capability": "veyra.cap.topography/1",
+      "compat": "critical",
+      "domain": "surface",
+      "downsample": "mean",
+      "id": "0x01010001",
+      "name": "x-conformance.unknown",
+      "native_level": 0,
+      "persistence": "invariant",
+      "sampling": {
+        "interp": "nearest"
+      },
+      "semantic": "x-unknown.semantic/1",
+      "storage": {
+        "dtype": "u8",
+        "offset": "0",
+        "scale": "1"
+      },
+      "temporal": {
+        "kind": "static"
+      }
+    }
+  ],
+  "schema": "veyra.field_registry/1"
+}

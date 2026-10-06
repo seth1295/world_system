@@ -1,0 +1,61 @@
+{
+  "capabilities": [
+    {
+      "id": "veyra.cap.topography/1",
+      "params": {}
+    }
+  ],
+  "classification": {
+    "tags": []
+  },
+  "codec": "zstd+shuffle2",
+  "domains": [],
+  "dynamics": {
+    "descriptor": {
+      "hash": "b3:6d4f51c059b4b1c6d773772e4df06376b88c658de836fdb48a4d71799d090970",
+      "path": "dynamics/descriptor.json"
+    },
+    "origin_keyframe": {
+      "hash": "b3:fc1bdd45418ef243d05ba74121f44aa207eef579ade34df14cbbaf6fc41276a9",
+      "path": "dynamics/origin.json"
+    }
+  },
+  "figure": {
+    "kind": "sphere",
+    "radius_m": "1"
+  },
+  "format_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "frames": {
+    "body_fixed": {
+      "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed"
+    }
+  },
+  "identity": {
+    "object_id": "obj:a85b2cd1bf3aa8f8002083d45496ac7c",
+    "origin": {
+      "kind": "fixture",
+      "name": "cb6-unknown-critical-field"
+    }
+  },
+  "indexes": {},
+  "physical": {
+    "gm_m3_s2": "1",
+    "gravity_model": "point_mass"
+  },
+  "reference_surfaces": [],
+  "required_features": [
+    "veyra.body/1",
+    "veyra.canon.jcs/1",
+    "veyra.codec.zstd-shuffle2/1"
+  ],
+  "schema": "veyra.body/1",
+  "sections": {
+    "registry": {
+      "hash": "b3:89ecf4238f17dc58c3975b9d9024b73b2f102b104b8b58c00a6c80f261df607e",
+      "path": "registry/fields.json"
+    }
+  }
+}

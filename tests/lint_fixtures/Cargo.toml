@@ -1,0 +1,10 @@
+[package]
+name = "veyra-lint-negative"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"

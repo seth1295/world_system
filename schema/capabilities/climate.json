@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "id": "veyra.cap.climate/1", "version": 1, "compat": "critical", "requires": [],
+  "params_schema": {"type": "object", "properties": {"domain": {"type": "string"}, "slices": {"type": "object"}}, "additionalProperties": true},
+  "field_templates": [
+    {"local_id": 1, "name": "climate.temperature", "semantic": "scalar.temperature", "storage": {"dtype": "i16", "scale": "0.1", "offset": "0"}, "unit": "K", "domain_kind": "surface", "temporal": {"kind": "periodic_slices"}, "sampling": {"interp": "bilinear"}, "downsample": "mean"},
+    {"local_id": 2, "name": "climate.precipitation", "semantic": "scalar.flux", "storage": {"dtype": "u16", "scale": "0.1", "offset": "0"}, "unit": "mm/period", "domain_kind": "surface", "temporal": {"kind": "periodic_slices"}, "sampling": {"interp": "bilinear"}, "downsample": "mean"}
+  ],
+  "feature_tables": [], "vocab": [], "derived_views": [], "explain_recipes": [], "required_reference_surface_kinds": [],
+  "display": {"group": "Climate", "label": "Climate", "order": 50}
+}

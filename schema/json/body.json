@@ -3,92 +3,777 @@
   "$id": "https://veyra.invalid/schema/body/1",
   "title": "VEYRA body root V1",
   "type": "object",
-  "required": ["schema", "format_version", "required_features", "identity", "classification", "physical", "figure", "frames", "reference_surfaces", "dynamics", "capabilities", "domains", "codec", "sections", "indexes"],
+  "required": [
+    "schema",
+    "format_version",
+    "required_features",
+    "identity",
+    "classification",
+    "physical",
+    "figure",
+    "frames",
+    "reference_surfaces",
+    "dynamics",
+    "capabilities",
+    "domains",
+    "codec",
+    "sections",
+    "indexes"
+  ],
   "properties": {
-    "schema": {"const": "veyra.body/1"},
-    "format_version": {"$ref": "#/$defs/version"},
-    "required_features": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-    "identity": {"type": "object", "required": ["object_id", "origin"], "properties": {"object_id": {"type": "string", "pattern": "^obj:[0-9a-f]{32}$"}, "origin": {"type": "object"}, "label": {"type": "string"}}, "additionalProperties": true},
-    "classification": {"type": "object"},
-    "physical": {"type": "object", "required": ["gm_m3_s2"], "properties": {"gm_m3_s2": {"type": "string", "allOf": [{"pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:e(?:0|(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-7])|-(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-8])))?$"}, {"not": {"pattern": "^0(?:\\.0+)?(?:e(?:0|(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-7])|-(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-8])))?$"}}]}, "gravity_model": {"type": "string"}}, "additionalProperties": true},
-    "figure": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["sphere", "star_convex_radial", "radial_profile_sphere"]}}, "additionalProperties": true},
-    "frames": {"type": "object", "required": ["body_fixed"], "properties": {"body_fixed": {"$ref": "#/$defs/bodyFixedFrame"}}, "additionalProperties": true},
-    "reference_surfaces": {"type": "array", "items": {"type": "object", "required": ["id", "kind"], "properties": {"id": {"type": "string", "minLength": 1}, "kind": {"enum": ["sphere", "offset_of", "figure_surface"]}}, "allOf": [{"if": {"properties": {"kind": {"const": "sphere"}}, "required": ["kind"]}, "then": {"required": ["radius_m"], "properties": {"radius_m": {"$ref": "#/$defs/positiveDecimalString"}}}}, {"if": {"properties": {"kind": {"const": "offset_of"}}, "required": ["kind"]}, "then": {"required": ["base", "offset_m"], "properties": {"base": {"type": "string"}, "offset_m": {"$ref": "#/$defs/decimalString"}}}}], "additionalProperties": true}},
-    "dynamics": {"type": "object", "required": ["descriptor", "origin_keyframe"], "properties": {"descriptor": {"$ref": "#/$defs/sectionRef"}, "origin_keyframe": {"$ref": "#/$defs/sectionRef"}}, "additionalProperties": true},
-    "capabilities": {"type": "array", "items": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}, "params": {"type": "object"}, "compat": {"enum": ["critical", "ancillary"]}}, "additionalProperties": true}},
+    "schema": {
+      "const": "veyra.body/1"
+    },
+    "format_version": {
+      "$ref": "#/$defs/formatVersion"
+    },
+    "required_features": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "const": "veyra.body/1"
+          }
+        },
+        {
+          "contains": {
+            "const": "veyra.canon.jcs/1"
+          }
+        },
+        {
+          "contains": {
+            "const": "veyra.codec.zstd-shuffle2/1"
+          }
+        }
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "object_id",
+        "origin"
+      ],
+      "properties": {
+        "object_id": {
+          "type": "string",
+          "pattern": "^obj:[0-9a-f]{32}$"
+        },
+        "origin": {
+          "$ref": "#/$defs/origin"
+        },
+        "label": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "classification": {},
+    "physical": {
+      "type": "object",
+      "required": [
+        "gm_m3_s2"
+      ],
+      "properties": {
+        "gm_m3_s2": {
+          "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/positiveDecimalString"
+        },
+        "gravity_model": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "figure": {
+      "$ref": "#/$defs/figure"
+    },
+    "frames": {
+      "type": "object",
+      "required": [
+        "body_fixed"
+      ],
+      "properties": {
+        "body_fixed": {
+          "$ref": "#/$defs/bodyFixedFrame"
+        }
+      },
+      "additionalProperties": true
+    },
+    "reference_surfaces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/referenceSurface"
+      }
+    },
+    "dynamics": {
+      "$ref": "#/$defs/dynamicsSections"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/capabilityRef"
+      }
+    },
     "domains": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["id", "topology", "frame", "vertical", "tile_log2", "max_level"],
-        "properties": {
-          "id": {"type": "string"},
-          "topology": {"enum": ["veyra.topo.dir_cube/1", "veyra.topo.radial_1d/1"]},
-          "frame": {"const": "body_fixed"},
-          "vertical": {"type": "object"},
-          "tile_log2": {"type": "integer", "minimum": 0, "maximum": 30},
-          "max_level": {"type": "integer", "minimum": 0, "maximum": 30}
-        },
-        "allOf": [
-          {
-            "if": {"properties": {"topology": {"const": "veyra.topo.dir_cube/1"}}, "required": ["topology"]},
-            "then": {"properties": {"vertical": {"required": ["kind"], "properties": {"kind": {"const": "none"}}}}}
-          },
-          {
-            "if": {"properties": {"topology": {"const": "veyra.topo.radial_1d/1"}}, "required": ["topology"]},
-            "then": {"properties": {"vertical": {"required": ["kind", "extent_m"], "properties": {"kind": {"const": "radius"}, "extent_m": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?([e]-?(0|[1-9][0-9]*))?$"}}}}}
-          }
-        ],
-        "additionalProperties": true
+        "$ref": "#/$defs/domain"
       }
     },
-    "codec": {"const": "zstd+shuffle2"},
-    "sections": {"type": "object", "required": ["registry"], "properties": {"registry": {"$ref": "#/$defs/sectionRef"}, "vocab": {"type": "array", "items": {"$ref": "#/$defs/namedSectionRef"}}, "features": {"type": "array", "items": {"$ref": "#/$defs/namedSectionRef"}}, "provenance": {"type": "object"}}, "additionalProperties": true},
-    "indexes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}},
-    "extensions_ledger": {"oneOf": [{"$ref": "#/$defs/sectionRef"}, {"type": "null"}]}
+    "codec": {
+      "const": "zstd+shuffle2"
+    },
+    "sections": {
+      "$ref": "#/$defs/bodySections"
+    },
+    "indexes": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^0x(?!0000)[0-9a-f]{4}(?!0000)[0-9a-f]{4}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^b3:[0-9a-f]{64}$"
+      }
+    },
+    "extensions_ledger": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sectionRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
   },
   "allOf": [
     {
-      "if": {"properties": {"figure": {"properties": {"kind": {"const": "radial_profile_sphere"}}, "required": ["kind"]}}, "required": ["figure"]},
-      "then": {"properties": {"reference_surfaces": {"items": {"not": {"properties": {"kind": {"const": "figure_surface"}}, "required": ["kind"]}}}}}
+      "if": {
+        "properties": {
+          "figure": {
+            "properties": {
+              "kind": {
+                "const": "radial_profile_sphere"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "figure"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reference_surfaces": {
+            "items": {
+              "not": {
+                "properties": {
+                  "kind": {
+                    "const": "figure_surface"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
+    "formatVersion": {
+      "type": "object",
+      "required": [
+        "major",
+        "minor"
+      ],
+      "properties": {
+        "major": {
+          "type": "integer",
+          "const": 1
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": true
+    },
+    "origin": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "const": "fixture"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "universe_id",
+            "address"
+          ],
+          "properties": {
+            "kind": {
+              "const": "universe"
+            },
+            "universe_id": {
+              "type": "string",
+              "pattern": "^uni:b3:[0-9a-f]{64}$"
+            },
+            "address": {
+              "$ref": "#/$defs/objectAddress"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "objectAddress": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "region",
+            "slot"
+          ],
+          "properties": {
+            "kind": {
+              "const": "system_seed"
+            },
+            "region": {
+              "$ref": "#/$defs/regionKey"
+            },
+            "slot": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "region",
+            "slot"
+          ],
+          "properties": {
+            "kind": {
+              "const": "free_object"
+            },
+            "region": {
+              "$ref": "#/$defs/regionKey"
+            },
+            "slot": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "system",
+            "role",
+            "ordinal"
+          ],
+          "properties": {
+            "kind": {
+              "const": "body_in_system"
+            },
+            "system": {
+              "type": "string",
+              "pattern": "^obj:[0-9a-f]{32}$"
+            },
+            "role": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "ordinal": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "const": "fixture"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "regionKey": {
+      "type": "object",
+      "required": [
+        "ix",
+        "iy",
+        "iz"
+      ],
+      "properties": {
+        "level": {
+          "type": "integer",
+          "const": 0
+        },
+        "ix": {
+          "$ref": "#/$defs/i64Coordinate"
+        },
+        "iy": {
+          "$ref": "#/$defs/i64Coordinate"
+        },
+        "iz": {
+          "$ref": "#/$defs/i64Coordinate"
+        }
+      },
+      "additionalProperties": true
+    },
+    "i64Coordinate": {
+      "oneOf": [
+        {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,17}|(?:[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)|-(?:[1-9][0-9]{0,17}|(?:[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7]|9223372036854775808)))$"}
+      ]
+    },
+    "figure": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "radius_m"
+          ],
+          "properties": {
+            "kind": {
+              "const": "sphere"
+            },
+            "radius_m": {
+              "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/positiveDecimalString"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "radius_field"
+          ],
+          "properties": {
+            "kind": {
+              "const": "star_convex_radial"
+            },
+            "radius_field": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "extent_m"
+          ],
+          "properties": {
+            "kind": {
+              "const": "radial_profile_sphere"
+            },
+            "extent_m": {
+              "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/positiveDecimalString"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
     "bodyFixedFrame": {
       "type": "object",
-      "required": ["axes", "rotation"],
+      "required": [
+        "axes",
+        "rotation"
+      ],
       "properties": {
-        "axes": {"const": "+Z is the positive rotation pole; +X is the prime meridian; right-handed"},
-        "rotation": {"$ref": "#/$defs/uniformRotation"}
+        "axes": {
+          "const": "+Z is the positive rotation pole; +X is the prime meridian; right-handed"
+        },
+        "rotation": {
+          "$ref": "#/$defs/uniformRotation"
+        }
       },
       "additionalProperties": true
     },
     "uniformRotation": {
       "type": "object",
-      "required": ["kind", "period_s", "epoch", "orientation_q_at_epoch", "relative_to"],
+      "required": [
+        "kind",
+        "period_s",
+        "epoch",
+        "orientation_q_at_epoch",
+        "relative_to"
+      ],
       "properties": {
-        "kind": {"const": "uniform"},
-        "period_s": {"$ref": "#/$defs/positiveDecimalString"},
-        "epoch": {"type": "string", "pattern": "^(?:0|-[1-9][0-9]*|[1-9][0-9]*)$"},
-        "orientation_q_at_epoch": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/decimalString"}},
-        "relative_to": {"const": "universe_inertial"}
+        "kind": {
+          "const": "uniform"
+        },
+        "period_s": {
+          "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/positiveDecimalString"
+        },
+        "epoch": {
+          "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/utime"
+        },
+        "orientation_q_at_epoch": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/decimalString"
+          }
+        },
+        "relative_to": {
+          "const": "universe_inertial"
+        }
       },
       "additionalProperties": true
     },
-    "decimalString": {
-      "type": "string",
+    "referenceSurface": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "sphere",
+            "offset_of",
+            "figure_surface"
+          ]
+        }
+      },
       "allOf": [
-        {"pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:e(?:0|[1-9][0-9]*|-[1-9][0-9]*))?$"},
-        {"not": {"pattern": "^-0(?:\\.0+)?(?:e(?:0|[1-9][0-9]*|-[1-9][0-9]*))?$"}}
-      ]
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sphere"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "radius_m"
+            ],
+            "properties": {
+              "radius_m": {
+                "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/positiveDecimalString"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "offset_of"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "base",
+              "offset_m"
+            ],
+            "properties": {
+              "base": {
+                "type": "string",
+                "minLength": 1
+              },
+              "offset_m": {
+                "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/decimalString"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
     },
-    "positiveDecimalString": {
-      "type": "string",
-      "pattern": "^(?:[1-9][0-9]*(?:\\.[0-9]+)?|0\\.[0-9]*[1-9][0-9]*)(?:e(?:0|[1-9][0-9]*|-[1-9][0-9]*))?$"
+    "sectionRef": {
+      "type": "object",
+      "required": [
+        "path",
+        "hash"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)$)[^\\x00]+$"
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^b3:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
     },
-    "version": {"type": "object", "required": ["major", "minor"], "properties": {"major": {"type": "integer", "minimum": 1}, "minor": {"type": "integer", "minimum": 0}}, "additionalProperties": false},
-    "sectionRef": {"type": "object", "required": ["path", "hash"], "properties": {"path": {"type": "string", "minLength": 1}, "hash": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}}, "additionalProperties": false},
-    "namedSectionRef": {"type": "object", "required": ["name", "path", "hash"], "properties": {"name": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1}, "hash": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}}, "additionalProperties": false}
+    "namedSectionRef": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "hash"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)$)[^\\x00]+$"
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^b3:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "provenanceSections": {
+      "type": "object",
+      "required": [
+        "dag",
+        "explain"
+      ],
+      "properties": {
+        "dag": {
+          "$ref": "#/$defs/sectionRef"
+        },
+        "explain": {
+          "$ref": "#/$defs/sectionRef"
+        }
+      },
+      "additionalProperties": true
+    },
+    "bodySections": {
+      "type": "object",
+      "required": [
+        "registry"
+      ],
+      "properties": {
+        "registry": {
+          "$ref": "#/$defs/sectionRef"
+        },
+        "vocab": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/namedSectionRef"
+          }
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/namedSectionRef"
+          }
+        },
+        "provenance": {
+          "oneOf": [{"$ref": "#/$defs/provenanceSections"}, {"type": "null"}]
+        }
+      },
+      "additionalProperties": true
+    },
+    "dynamicsSections": {
+      "type": "object",
+      "required": [
+        "descriptor",
+        "origin_keyframe"
+      ],
+      "properties": {
+        "descriptor": {
+          "$ref": "#/$defs/sectionRef"
+        },
+        "origin_keyframe": {
+          "$ref": "#/$defs/sectionRef"
+        }
+      },
+      "additionalProperties": true
+    },
+    "capabilityRef": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "type": "object"
+        },
+        "compat": {
+          "enum": [
+            "critical",
+            "ancillary"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "domain": {
+      "type": "object",
+      "required": [
+        "id",
+        "topology",
+        "frame",
+        "vertical",
+        "tile_log2",
+        "max_level"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "topology": {
+          "enum": [
+            "veyra.topo.dir_cube/1",
+            "veyra.topo.radial_1d/1"
+          ]
+        },
+        "frame": {
+          "const": "body_fixed"
+        },
+        "vertical": {
+          "type": "object"
+        },
+        "tile_log2": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30
+        },
+        "max_level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "topology": {
+                "const": "veyra.topo.dir_cube/1"
+              }
+            },
+            "required": [
+              "topology"
+            ]
+          },
+          "then": {
+            "properties": {
+              "vertical": {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "none"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "topology": {
+                "const": "veyra.topo.radial_1d/1"
+              }
+            },
+            "required": [
+              "topology"
+            ]
+          },
+          "then": {
+            "properties": {
+              "vertical": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "extent_m"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "radius"
+                  },
+                  "extent_m": {
+                    "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/positiveDecimalString"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
   },
   "additionalProperties": true
 }

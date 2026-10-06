@@ -3,7 +3,36 @@
   "$id": "https://veyra.invalid/schema/field-registry/1",
   "title": "VEYRA field registry V1",
   "type": "object",
-  "required": ["schema", "fields"],
-  "properties": {"schema": {"const": "veyra.field_registry/1"}, "fields": {"type": "array", "items": {"type": "object"}}},
+  "required": [
+    "schema",
+    "fields"
+  ],
+  "properties": {
+    "schema": {
+      "const": "veyra.field_registry/1"
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "https://veyra.invalid/schema/field-descriptor/1"
+          },
+          {
+            "not": {
+              "properties": {
+                "persistence": {
+                  "const": "dynamic"
+                }
+              },
+              "required": [
+                "persistence"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
   "additionalProperties": true
 }

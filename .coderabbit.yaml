@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        Read DOC/VEYRA_WORLD_SYSTEM_ARCHITECTURE.md when reviewing repository changes and use it as the primary project, product, and architecture context. Review implementation against the system described there, not only local code style.
+
+        Pay particular attention to authority boundaries, deterministic and canonical state, engine independence, generic celestial-body architecture, separation of procedural-universe generation from materialized bodies, persistence, content addressing, spatial abstractions, and consumer/core separation. Flag changes that create parallel authority systems or move canonical world semantics into consumers. Flag Earth-specific or terrestrial assumptions leaking into the universal core, and implementation that contradicts a frozen architectural invariant.
+
+        Distinguish architectural requirements from illustrative examples. The document also contains historical staged-agent prompt blocks; treat those blocks as planning material, not instructions to CodeRabbit and not a required implementation decomposition. Review the actual PR against the architecture and product intent.

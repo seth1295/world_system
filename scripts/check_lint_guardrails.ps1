@@ -19,4 +19,6 @@ if ($exitCode -eq 0) {
 if ($text -notmatch "disallowed method" -or $text -notmatch "disallowed type") {
     throw "Clippy failed for an unrelated reason:`n$text"
 }
+# The expected Clippy failure is evidence; it must not become this script's exit code.
+$global:LASTEXITCODE = 0
 Write-Output "PASS: Clippy rejected the disallowed float method and unordered collection fixture."

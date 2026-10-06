@@ -9,7 +9,18 @@
     "tags": []
   },
   "codec": "zstd+shuffle2",
-  "domains": [],
+  "domains": [
+    {
+      "frame": "body_fixed",
+      "id": "surface",
+      "max_level": 5,
+      "tile_log2": 3,
+      "topology": "veyra.topo.dir_cube/1",
+      "vertical": {
+        "kind": "none"
+      }
+    }
+  ],
   "dynamics": {
     "descriptor": {
       "hash": "b3:6d4f51c059b4b1c6d773772e4df06376b88c658de836fdb48a4d71799d090970",
@@ -49,7 +60,8 @@
   "required_features": [
     "veyra.body/1",
     "veyra.canon.jcs/1",
-    "veyra.codec.zstd-shuffle2/1"
+    "veyra.codec.zstd-shuffle2/1",
+    "veyra.topo.dir_cube/1"
   ],
   "schema": "veyra.body/1",
   "sections": {

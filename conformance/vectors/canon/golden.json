@@ -10,8 +10,8 @@
     "hex": "5659423101040000020001000100000001000200"
   },
   "fixture_baselines": {
-    "cb0-addressing": "b3:33cb5340667407d5a16b38f300a99990b5b43e7ae0d1030a2be7585b8cd488a0",
-    "cb5-hashing": "b3:4ad4d575a3f22ac0599ad6a19da4be255a9458ae8b9deb7bdd2ecdb67686aaf4",
+    "cb0-addressing": "b3:402b34d2a94ce2e8ad7874ef181d86f8194d83d80e176ac64ac0c33b842475fd",
+    "cb5-hashing": "b3:15299737facf005e69d489f261605db4a8944746abf8c3213f894049a88c0979",
     "cb9-minimal-void": "b3:a6e18c5b0286275317090698350c8a7ffc4c252720e0ee36e73aa8c71cba9340"
   },
   "index": {

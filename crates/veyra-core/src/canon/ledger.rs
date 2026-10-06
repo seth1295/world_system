@@ -27,6 +27,9 @@ pub fn append(
     payload: Value,
     time: UTime,
 ) -> Result<(Vec<u8>, Hash32), LedgerError> {
+    if entry_type.is_empty() {
+        return Err(LedgerError::InvalidEntry);
+    }
     let head = verify(previous)?;
     let mut object = Map::new();
     object.insert("seq".to_owned(), Value::from(head.count));
@@ -66,14 +69,28 @@ pub fn verify(bytes: &[u8]) -> Result<LedgerHead, LedgerError> {
         let mut value: Value =
             serde_json::from_slice(line).map_err(|_| LedgerError::InvalidEntry)?;
         let object = value.as_object_mut().ok_or(LedgerError::InvalidEntry)?;
+        let sequence =
+            object.get("seq").and_then(Value::as_u64).ok_or(LedgerError::InvalidEntry)?;
+        let previous = object
+            .get("prev")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(LedgerError::InvalidEntry)?;
+        Hash32::parse(&previous).map_err(|_| LedgerError::InvalidEntry)?;
+        let entry_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(LedgerError::InvalidEntry)?;
+        let _ = entry_type;
+        object.get("payload").ok_or(LedgerError::InvalidEntry)?;
+        let timestamp = object.get("t").and_then(Value::as_str).ok_or(LedgerError::InvalidEntry)?;
+        timestamp.parse::<UTime>().map_err(|_| LedgerError::InvalidEntry)?;
         let entry_hash = object
             .remove("hash")
             .and_then(|value| value.as_str().map(str::to_owned))
             .ok_or(LedgerError::InvalidEntry)?;
-        let sequence =
-            object.get("seq").and_then(Value::as_u64).ok_or(LedgerError::InvalidEntry)?;
-        let previous =
-            object.get("prev").and_then(Value::as_str).ok_or(LedgerError::InvalidEntry)?;
+        Hash32::parse(&entry_hash).map_err(|_| LedgerError::InvalidEntry)?;
         if sequence != head.count || previous != head.hash.to_string() {
             return Err(LedgerError::BrokenChain);
         }
@@ -113,9 +130,11 @@ impl std::error::Error for LedgerError {}
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{LedgerError, append, verify};
+    use crate::canon::jcs;
+    use crate::ids::Hash32;
     use crate::time::UTime;
 
     #[test]
@@ -126,12 +145,9 @@ mod tests {
             append(&first, "updated", json!({"value": "two"}), UTime::from_nanos(1)).unwrap().0;
         assert_eq!(verify(&second).unwrap().count, 2);
         let mut tampered = second;
-        let position = tampered.iter().position(|byte| *byte == b't').unwrap();
+        let position = tampered.windows(3).position(|window| window == b"two").unwrap();
         tampered[position] = b'x';
-        assert!(matches!(
-            verify(&tampered),
-            Err(LedgerError::TamperedEntry) | Err(LedgerError::BrokenChain)
-        ));
+        assert_eq!(verify(&tampered), Err(LedgerError::TamperedEntry));
     }
 
     #[test]
@@ -152,5 +168,45 @@ mod tests {
         let duplicate =
             String::from_utf8(first).unwrap().replacen("\"seq\":0,", "\"seq\":0,\"seq\":0,", 1);
         assert_eq!(verify(duplicate.as_bytes()), Err(LedgerError::InvalidEntry));
+    }
+
+    fn rehash_entry(mut value: Value) -> Vec<u8> {
+        value.as_object_mut().unwrap().remove("hash");
+        let digest =
+            crate::canon::hash::hash(&jcs::canonicalize_value(&value).unwrap()).to_string();
+        value.as_object_mut().unwrap().insert("hash".to_owned(), Value::String(digest));
+        let mut bytes = jcs::canonicalize_value(&value).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn valid_entry() -> Value {
+        let bytes =
+            append(&[], "created", json!({"value": "one"}), UTime::from_nanos(0)).unwrap().0;
+        serde_json::from_slice(bytes.strip_suffix(b"\n").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn verification_requires_complete_v1_entries_even_when_the_hash_is_valid() {
+        for field in ["type", "payload", "t"] {
+            let mut value = valid_entry();
+            value.as_object_mut().unwrap().remove(field);
+            assert_eq!(verify(&rehash_entry(value)), Err(LedgerError::InvalidEntry), "{field}");
+        }
+
+        let mut invalid_time = valid_entry();
+        invalid_time["t"] = json!("00");
+        assert_eq!(verify(&rehash_entry(invalid_time)), Err(LedgerError::InvalidEntry));
+    }
+
+    #[test]
+    fn verification_rejects_hash_valid_broken_sequence_and_predecessor_links() {
+        let mut bad_sequence = valid_entry();
+        bad_sequence["seq"] = json!(1);
+        assert_eq!(verify(&rehash_entry(bad_sequence)), Err(LedgerError::BrokenChain));
+
+        let mut bad_predecessor = valid_entry();
+        bad_predecessor["prev"] = json!(Hash32([1; 32]).to_string());
+        assert_eq!(verify(&rehash_entry(bad_predecessor)), Err(LedgerError::BrokenChain));
     }
 }

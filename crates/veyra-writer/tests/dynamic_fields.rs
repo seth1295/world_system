@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use veyra_core::body::ModelError;
+use veyra_core::ids::{ObjectAddress, ObjectId, UniverseId};
 use veyra_writer::{ArtifactWriter, WriterError};
 
 #[test]
@@ -40,11 +41,16 @@ fn baseline_writer_refuses_dynamic_fields() {
     let origin_hash = writer
         .write_json_section("dynamics/origin.json", &serde_json::to_vec(&origin).unwrap())
         .unwrap();
+    let object_id = ObjectId::derive(
+        UniverseId::fixture_sentinel(),
+        &ObjectAddress::Fixture { name: "dynamic-test".to_owned() },
+    )
+    .unwrap();
     let body = json!({
         "schema":"veyra.body/1",
         "format_version":{"major":1,"minor":0},
         "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1"],
-        "identity":{"object_id":"obj:00000000000000000000000000000001","origin":{"kind":"fixture","name":"dynamic-test"}},
+        "identity":{"object_id":object_id.to_string(),"origin":{"kind":"fixture","name":"dynamic-test"}},
         "classification":{},
         "physical":{"gm_m3_s2":"1"},
         "figure":{"kind":"sphere","radius_m":"1"},

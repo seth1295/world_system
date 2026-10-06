@@ -793,7 +793,7 @@ mod tests {
             "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1",topology_id],
             "identity":{"object_id":object_id.to_string(),"origin":{"kind":"fixture","name":"raster-contract"}},
             "classification":{},"physical":{"gm_m3_s2":"1"},"figure":figure,
-            "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":reference_surfaces,
+            "frames":{"body_fixed":{"axes":"+Z is the positive rotation pole; +X is the prime meridian; right-handed","rotation":{"kind":"uniform","period_s":"86400","epoch":"0","orientation_q_at_epoch":["1","0","0","0"],"relative_to":"universe_inertial"}}},"reference_surfaces":reference_surfaces,
             "dynamics":{"descriptor":section_refs["dynamics/descriptor.json"],"origin_keyframe":section_refs["dynamics/origin.json"]},
             "capabilities":capabilities,
             "domains":[{"id":domain_id,"topology":topology_id,"frame":"body_fixed","vertical":vertical,"tile_log2":2,"max_level":5}],
@@ -859,7 +859,7 @@ mod tests {
             "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1"],
             "identity":{"object_id":object_id.to_string(),"origin":{"kind":"fixture","name":"loader-test"}},
             "classification":{},"physical":{"gm_m3_s2":"1"},"figure":{"kind":"sphere","radius_m":"1"},
-            "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":[],
+            "frames":{"body_fixed":{"axes":"+Z is the positive rotation pole; +X is the prime meridian; right-handed","rotation":{"kind":"uniform","period_s":"86400","epoch":"0","orientation_q_at_epoch":["1","0","0","0"],"relative_to":"universe_inertial"}}},"reference_surfaces":[],
             "dynamics":{"descriptor":{"path":refs[1].0,"hash":refs[1].1},"origin_keyframe":{"path":refs[2].0,"hash":refs[2].1}},
             "capabilities":[],"domains":[],"codec":"zstd+shuffle2",
             "sections":{"registry":{"path":refs[0].0,"hash":refs[0].1}},"indexes":{}

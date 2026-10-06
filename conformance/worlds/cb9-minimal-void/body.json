@@ -25,7 +25,8 @@
   },
   "frames": {
     "body_fixed": {
-      "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed"
+      "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed",
+      "rotation": {"kind": "uniform", "period_s": "86400", "epoch": "0", "orientation_q_at_epoch": ["1", "0", "0", "0"], "relative_to": "universe_inertial"}
     }
   },
   "identity": {

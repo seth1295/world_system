@@ -9,9 +9,13 @@ use serde_json::Value;
 use crate::canon::blob::DType;
 use crate::ids::{Hash32, ObjectAddress, ObjectId, RegionKey, UniverseId};
 use crate::spatial::SpatialError;
-use crate::time::DecimalString;
+use crate::time::{DecimalString, UTime};
 
 const CAPABILITY_IDS: &str = include_str!("../../../schema/capability_ids.toml");
+const BODY_FIXED_FRAME: &str = "body_fixed";
+const BODY_FIXED_AXES: &str =
+    "+Z is the positive rotation pole; +X is the prime meridian; right-handed";
+const UNIVERSE_INERTIAL_FRAME: &str = "universe_inertial";
 
 /// Canonical field identifier, composed from a capability ID and local ID.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -354,9 +358,7 @@ impl BodyRoot {
         }
         self.validate_identity()?;
         validate_positive_decimal(&self.physical.gm_m3_s2)?;
-        if !self.frames.contains_key("body_fixed") {
-            return Err(ModelError::InvalidFrame);
-        }
+        self.validate_frames()?;
         self.validate_figure()?;
         self.validate_features()?;
         self.validate_domains()?;
@@ -404,10 +406,12 @@ impl BodyRoot {
             self.domains.iter().map(|item| item.id.as_str()).collect();
         let mut ids = std::collections::BTreeSet::new();
         for field in &registry.fields {
-            if !ids.insert(field.id)
-                || field.name.is_empty()
-                || !capabilities.contains(field.capability.as_str())
-            {
+            // FieldId is a registry identity invariant, independent of whether the field's
+            // semantics can be interpreted by this reader.
+            if !ids.insert(field.id) {
+                return Err(ModelError::InvalidField);
+            }
+            if field.name.is_empty() || !capabilities.contains(field.capability.as_str()) {
                 if field.compat == Compatibility::Critical {
                     return Err(ModelError::InvalidField);
                 }
@@ -479,11 +483,13 @@ impl BodyRoot {
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty())
             .ok_or(ModelError::InvalidFigureField)?;
-        let field = registry
-            .fields
-            .iter()
-            .find(|field| field.name == radius_name)
-            .ok_or(ModelError::InvalidFigureField)?;
+        let mut named_fields = registry.fields.iter().filter(|field| field.name == radius_name);
+        let field = named_fields.next().ok_or(ModelError::InvalidFigureField)?;
+        if named_fields.next().is_some() {
+            // The figure contract names the radius field by name. Refuse an ambiguous
+            // reference without imposing global uniqueness on unrelated display names.
+            return Err(ModelError::InvalidFigureField);
+        }
         let domain = self
             .domains
             .iter()
@@ -674,7 +680,7 @@ impl BodyRoot {
                 _ => false,
             };
             if domain.id.is_empty()
-                || domain.frame.is_empty()
+                || domain.frame != BODY_FIXED_FRAME
                 || !ids.insert(&domain.id)
                 || domain.tile_log2 > 30
                 || domain.max_level > 30
@@ -703,6 +709,9 @@ impl BodyRoot {
                 .ok_or(ModelError::InvalidSurface)?;
             let kind =
                 object.get("kind").and_then(Value::as_str).ok_or(ModelError::InvalidSurface)?;
+            if kind == "figure_surface" && self.figure.kind == "radial_profile_sphere" {
+                return Err(ModelError::InvalidSurface);
+            }
             if !matches!(kind, "sphere" | "offset_of" | "figure_surface")
                 || surfaces.insert(id, surface).is_some()
             {
@@ -741,6 +750,47 @@ impl BodyRoot {
                 current =
                     object.get("base").and_then(Value::as_str).ok_or(ModelError::InvalidSurface)?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_frames(&self) -> Result<(), ModelError> {
+        let frame = self.frames.get(BODY_FIXED_FRAME).ok_or(ModelError::InvalidFrame)?;
+        let object = frame.as_object().ok_or(ModelError::InvalidFrame)?;
+        if object.get("axes").and_then(Value::as_str) != Some(BODY_FIXED_AXES) {
+            return Err(ModelError::InvalidFrame);
+        }
+
+        let rotation =
+            object.get("rotation").and_then(Value::as_object).ok_or(ModelError::InvalidFrame)?;
+        if rotation.get("kind").and_then(Value::as_str) != Some("uniform")
+            || rotation.get("relative_to").and_then(Value::as_str) != Some(UNIVERSE_INERTIAL_FRAME)
+        {
+            return Err(ModelError::InvalidFrame);
+        }
+        let period =
+            rotation.get("period_s").and_then(Value::as_str).ok_or(ModelError::InvalidFrame)?;
+        validate_positive_decimal(period).map_err(|_| ModelError::InvalidFrame)?;
+
+        let epoch =
+            rotation.get("epoch").and_then(Value::as_str).ok_or(ModelError::InvalidFrame)?;
+        UTime::from_str(epoch).map_err(|_| ModelError::InvalidFrame)?;
+
+        let quaternion = rotation
+            .get("orientation_q_at_epoch")
+            .and_then(Value::as_array)
+            .filter(|values| values.len() == 4)
+            .ok_or(ModelError::InvalidFrame)?;
+        let mut norm_squared = 0.0_f64;
+        for component in quaternion {
+            let text = component.as_str().ok_or(ModelError::InvalidFrame)?;
+            let value = DecimalString::parse(text)
+                .and_then(|decimal| decimal.to_f64())
+                .map_err(|_| ModelError::InvalidFrame)?;
+            norm_squared += value * value;
+        }
+        if !norm_squared.is_finite() || (norm_squared - 1.0).abs() > 1.0e-12 {
+            return Err(ModelError::InvalidFrame);
         }
         Ok(())
     }
@@ -1147,7 +1197,9 @@ impl fmt::Display for ModelError {
             Self::InvalidDomain => {
                 formatter.write_str("domain declaration is malformed or unsupported")
             }
-            Self::InvalidFrame => formatter.write_str("body-fixed frame declaration is missing"),
+            Self::InvalidFrame => {
+                formatter.write_str("body-fixed frame declaration is missing or malformed")
+            }
             Self::InvalidSurface => formatter.write_str("reference surface declaration is invalid"),
             Self::SurfaceCycle => formatter.write_str("reference surface graph contains a cycle"),
             Self::InvalidFieldId => formatter.write_str("field ID is not canonical"),
@@ -1193,13 +1245,26 @@ mod tests {
         .to_string()
     }
 
+    fn valid_body_fixed_frame() -> serde_json::Value {
+        json!({
+            "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed",
+            "rotation": {
+                "kind":"uniform",
+                "period_s":"86400",
+                "epoch":"0",
+                "orientation_q_at_epoch":["1","0","0","0"],
+                "relative_to":"universe_inertial"
+            }
+        })
+    }
+
     fn minimal_root(name: &str) -> serde_json::Value {
         json!({
             "schema":"veyra.body/1","format_version":{"major":1,"minor":0},
             "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1"],
             "identity":{"object_id":fixture_object_id(name),"origin":{"kind":"fixture","name":name}},
             "classification":{},"physical":{"gm_m3_s2":"1"},"figure":{"kind":"sphere","radius_m":"1"},
-            "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":[],
+            "frames":{"body_fixed":valid_body_fixed_frame()},"reference_surfaces":[],
             "dynamics":{"descriptor":{"path":"dynamics/descriptor.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"},"origin_keyframe":{"path":"dynamics/origin.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"}},
             "capabilities":[],"domains":[],"codec":"zstd+shuffle2",
             "sections":{"registry":{"path":"registry/fields.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"}},"indexes":{}
@@ -1359,7 +1424,7 @@ mod tests {
             "classification":{},
             "physical":{"gm_m3_s2":"1"},
             "figure":{"kind":"sphere","radius_m":"1"},
-            "frames":{"body_fixed":{"axes":"right-handed"}},
+            "frames":{"body_fixed":valid_body_fixed_frame()},
             "reference_surfaces":[],
             "dynamics":{"descriptor":{"path":"dynamics/descriptor.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"},"origin_keyframe":{"path":"dynamics/origin.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"}},
             "capabilities":[],"domains":[],"codec":"zstd+shuffle2",
@@ -1370,13 +1435,179 @@ mod tests {
     }
 
     #[test]
+    fn registry_field_ids_are_unique_before_ancillary_compatibility_is_applied() {
+        let root = field_root("duplicate-field-id", true);
+        let critical = field_descriptor_json();
+        let mut ancillary = critical.clone();
+        ancillary["compat"] = json!("ancillary");
+        ancillary["semantic"] = json!("x-future.semantic/1");
+        ancillary["storage"]["dtype"] = json!("future_dtype");
+        ancillary["sampling"]["interp"] = json!("future_interpolation");
+
+        for (name, fields) in [
+            ("critical and critical", vec![critical.clone(), critical.clone()]),
+            ("critical and ancillary", vec![critical.clone(), ancillary.clone()]),
+            ("ancillary and ancillary", vec![ancillary.clone(), ancillary.clone()]),
+        ] {
+            assert_eq!(
+                root.validate_registry(&registry(fields)),
+                Err(super::ModelError::InvalidField),
+                "{name} duplicate"
+            );
+        }
+
+        let mut distinct_ancillary = ancillary.clone();
+        distinct_ancillary["id"] = json!("0x01010002");
+        let compatible_registry = registry(vec![ancillary, distinct_ancillary]);
+        assert!(root.validate_registry(&compatible_registry).is_ok());
+        assert_eq!(compatible_registry.fields.len(), 2);
+        assert_eq!(compatible_registry.fields[0].compat, super::Compatibility::Ancillary);
+        assert_eq!(compatible_registry.fields[1].compat, super::Compatibility::Ancillary);
+    }
+
+    #[test]
+    fn body_fixed_frame_requires_a_complete_v1_uniform_rotation() {
+        let valid: BodyRoot = serde_json::from_value(minimal_root("frame-valid")).unwrap();
+        assert!(valid.validate().is_ok());
+
+        let mut invalid_frames = Vec::new();
+        for frame in [json!(null), json!(7), json!("body_fixed")] {
+            let mut body = minimal_root("frame-invalid-shape");
+            body["frames"]["body_fixed"] = frame;
+            invalid_frames.push(body);
+        }
+        let mut body = minimal_root("frame-missing-axes");
+        body["frames"]["body_fixed"].as_object_mut().unwrap().remove("axes");
+        invalid_frames.push(body);
+        for axes in ["", "right-handed"] {
+            let mut body = minimal_root("frame-invalid-axes");
+            body["frames"]["body_fixed"]["axes"] = json!(axes);
+            invalid_frames.push(body);
+        }
+        let mut body = minimal_root("frame-missing-rotation");
+        body["frames"]["body_fixed"].as_object_mut().unwrap().remove("rotation");
+        invalid_frames.push(body);
+        for key in ["kind", "period_s", "epoch", "orientation_q_at_epoch", "relative_to"] {
+            let mut body = minimal_root("frame-missing-rotation-member");
+            body["frames"]["body_fixed"]["rotation"].as_object_mut().unwrap().remove(key);
+            invalid_frames.push(body);
+        }
+        for rotation in [json!(null), json!(1), json!("uniform")] {
+            let mut body = minimal_root("frame-invalid-rotation-shape");
+            body["frames"]["body_fixed"]["rotation"] = rotation;
+            invalid_frames.push(body);
+        }
+        let mut body = minimal_root("frame-unsupported-rotation");
+        body["frames"]["body_fixed"]["rotation"]["kind"] = json!("precessing");
+        invalid_frames.push(body);
+        for period in ["bad", "0", "-1"] {
+            let mut body = minimal_root("frame-invalid-period");
+            body["frames"]["body_fixed"]["rotation"]["period_s"] = json!(period);
+            invalid_frames.push(body);
+        }
+        for epoch in ["not-time", "00", "-0", "170141183460469231731687303715884105728"] {
+            let mut body = minimal_root("frame-invalid-epoch");
+            body["frames"]["body_fixed"]["rotation"]["epoch"] = json!(epoch);
+            invalid_frames.push(body);
+        }
+        let mut body = minimal_root("frame-short-quaternion");
+        body["frames"]["body_fixed"]["rotation"]["orientation_q_at_epoch"] = json!(["1", "0", "0"]);
+        invalid_frames.push(body);
+        let mut body = minimal_root("frame-malformed-quaternion");
+        body["frames"]["body_fixed"]["rotation"]["orientation_q_at_epoch"] =
+            json!(["1", "0", "not-a-number", "0"]);
+        invalid_frames.push(body);
+        let mut body = minimal_root("frame-nonnumeric-quaternion");
+        body["frames"]["body_fixed"]["rotation"]["orientation_q_at_epoch"] =
+            json!(["1", "0", 0, "0"]);
+        invalid_frames.push(body);
+        let mut body = minimal_root("frame-nonunit-quaternion");
+        body["frames"]["body_fixed"]["rotation"]["orientation_q_at_epoch"] =
+            json!(["2", "0", "0", "0"]);
+        invalid_frames.push(body);
+        for relative_to in ["body_fixed", "unknown_inertial"] {
+            let mut body = minimal_root("frame-invalid-relative-target");
+            body["frames"]["body_fixed"]["rotation"]["relative_to"] = json!(relative_to);
+            invalid_frames.push(body);
+        }
+
+        for body in invalid_frames {
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert_eq!(root.validate(), Err(super::ModelError::InvalidFrame));
+        }
+
+        let mut missing_frame = minimal_root("domain-missing-frame");
+        missing_frame["required_features"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("veyra.topo.dir_cube/1"));
+        missing_frame["domains"] = json!([{
+            "id":"surface","topology":"veyra.topo.dir_cube/1","frame":"missing_frame",
+            "vertical":{"kind":"none"},"tile_log2":2,"max_level":5
+        }]);
+        let root: BodyRoot = serde_json::from_value(missing_frame).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidDomain));
+    }
+
+    #[test]
+    fn radial_profile_figures_cannot_declare_solid_figure_surfaces() {
+        let mut radial = minimal_root("radial-figure-surface");
+        radial["figure"] = json!({"kind":"radial_profile_sphere","extent_m":"2"});
+        radial["reference_surfaces"] = json!([{
+            "id":"figure.boundary","kind":"figure_surface"
+        }]);
+        let root: BodyRoot = serde_json::from_value(radial).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidSurface));
+
+        let mut radial_photosphere = minimal_root("radial-photosphere");
+        radial_photosphere["figure"] = json!({"kind":"radial_profile_sphere","extent_m":"2"});
+        radial_photosphere["reference_surfaces"] = json!([{
+            "id":"photosphere","kind":"sphere","radius_m":"2"
+        }]);
+        let root: BodyRoot = serde_json::from_value(radial_photosphere).unwrap();
+        assert!(root.validate().is_ok());
+
+        for figure in [
+            json!({"kind":"sphere","radius_m":"2"}),
+            json!({"kind":"star_convex_radial","radius_field":"figure.radius_m"}),
+        ] {
+            let mut body = minimal_root("solid-figure-surface");
+            body["figure"] = figure;
+            body["reference_surfaces"] = json!([{
+                "id":"solid.boundary","kind":"figure_surface"
+            }]);
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert!(root.validate().is_ok());
+        }
+
+        let mut reserved = minimal_root("reserved-surface-kind");
+        reserved["reference_surfaces"] = json!([{
+            "id":"reserved","kind":"ellipsoid"
+        }]);
+        let root: BodyRoot = serde_json::from_value(reserved).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidSurface));
+    }
+
+    #[test]
+    fn figure_field_name_reference_must_resolve_unambiguously() {
+        let root: BodyRoot =
+            serde_json::from_value(star_convex_root("duplicate-radius-name", true)).unwrap();
+        let mut second = radius_field_descriptor();
+        second["id"] = json!("0x01000002");
+        assert_eq!(
+            root.validate_registry(&registry(vec![radius_field_descriptor(), second])),
+            Err(super::ModelError::InvalidFigureField)
+        );
+    }
+
+    #[test]
     fn refuses_unimplemented_required_features() {
         let mut root: BodyRoot = serde_json::from_value(json!({
             "schema":"veyra.body/1","format_version":{"major":1,"minor":0},
             "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1","veyra.refine.cdetail/1"],
             "identity":{"object_id":fixture_object_id("feature-test"),"origin":{"kind":"fixture","name":"feature-test"}},
             "classification":{},"physical":{"gm_m3_s2":"1"},"figure":{"kind":"sphere","radius_m":"1"},
-            "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":[],
+            "frames":{"body_fixed":valid_body_fixed_frame()},"reference_surfaces":[],
             "dynamics":{"descriptor":{"path":"dynamics/descriptor.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"},"origin_keyframe":{"path":"dynamics/origin.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"}},
             "capabilities":[],"domains":[],"codec":"zstd+shuffle2",
             "sections":{"registry":{"path":"registry/fields.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"}},"indexes":{}
@@ -1395,7 +1626,7 @@ mod tests {
             "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1","veyra.topo.radial_1d/1"],
             "identity":{"object_id":fixture_object_id("radial-contract"),"origin":{"kind":"fixture","name":"radial-contract"}},
             "classification":{},"physical":{"gm_m3_s2":"1"},"figure":{"kind":"radial_profile_sphere","extent_m":"2"},
-            "frames":{"body_fixed":{"axes":"right-handed"}},
+            "frames":{"body_fixed":valid_body_fixed_frame()},
             "reference_surfaces":[{"id":"photosphere","kind":"sphere","radius_m":"2"}],
             "dynamics":{"descriptor":{"path":"dynamics/descriptor.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"},"origin_keyframe":{"path":"dynamics/origin.json","hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"}},
             "capabilities":[],"domains":[{"id":"interior","topology":"veyra.topo.radial_1d/1","frame":"body_fixed","vertical":{"kind":"radius","extent_m":"2"},"tile_log2":3,"max_level":5}],

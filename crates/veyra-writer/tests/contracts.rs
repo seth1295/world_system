@@ -38,7 +38,7 @@ fn base_body(writer: &mut ArtifactWriter, fixture: &str, registry: Value) -> Val
         "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1"],
         "identity":{"object_id":object_id.to_string(),"origin":{"kind":"fixture","name":fixture}},
         "classification":{},"physical":{"gm_m3_s2":"1"},"figure":{"kind":"sphere","radius_m":"1"},
-        "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":[],
+        "frames":{"body_fixed":{"axes":"+Z is the positive rotation pole; +X is the prime meridian; right-handed","rotation":{"kind":"uniform","period_s":"86400","epoch":"0","orientation_q_at_epoch":["1","0","0","0"],"relative_to":"universe_inertial"}}},"reference_surfaces":[],
         "dynamics":{
             "descriptor":{"path":"dynamics/descriptor.json","hash":descriptor_hash.to_string()},
             "origin_keyframe":{"path":"dynamics/origin.json","hash":origin_hash.to_string()}

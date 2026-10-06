@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::canon::blob::{BlobKind, CanonicalBlob, DType};
+use crate::canon::blob::{BlobKind, CanonicalBlob, DType, MAX_CANONICAL_BLOB_BYTES};
 use crate::ids::Hash32;
 use crate::spatial::{CellKey, DirCube, Radial1d, TileKey, Topology};
 
@@ -73,6 +73,9 @@ impl IndexBlob {
             .checked_mul(48)
             .and_then(|length| length.checked_add(12))
             .ok_or(IndexError::InvalidIndex)?;
+        if payload_len.checked_add(16).is_none_or(|size| size > MAX_CANONICAL_BLOB_BYTES) {
+            return Err(IndexError::SizeLimitExceeded);
+        }
         let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(&self.field_id.to_le_bytes());
         payload.extend_from_slice(&entry_count.to_le_bytes());
@@ -189,11 +192,16 @@ impl IndexBlob {
 pub enum IndexError {
     /// Header, padding, topology tag, entry flags, order, or length is invalid.
     InvalidIndex,
+    /// Canonical index exceeds the shared V1 decompressed content limit.
+    SizeLimitExceeded,
 }
 
 impl fmt::Display for IndexError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid canonical index blob")
+        formatter.write_str(match self {
+            Self::InvalidIndex => "invalid canonical index blob",
+            Self::SizeLimitExceeded => "canonical index exceeds the V1 content size limit",
+        })
     }
 }
 

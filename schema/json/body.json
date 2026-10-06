@@ -43,13 +43,14 @@
       }
     },
     "codec": {"const": "zstd+shuffle2"},
-    "sections": {"type": "object", "required": ["registry"], "properties": {"registry": {"$ref": "#/$defs/sectionRef"}, "vocab": {"type": "array", "items": {"$ref": "#/$defs/sectionRef"}}, "features": {"type": "array", "items": {"$ref": "#/$defs/sectionRef"}}, "provenance": {"type": "object"}}, "additionalProperties": true},
+    "sections": {"type": "object", "required": ["registry"], "properties": {"registry": {"$ref": "#/$defs/sectionRef"}, "vocab": {"type": "array", "items": {"$ref": "#/$defs/namedSectionRef"}}, "features": {"type": "array", "items": {"$ref": "#/$defs/namedSectionRef"}}, "provenance": {"type": "object"}}, "additionalProperties": true},
     "indexes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}},
     "extensions_ledger": {"oneOf": [{"$ref": "#/$defs/sectionRef"}, {"type": "null"}]}
   },
   "$defs": {
     "version": {"type": "object", "required": ["major", "minor"], "properties": {"major": {"type": "integer", "minimum": 1}, "minor": {"type": "integer", "minimum": 0}}, "additionalProperties": false},
-    "sectionRef": {"type": "object", "required": ["path", "hash"], "properties": {"path": {"type": "string", "minLength": 1}, "hash": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}}, "additionalProperties": false}
+    "sectionRef": {"type": "object", "required": ["path", "hash"], "properties": {"path": {"type": "string", "minLength": 1}, "hash": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}}, "additionalProperties": false},
+    "namedSectionRef": {"type": "object", "required": ["name", "path", "hash"], "properties": {"name": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1}, "hash": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}}, "additionalProperties": false}
   },
   "additionalProperties": true
 }

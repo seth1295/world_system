@@ -5,15 +5,18 @@ use core::fmt;
 use serde_json::Value;
 
 use crate::body::{
-    BodyRoot, FieldId, FieldRegistry, ModelError, SectionRef, field_dtype, parse_hash,
-    temporal_slice_count,
+    BodyRoot, FieldDescriptor, FieldId, FieldRegistry, ModelError, NamedSectionRef, SectionRef,
+    field_dtype, parse_hash, raw_storage_value_fits, temporal_slice_count,
 };
-use crate::canon::blob::{BlobKind, CanonicalBlob, decode_zstd_shuffle2};
+use crate::canon::blob::{
+    BlobError, BlobKind, CanonicalBlob, MAX_CANONICAL_BLOB_BYTES, decode_zstd_shuffle2_bounded,
+};
 use crate::canon::hash;
 use crate::canon::index::IndexBlob;
 use crate::canon::jcs;
 use crate::canon::ledger;
 use crate::ids::{Hash32, ObjectId};
+use crate::path::validate_artifact_path;
 
 /// A specific section or content item the caller must supply.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -79,7 +82,9 @@ pub struct BodyLoader {
     section_bytes: std::collections::BTreeMap<String, Vec<u8>>,
     indexes: std::collections::BTreeMap<FieldId, IndexBlob>,
     blobs: std::collections::BTreeMap<Hash32, Vec<u8>>,
+    blob_limits: std::collections::BTreeMap<Hash32, usize>,
     ledgers: std::collections::BTreeMap<String, Vec<u8>>,
+    registry: Option<FieldRegistry>,
 }
 
 impl BodyLoader {
@@ -96,7 +101,7 @@ impl BodyLoader {
 
         add_section_need(&mut pending, &root.sections.registry)?;
         for section in root.sections.vocab.iter().chain(root.sections.features.iter()) {
-            add_section_need(&mut pending, section)?;
+            add_named_section_need(&mut pending, section)?;
         }
         if let Some(provenance) = &root.sections.provenance {
             add_section_need(&mut pending, &provenance.dag)?;
@@ -108,7 +113,7 @@ impl BodyLoader {
         add_section_need(&mut pending, &root.dynamics.descriptor)?;
         add_section_need(&mut pending, &root.dynamics.origin_keyframe)?;
         if let Some(extension_ledger) = &root.extensions_ledger {
-            validate_relative_path(&extension_ledger.path)?;
+            validate_artifact_path(&extension_ledger.path).map_err(|_| LoaderError::InvalidPath)?;
             pending.insert(Need::Ledger {
                 name: "extensions".to_owned(),
                 path: extension_ledger.path.clone(),
@@ -134,7 +139,9 @@ impl BodyLoader {
             section_bytes: std::collections::BTreeMap::new(),
             indexes: std::collections::BTreeMap::new(),
             blobs: std::collections::BTreeMap::new(),
+            blob_limits: std::collections::BTreeMap::new(),
             ledgers: std::collections::BTreeMap::new(),
+            registry: None,
         };
         let needs = loader.needs();
         Ok((loader, needs))
@@ -153,12 +160,24 @@ impl BodyLoader {
                 }
                 let value: Value =
                     serde_json::from_slice(&bytes).map_err(|_| LoaderError::InvalidSection)?;
+                let registry = if path == &self.root.sections.registry.path {
+                    let registry: FieldRegistry = serde_json::from_value(value.clone())
+                        .map_err(|_| LoaderError::InvalidSection)?;
+                    self.root.validate_registry(&registry).map_err(LoaderError::Model)?;
+                    Some(registry)
+                } else {
+                    None
+                };
                 self.sections.insert(path.clone(), value);
                 self.section_bytes.insert(path.clone(), bytes);
+                if let Some(registry) = registry {
+                    self.registry = Some(registry);
+                    self.refresh_blob_needs();
+                }
             }
             Need::Index { field_id, hash: expected, .. } => {
-                let canonical =
-                    decode_zstd_shuffle2(&bytes).map_err(|_| LoaderError::InvalidCodec)?;
+                let canonical = decode_zstd_shuffle2_bounded(&bytes, MAX_CANONICAL_BLOB_BYTES)
+                    .map_err(map_blob_decode_error)?;
                 if hash::hash(&canonical) != *expected {
                     return Err(LoaderError::HashMismatch(*expected));
                 }
@@ -166,16 +185,14 @@ impl BodyLoader {
                 if index.field_id != field_id.0 {
                     return Err(LoaderError::IndexFieldMismatch);
                 }
-                for entry in &index.entries {
-                    if let crate::canon::index::IndexValue::Blob(blob_hash) = entry.value {
-                        self.pending.insert(Need::Blob { hash: blob_hash });
-                    }
-                }
                 self.indexes.insert(*field_id, index);
+                self.refresh_blob_needs();
             }
             Need::Blob { hash: expected } => {
+                let limit =
+                    self.blob_limits.get(expected).copied().unwrap_or(MAX_CANONICAL_BLOB_BYTES);
                 let canonical =
-                    decode_zstd_shuffle2(&bytes).map_err(|_| LoaderError::InvalidCodec)?;
+                    decode_zstd_shuffle2_bounded(&bytes, limit).map_err(map_blob_decode_error)?;
                 if hash::hash(&canonical) != *expected {
                     return Err(LoaderError::HashMismatch(*expected));
                 }
@@ -192,6 +209,54 @@ impl BodyLoader {
         }
         self.pending.remove(need);
         Ok(self.needs())
+    }
+
+    fn refresh_blob_needs(&mut self) {
+        self.blob_limits.clear();
+        let indexes: Vec<IndexBlob> = self.indexes.values().cloned().collect();
+        for index in indexes {
+            for entry in &index.entries {
+                let crate::canon::index::IndexValue::Blob(blob_hash) = entry.value else {
+                    continue;
+                };
+                let limit = self.blob_limit(&index, entry.level);
+                self.blob_limits
+                    .entry(blob_hash)
+                    .and_modify(|existing| *existing = (*existing).max(limit))
+                    .or_insert(limit);
+                if !self.blobs.contains_key(&blob_hash) {
+                    self.pending.insert(Need::Blob { hash: blob_hash });
+                }
+            }
+        }
+    }
+
+    fn blob_limit(&self, index: &IndexBlob, level: u8) -> usize {
+        let Some(field) = self
+            .registry
+            .as_ref()
+            .and_then(|registry| registry.fields.iter().find(|field| field.id.0 == index.field_id))
+        else {
+            return MAX_CANONICAL_BLOB_BYTES;
+        };
+        let Some(domain) = self.root.domains.iter().find(|domain| domain.id == field.domain) else {
+            return MAX_CANONICAL_BLOB_BYTES;
+        };
+        let edge = 1_usize << usize::from(level.min(index.tile_log2));
+        let (dim_i, dim_j) = match domain.topology.as_str() {
+            "veyra.topo.dir_cube/1" => (edge, edge),
+            "veyra.topo.radial_1d/1" => (edge, 1),
+            _ => return MAX_CANONICAL_BLOB_BYTES,
+        };
+        let width = field_dtype(field).and_then(|dtype| dtype.width()).unwrap_or(4);
+        let slices = temporal_slice_count(field).map(usize::from).unwrap_or(usize::from(u16::MAX));
+        dim_i
+            .checked_mul(dim_j)
+            .and_then(|size| size.checked_mul(slices))
+            .and_then(|size| size.checked_mul(width))
+            .and_then(|size| size.checked_add(16))
+            .map(|size| size.min(MAX_CANONICAL_BLOB_BYTES))
+            .unwrap_or(MAX_CANONICAL_BLOB_BYTES)
     }
 
     /// Returns the ordered set of items that remain unavailable.
@@ -211,6 +276,23 @@ impl BodyLoader {
         let registry: FieldRegistry =
             serde_json::from_slice(registry_bytes).map_err(|_| LoaderError::InvalidSection)?;
         self.root.validate_registry(&registry).map_err(LoaderError::Model)?;
+        if self.root.figure.kind == "star_convex_radial" {
+            let radius_name = self
+                .root
+                .figure
+                .parameters
+                .get("radius_field")
+                .and_then(Value::as_str)
+                .ok_or(LoaderError::Model(ModelError::InvalidFigureField))?;
+            let radius_field = registry
+                .fields
+                .iter()
+                .find(|field| field.name == radius_name)
+                .ok_or(LoaderError::Model(ModelError::InvalidFigureField))?;
+            if self.indexes.get(&radius_field.id).is_none_or(|index| index.entries.is_empty()) {
+                return Err(LoaderError::Model(ModelError::InvalidFigureField));
+            }
+        }
         for (field_id, index) in &self.indexes {
             let field = registry
                 .fields
@@ -239,33 +321,37 @@ impl BodyLoader {
                 return Err(LoaderError::IndexFieldMismatch);
             }
             for entry in &index.entries {
-                if let crate::canon::index::IndexValue::Blob(expected) = entry.value {
-                    let canonical = self
-                        .blobs
-                        .get(&expected)
-                        .ok_or_else(|| LoaderError::Missing(vec![Need::Blob { hash: expected }]))?;
-                    let blob =
-                        CanonicalBlob::decode(canonical).map_err(|_| LoaderError::InvalidBlob)?;
-                    if blob.kind != BlobKind::RasterTile {
-                        return Err(LoaderError::RasterKindMismatch);
+                match entry.value {
+                    crate::canon::index::IndexValue::Blob(expected) => {
+                        let canonical = self.blobs.get(&expected).ok_or_else(|| {
+                            LoaderError::Missing(vec![Need::Blob { hash: expected }])
+                        })?;
+                        let blob = CanonicalBlob::decode(canonical)
+                            .map_err(|_| LoaderError::InvalidBlob)?;
+                        if blob.kind != BlobKind::RasterTile {
+                            return Err(LoaderError::RasterKindMismatch);
+                        }
+                        if field_dtype(field).is_some_and(|dtype| dtype != blob.dtype) {
+                            return Err(LoaderError::RasterDTypeMismatch);
+                        }
+                        let edge = 1_u64 << entry.level.min(index.tile_log2);
+                        let expected_dimensions = match expected_topology {
+                            crate::canon::index::TopologyTag::DirCube => (edge, edge),
+                            crate::canon::index::TopologyTag::Radial1d => (edge, 1),
+                        };
+                        if expected_dimensions.0 > u64::from(u16::MAX)
+                            || expected_dimensions.1 > u64::from(u16::MAX)
+                            || u64::from(blob.dim_i) != expected_dimensions.0
+                            || u64::from(blob.dim_j) != expected_dimensions.1
+                        {
+                            return Err(LoaderError::RasterDimensionsMismatch);
+                        }
+                        if temporal_slice_count(field).is_some_and(|slices| slices != blob.slices) {
+                            return Err(LoaderError::RasterSlicesMismatch);
+                        }
                     }
-                    if field_dtype(field).is_some_and(|dtype| dtype != blob.dtype) {
-                        return Err(LoaderError::RasterDTypeMismatch);
-                    }
-                    let edge = 1_u64 << entry.level.min(index.tile_log2);
-                    let expected_dimensions = match expected_topology {
-                        crate::canon::index::TopologyTag::DirCube => (edge, edge),
-                        crate::canon::index::TopologyTag::Radial1d => (edge, 1),
-                    };
-                    if expected_dimensions.0 > u64::from(u16::MAX)
-                        || expected_dimensions.1 > u64::from(u16::MAX)
-                        || u64::from(blob.dim_i) != expected_dimensions.0
-                        || u64::from(blob.dim_j) != expected_dimensions.1
-                    {
-                        return Err(LoaderError::RasterDimensionsMismatch);
-                    }
-                    if temporal_slice_count(field).is_some_and(|slices| slices != blob.slices) {
-                        return Err(LoaderError::RasterSlicesMismatch);
+                    crate::canon::index::IndexValue::Const(value) => {
+                        validate_const_value(field, value)?;
                     }
                 }
             }
@@ -322,6 +408,16 @@ impl Body {
         &self.registry
     }
 
+    /// Returns named vocabulary references from the body root.
+    pub fn vocabularies(&self) -> &[NamedSectionRef] {
+        &self.root.sections.vocab
+    }
+
+    /// Returns named feature-table references from the body root.
+    pub fn feature_tables(&self) -> &[NamedSectionRef] {
+        &self.root.sections.features
+    }
+
     /// Returns field descriptors, including ancillary descriptors preserved without interpretation.
     pub fn fields(&self) -> &[crate::body::FieldDescriptor] {
         &self.registry.fields
@@ -352,7 +448,19 @@ fn add_section_need(
     pending: &mut std::collections::BTreeSet<Need>,
     section: &SectionRef,
 ) -> Result<(), LoaderError> {
-    validate_relative_path(&section.path)?;
+    validate_artifact_path(&section.path).map_err(|_| LoaderError::InvalidPath)?;
+    pending.insert(Need::Section {
+        path: section.path.clone(),
+        hash: parse_hash(&section.hash).map_err(LoaderError::Model)?,
+    });
+    Ok(())
+}
+
+fn add_named_section_need(
+    pending: &mut std::collections::BTreeSet<Need>,
+    section: &NamedSectionRef,
+) -> Result<(), LoaderError> {
+    validate_artifact_path(&section.path).map_err(|_| LoaderError::InvalidPath)?;
     pending.insert(Need::Section {
         path: section.path.clone(),
         hash: parse_hash(&section.hash).map_err(LoaderError::Model)?,
@@ -370,7 +478,7 @@ fn collect_extension_section_needs(
                 object.get("path").and_then(Value::as_str),
                 object.get("hash").and_then(Value::as_str),
             ) {
-                validate_relative_path(path)?;
+                validate_artifact_path(path).map_err(|_| LoaderError::InvalidPath)?;
                 pending.insert(Need::Section {
                     path: path.to_owned(),
                     hash: parse_hash(expected).map_err(LoaderError::Model)?,
@@ -390,13 +498,20 @@ fn collect_extension_section_needs(
     Ok(())
 }
 
-fn validate_relative_path(path: &str) -> Result<(), LoaderError> {
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.contains('\\')
-        || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err(LoaderError::InvalidPath);
+fn map_blob_decode_error(error: BlobError) -> LoaderError {
+    match error {
+        BlobError::OutputLimitExceeded => LoaderError::DecompressedContentTooLarge,
+        BlobError::AllocationFailed => LoaderError::DecompressionAllocationFailed,
+        _ => LoaderError::InvalidCodec,
+    }
+}
+
+fn validate_const_value(field: &FieldDescriptor, value: i64) -> Result<(), LoaderError> {
+    if field.compat == crate::body::Compatibility::Ancillary && field_dtype(field).is_none() {
+        return Ok(());
+    }
+    if field_dtype(field).is_some_and(|dtype| !raw_storage_value_fits(dtype, value)) {
+        return Err(LoaderError::ConstValueOutOfRange);
     }
     Ok(())
 }
@@ -418,6 +533,10 @@ pub enum LoaderError {
     HashMismatch(Hash32),
     /// Codec bytes are invalid or cannot be decoded.
     InvalidCodec,
+    /// Decompressed codec output exceeds the V1 reader resource limit.
+    DecompressedContentTooLarge,
+    /// Bounded decoder allocation failed.
+    DecompressionAllocationFailed,
     /// Canonical blob header is invalid.
     InvalidBlob,
     /// Index bytes or metadata are invalid.
@@ -432,6 +551,8 @@ pub enum LoaderError {
     RasterDimensionsMismatch,
     /// Raster slice count does not match the field temporal contract.
     RasterSlicesMismatch,
+    /// A constant raw value cannot be represented by its field storage dtype.
+    ConstValueOutOfRange,
     /// A ledger chain is invalid.
     InvalidLedger,
     /// Canonical JSON validation failed.
@@ -454,6 +575,12 @@ impl fmt::Display for LoaderError {
             }
             Self::HashMismatch(hash) => write!(formatter, "content hash mismatch for {hash}"),
             Self::InvalidCodec => formatter.write_str("zstd-shuffle2 data is invalid"),
+            Self::DecompressedContentTooLarge => {
+                formatter.write_str("decompressed content exceeds the V1 size limit")
+            }
+            Self::DecompressionAllocationFailed => {
+                formatter.write_str("could not allocate bounded decompressed content")
+            }
             Self::InvalidBlob => formatter.write_str("canonical blob is invalid"),
             Self::InvalidIndex => formatter.write_str("canonical index is invalid"),
             Self::IndexFieldMismatch => {
@@ -470,6 +597,9 @@ impl fmt::Display for LoaderError {
             }
             Self::RasterSlicesMismatch => {
                 formatter.write_str("raster tile slices do not match its temporal descriptor")
+            }
+            Self::ConstValueOutOfRange => {
+                formatter.write_str("constant value is outside its field storage dtype")
             }
             Self::InvalidLedger => formatter.write_str("hash-chained ledger is invalid"),
             Self::Jcs(error) => error.fmt(formatter),
@@ -508,21 +638,98 @@ mod tests {
         supplied_blob: &[u8],
         topology: TopologyTag,
     ) -> Result<super::Body, LoaderError> {
-        let field_id = 0x0101_0001;
-        let (cell, topology_id, domain_id, vertical, interpolation) = match topology {
+        verify_index_value_on_topology(
+            IndexValue::Blob(hash::hash(indexed_blob)),
+            Some(supplied_blob),
+            topology,
+            None,
+            1,
+        )
+    }
+
+    fn verify_blob_slice_contract(
+        indexed_blob: &[u8],
+        expected_slices: u16,
+    ) -> Result<super::Body, LoaderError> {
+        verify_index_value_on_topology(
+            IndexValue::Blob(hash::hash(indexed_blob)),
+            Some(indexed_blob),
+            TopologyTag::DirCube,
+            Some("u8"),
+            expected_slices,
+        )
+    }
+
+    fn verify_const_entry(dtype: &str, raw: i64) -> Result<super::Body, LoaderError> {
+        verify_index_value_on_topology(
+            IndexValue::Const(raw),
+            None,
+            TopologyTag::DirCube,
+            Some(dtype),
+            1,
+        )
+    }
+
+    fn verify_index_value_on_topology(
+        index_value: IndexValue,
+        supplied_blob: Option<&[u8]>,
+        topology: TopologyTag,
+        storage_dtype_override: Option<&str>,
+        expected_slices: u16,
+    ) -> Result<super::Body, LoaderError> {
+        let (
+            field_id,
+            field_text,
+            field_name,
+            field_capability,
+            field_semantic,
+            dtype,
+            scale,
+            cell,
+            topology_id,
+            domain_id,
+            vertical,
+            interpolation,
+            figure,
+            reference_surfaces,
+            capabilities,
+        ) = match topology {
             TopologyTag::DirCube => (
+                0x0101_0001,
+                "0x01010001",
+                "topography.height_m",
+                "veyra.cap.topography/1",
+                "scalar.height",
+                "i16",
+                "0.5",
                 DirCube::key(2, 6, 3, 3).unwrap(),
                 "veyra.topo.dir_cube/1",
                 "surface",
                 json!({"kind":"none"}),
                 "bilinear",
+                json!({"kind":"sphere","radius_m":"1"}),
+                json!([{"id":"datum.mean","kind":"sphere","radius_m":"1"}]),
+                json!([
+                    {"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}},
+                    {"id":"veyra.cap.topography/1","params":{"reference_surface":"datum.mean","domain":"surface"}}
+                ]),
             ),
             TopologyTag::Radial1d => (
+                0x0130_0001,
+                "0x01300001",
+                "stellar.density",
+                "veyra.cap.stellar_structure/1",
+                "scalar.density",
+                "u32",
+                "0.01",
                 Radial1d::key(3, 6).unwrap(),
                 "veyra.topo.radial_1d/1",
                 "interior",
                 json!({"kind":"radius","extent_m":"2"}),
                 "linear",
+                json!({"kind":"radial_profile_sphere","extent_m":"2"}),
+                json!([{"id":"photosphere","kind":"sphere","radius_m":"2"}]),
+                json!([{"id":"veyra.cap.stellar_structure/1","params":{"domain":"interior"}}]),
             ),
         };
         let tile = match topology {
@@ -533,22 +740,28 @@ mod tests {
             field_id,
             topology,
             tile_log2: 2,
-            entries: vec![IndexEntry {
-                level: 3,
-                key: tile.address.0,
-                value: IndexValue::Blob(hash::hash(indexed_blob)),
-            }],
+            entries: vec![IndexEntry { level: 3, key: tile.address.0, value: index_value }],
         }
         .encode()
         .unwrap();
         let index_hash = hash::hash(&index);
+        let storage_dtype = storage_dtype_override.unwrap_or(dtype);
+        let temporal = if expected_slices == 1 {
+            json!({"kind":"static"})
+        } else {
+            json!({
+                "kind":"periodic_slices","count":expected_slices,
+                "period_ref":"dynamics.period","origin_ref":"dynamics.epoch"
+            })
+        };
+        let persistence = if expected_slices == 1 { "invariant" } else { "periodic_mean" };
         let registry = json!({
             "schema":"veyra.field_registry/1",
             "fields":[{
-                "id":"0x01010001","name":"topography.height_m","capability":"veyra.cap.topography/1",
-                "domain":domain_id,"semantic":"scalar.height","persistence":"invariant",
-                "storage":{"dtype":"i16","scale":"0.5","offset":"0"},"native_level":3,
-                "temporal":{"kind":"static"},
+                "id":field_text,"name":field_name,"capability":field_capability,
+                "domain":domain_id,"semantic":field_semantic,"persistence":persistence,
+                "storage":{"dtype":storage_dtype,"scale":scale,"offset":"0"},"native_level":3,
+                "temporal":temporal,
                 "sampling":{"interp":interpolation,"below_native":"pyramid","above_native":"refine"},
                 "downsample":"mean","compat":"critical"
             }]
@@ -579,13 +792,13 @@ mod tests {
             "schema":"veyra.body/1","format_version":{"major":1,"minor":0},
             "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1",topology_id],
             "identity":{"object_id":object_id.to_string(),"origin":{"kind":"fixture","name":"raster-contract"}},
-            "classification":{},"physical":{"gm_m3_s2":"1"},"figure":{"kind":"sphere","radius_m":"1"},
-            "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":[],
+            "classification":{},"physical":{"gm_m3_s2":"1"},"figure":figure,
+            "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":reference_surfaces,
             "dynamics":{"descriptor":section_refs["dynamics/descriptor.json"],"origin_keyframe":section_refs["dynamics/origin.json"]},
-            "capabilities":[{"id":"veyra.cap.topography/1","params":{}}],
+            "capabilities":capabilities,
             "domains":[{"id":domain_id,"topology":topology_id,"frame":"body_fixed","vertical":vertical,"tile_log2":2,"max_level":5}],
             "codec":"zstd+shuffle2","sections":{"registry":section_refs["registry/fields.json"]},
-            "indexes":{"0x01010001":index_hash.to_string()}
+            "indexes":{field_text:index_hash.to_string()}
         });
         let (mut loader, needs) = BodyLoader::begin(&serde_json::to_vec(&body).unwrap())?;
         let encoded_index = compressed(&index);
@@ -604,6 +817,7 @@ mod tests {
         }
         for need in loader.needs() {
             if matches!(need, Need::Blob { .. }) {
+                let supplied_blob = supplied_blob.ok_or(LoaderError::UnexpectedNeed)?;
                 loader.provide(&need, compressed(supplied_blob))?;
             }
         }
@@ -760,19 +974,19 @@ mod tests {
             LoaderError::RasterDimensionsMismatch
         );
 
-        let wrong_slices = raster_blob(BlobKind::RasterTile, DType::I16, 4, 4, 2);
+        let wrong_slices = raster_blob(BlobKind::RasterTile, DType::U8, 4, 4, 1);
         assert_eq!(
-            verify_raster_blob(&wrong_slices, &wrong_slices).unwrap_err(),
+            verify_blob_slice_contract(&wrong_slices, 2).unwrap_err(),
             LoaderError::RasterSlicesMismatch
         );
     }
 
     #[test]
     fn radial_index_raster_tiles_use_the_declared_one_dimensional_shape() {
-        let correct = raster_blob(BlobKind::RasterTile, DType::I16, 4, 1, 1);
+        let correct = raster_blob(BlobKind::RasterTile, DType::U32, 4, 1, 1);
         assert!(verify_raster_blob_on_topology(&correct, &correct, TopologyTag::Radial1d).is_ok());
 
-        let wrong_shape = raster_blob(BlobKind::RasterTile, DType::I16, 4, 4, 1);
+        let wrong_shape = raster_blob(BlobKind::RasterTile, DType::U32, 2, 2, 1);
         assert_eq!(
             verify_raster_blob_on_topology(&wrong_shape, &wrong_shape, TopologyTag::Radial1d)
                 .unwrap_err(),
@@ -787,6 +1001,48 @@ mod tests {
         assert_eq!(
             verify_raster_blob(&indexed, &supplied).unwrap_err(),
             LoaderError::HashMismatch(hash::hash(&indexed))
+        );
+    }
+
+    #[test]
+    fn body_loader_reports_the_bounded_decompression_limit_separately() {
+        let compressed_bomb_payload = vec![0x5a; 512 * 1024];
+        assert_eq!(
+            verify_raster_blob(&compressed_bomb_payload, &compressed_bomb_payload).unwrap_err(),
+            LoaderError::DecompressedContentTooLarge
+        );
+    }
+
+    #[test]
+    fn loader_checks_const_entries_against_every_v1_storage_dtype() {
+        let cases = [
+            ("u8", 0_i64, 255_i64),
+            ("i8", i64::from(i8::MIN), i64::from(i8::MAX)),
+            ("u16", 0, i64::from(u16::MAX)),
+            ("i16", i64::from(i16::MIN), i64::from(i16::MAX)),
+            ("u32", 0, i64::from(u32::MAX)),
+            ("i32", i64::from(i32::MIN), i64::from(i32::MAX)),
+        ];
+        for (dtype, minimum, maximum) in cases {
+            assert!(verify_const_entry(dtype, minimum).is_ok(), "{dtype} minimum");
+            assert!(verify_const_entry(dtype, maximum).is_ok(), "{dtype} maximum");
+            assert_eq!(
+                verify_const_entry(dtype, minimum - 1).unwrap_err(),
+                LoaderError::ConstValueOutOfRange,
+                "{dtype} below range"
+            );
+            assert_eq!(
+                verify_const_entry(dtype, maximum + 1).unwrap_err(),
+                LoaderError::ConstValueOutOfRange,
+                "{dtype} above range"
+            );
+        }
+        assert!(verify_const_entry("f32", 0).is_ok());
+        assert!(verify_const_entry("f32", i64::from(u32::MAX)).is_ok());
+        assert_eq!(verify_const_entry("f32", -1).unwrap_err(), LoaderError::ConstValueOutOfRange);
+        assert_eq!(
+            verify_const_entry("f32", i64::from(u32::MAX) + 1).unwrap_err(),
+            LoaderError::ConstValueOutOfRange
         );
     }
 

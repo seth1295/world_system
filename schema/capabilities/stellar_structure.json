@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "id": "veyra.cap.stellar_structure/1", "version": 1, "compat": "critical", "requires": [],
-  "params_schema": {"type": "object", "properties": {"domain": {"type": "string"}}, "additionalProperties": true},
+  "params_schema": {"type": "object", "properties": {"domain": {"type": "string", "x-veyra-reference": "domain"}}, "additionalProperties": true},
   "field_templates": [
     {"local_id": 1, "name": "stellar.density", "semantic": "scalar.density", "storage": {"dtype": "u32", "scale": "0.01", "offset": "0"}, "unit": "kg/m3", "domain_kind": "radial", "temporal": {"kind": "static"}, "sampling": {"interp": "linear"}, "downsample": "mean"},
     {"local_id": 2, "name": "stellar.temperature", "semantic": "scalar.temperature", "storage": {"dtype": "u32", "scale": "0.01", "offset": "0"}, "unit": "K", "domain_kind": "radial", "temporal": {"kind": "static"}, "sampling": {"interp": "linear"}, "downsample": "mean"},

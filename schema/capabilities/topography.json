@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "id": "veyra.cap.topography/1", "version": 1, "compat": "critical", "requires": ["veyra.cap.solid_surface/1"],
-  "params_schema": {"type": "object", "required": ["reference_surface", "domain"], "properties": {"reference_surface": {"type": "string"}, "domain": {"type": "string"}}, "additionalProperties": true},
+  "params_schema": {"type": "object", "required": ["reference_surface", "domain"], "properties": {"reference_surface": {"type": "string", "x-veyra-reference": "reference_surface"}, "domain": {"type": "string", "x-veyra-reference": "domain"}}, "additionalProperties": true},
   "field_templates": [
     {"local_id": 1, "name": "topography.height_m", "semantic": "scalar.height", "storage": {"dtype": "i16", "scale": "0.5", "offset": "0"}, "unit": "m", "domain_kind": "surface", "temporal": {"kind": "static"}, "sampling": {"interp": "bilinear"}, "downsample": "mean"},
     {"local_id": 2, "name": "topography.roughness", "semantic": "scalar.roughness", "storage": {"dtype": "u16", "scale": "0.01", "offset": "0"}, "unit": "m", "domain_kind": "surface", "temporal": {"kind": "static"}, "sampling": {"interp": "bilinear"}, "downsample": "mean"}

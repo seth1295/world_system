@@ -10,10 +10,16 @@ use serde_json::Value;
 
 /// Canonicalizes JSON after rejecting floating-point values and unsafe integers.
 pub fn canonicalize_json(input: &[u8]) -> Result<Vec<u8>, JcsError> {
+    let value = parse_unique_json(input)?;
+    canonicalize_value(&value)
+}
+
+/// Parses JSON while rejecting duplicate object names without applying JCS number restrictions.
+pub fn parse_unique_json(input: &[u8]) -> Result<Value, JcsError> {
     let mut deserializer = serde_json::Deserializer::from_slice(input);
     let value = UniqueValue::deserialize(&mut deserializer).map_err(|_| JcsError::InvalidJson)?.0;
     deserializer.end().map_err(|_| JcsError::InvalidJson)?;
-    canonicalize_value(&value)
+    Ok(value)
 }
 
 struct UniqueValue(Value);
@@ -194,7 +200,7 @@ impl std::error::Error for JcsError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{JcsError, canonicalize_json};
+    use super::{JcsError, canonicalize_json, parse_unique_json};
 
     #[test]
     fn sorts_keys_canonically_and_preserves_unicode() {
@@ -214,5 +220,15 @@ mod tests {
     fn rejects_duplicate_object_names_in_hashed_documents() {
         assert_eq!(canonicalize_json(br#"{"a":1,"a":2}"#), Err(JcsError::InvalidJson));
         assert_eq!(canonicalize_json(br#"{"a":1,"\u0061":2}"#), Err(JcsError::InvalidJson));
+    }
+
+    #[test]
+    fn unique_json_parser_rejects_duplicate_names_without_restricting_pretty_numbers() {
+        assert_eq!(parse_unique_json(br#"{"root":1,"root":2}"#), Err(JcsError::InvalidJson));
+        assert_eq!(
+            parse_unique_json(br#"{"outer":{"inner":1,"inner":2}}"#),
+            Err(JcsError::InvalidJson)
+        );
+        assert!(parse_unique_json(br#"{"values":[1,1,1.5]}"#).is_ok());
     }
 }

@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use serde_json::Value;
 use veyra_core::canon::{hash, jcs};
 use veyra_core::ids::{ObjectAddress, ObjectId, UniverseId};
 use veyra_core::spatial::{CellKey, Dir, DirCube, Radial1d, Topology};
@@ -41,16 +40,20 @@ fn command_fmt(args: &[String]) -> Result<(), Box<dyn Error>> {
     let mode = args.first().ok_or("usage: veyra fmt --canonical|--pretty <file>")?;
     let path = args.get(1).ok_or("missing JSON file path")?;
     let input = fs::read(path)?;
-    let output = match mode.as_str() {
-        "--canonical" => jcs::canonicalize_json(&input)?,
-        "--pretty" => {
-            let value: Value = serde_json::from_slice(&input)?;
-            serde_json::to_vec_pretty(&value)?
-        }
-        _ => return Err("format mode must be --canonical or --pretty".into()),
-    };
+    let output = format_json(&input, mode)?;
     println!("{}", String::from_utf8(output)?);
     Ok(())
+}
+
+fn format_json(input: &[u8], mode: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    match mode {
+        "--canonical" => Ok(jcs::canonicalize_json(input)?),
+        "--pretty" => {
+            let value = jcs::parse_unique_json(input)?;
+            Ok(serde_json::to_vec_pretty(&value)?)
+        }
+        _ => Err("format mode must be --canonical or --pretty".into()),
+    }
 }
 
 fn command_hash(args: &[String], canonical_json: bool) -> Result<(), Box<dyn Error>> {
@@ -196,4 +199,26 @@ fn print_help() {
            body verify|info|fields <artifact-directory>\n\
            conformance gen|verify [world-root] [vector-root]"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_json;
+
+    #[test]
+    fn pretty_and_canonical_modes_reject_root_and_nested_duplicate_keys() {
+        for duplicate in
+            [br#"{"key":1,"key":2}"#.as_slice(), br#"{"outer":{"key":1,"key":2}}"#.as_slice()]
+        {
+            assert!(format_json(duplicate, "--pretty").is_err());
+            assert!(format_json(duplicate, "--canonical").is_err());
+        }
+    }
+
+    #[test]
+    fn pretty_mode_accepts_normal_json_floats_and_repeated_array_values() {
+        let output = format_json(br#"{"values":[1.5,1.5]}"#, "--pretty").unwrap();
+        assert_eq!(output, b"{\n  \"values\": [\n    1.5,\n    1.5\n  ]\n}");
+        assert!(format_json(br#"{"values":[1.5,1.5]}"#, "--canonical").is_err());
+    }
 }

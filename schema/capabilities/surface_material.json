@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "id": "veyra.cap.surface_material/1", "version": 1, "compat": "critical", "requires": ["veyra.cap.solid_surface/1"],
-  "params_schema": {"type": "object", "properties": {"domain": {"type": "string"}}, "additionalProperties": true},
+  "params_schema": {"type": "object", "properties": {"domain": {"type": "string", "x-veyra-reference": "domain"}}, "additionalProperties": true},
   "field_templates": [{"local_id": 1, "name": "surface_material.class", "semantic": "category", "storage": {"dtype": "u8", "vocab": "surface_material.class/1"}, "domain_kind": "surface", "temporal": {"kind": "static"}, "sampling": {"interp": "nearest"}, "downsample": "mode_lowest_tiebreak"}],
   "feature_tables": [], "vocab": [{"id": "surface_material.class/1"}], "derived_views": [], "explain_recipes": [], "required_reference_surface_kinds": [],
   "display": {"group": "Surface material", "label": "Material", "order": 60}

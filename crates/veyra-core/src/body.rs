@@ -100,6 +100,25 @@ pub struct SectionRef {
     pub hash: String,
 }
 
+/// Content reference with a canonical logical name, used for vocabularies and feature tables.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedSectionRef {
+    /// Stable vocabulary or feature-table name.
+    pub name: String,
+    /// Relative artifact path.
+    pub path: String,
+    /// Canonical JCS content hash.
+    pub hash: String,
+}
+
+impl NamedSectionRef {
+    /// Returns the path and hash view shared with ordinary section validation.
+    pub fn section_ref(&self) -> SectionRef {
+        SectionRef { path: self.path.clone(), hash: self.hash.clone() }
+    }
+}
+
 /// Body identity and origin metadata.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Identity {
@@ -251,10 +270,10 @@ pub struct BodySections {
     pub registry: SectionRef,
     /// Optional vocabularies.
     #[serde(default)]
-    pub vocab: Vec<SectionRef>,
+    pub vocab: Vec<NamedSectionRef>,
     /// Optional feature tables.
     #[serde(default)]
-    pub features: Vec<SectionRef>,
+    pub features: Vec<NamedSectionRef>,
     /// Optional provenance documents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ProvenanceSections>,
@@ -340,11 +359,25 @@ impl BodyRoot {
         }
         self.validate_figure()?;
         self.validate_features()?;
-        self.validate_capabilities()?;
         self.validate_domains()?;
         self.validate_surfaces()?;
+        self.validate_named_sections()?;
+        self.validate_capabilities()?;
         if self.codec != "zstd+shuffle2" {
             return Err(ModelError::UnknownRequiredFeature(self.codec.clone()));
+        }
+        Ok(())
+    }
+
+    fn validate_named_sections(&self) -> Result<(), ModelError> {
+        if self
+            .sections
+            .vocab
+            .iter()
+            .chain(self.sections.features.iter())
+            .any(|reference| reference.name.is_empty())
+        {
+            return Err(ModelError::InvalidSection);
         }
         Ok(())
     }
@@ -419,12 +452,52 @@ impl BodyRoot {
             let Some(dtype_value) = field_dtype(field) else {
                 return Err(ModelError::UnknownCriticalSemantic(dtype.to_owned()));
             };
+            if let Some(nodata) = field_nodata(field)?
+                && !raw_storage_value_fits(dtype_value, nodata)
+            {
+                return Err(ModelError::InvalidField);
+            }
             if matches!(field.semantic.as_str(), "category" | "feature_ref" | "flags")
                 && dtype_value == DType::F32
             {
                 return Err(ModelError::InvalidField);
             }
             validate_critical_field_metadata(field, domain)?;
+        }
+        self.validate_figure_registry(registry)?;
+        Ok(())
+    }
+
+    fn validate_figure_registry(&self, registry: &FieldRegistry) -> Result<(), ModelError> {
+        if self.figure.kind != "star_convex_radial" {
+            return Ok(());
+        }
+        let radius_name = self
+            .figure
+            .parameters
+            .get("radius_field")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or(ModelError::InvalidFigureField)?;
+        let field = registry
+            .fields
+            .iter()
+            .find(|field| field.name == radius_name)
+            .ok_or(ModelError::InvalidFigureField)?;
+        let domain = self
+            .domains
+            .iter()
+            .find(|domain| domain.id == field.domain)
+            .ok_or(ModelError::InvalidFigureField)?;
+        if field.compat != Compatibility::Critical
+            || field.persistence != "invariant"
+            || !field.semantic.starts_with("scalar.")
+            || field.extra.get("unit").and_then(Value::as_str) != Some("m")
+            || field_dtype(field).is_none()
+            || domain.topology != "veyra.topo.dir_cube/1"
+            || !self.indexes.contains_key(&field.id.to_string())
+        {
+            return Err(ModelError::InvalidFigureField);
         }
         Ok(())
     }
@@ -458,19 +531,22 @@ impl BodyRoot {
     }
 
     fn validate_features(&self) -> Result<(), ModelError> {
+        let capability_contracts =
+            crate::capability::contracts().map_err(|_| ModelError::InvalidCapabilityContract)?;
         let mut seen = std::collections::BTreeSet::new();
         for feature in &self.required_features {
             if !seen.insert(feature.as_str()) {
                 return Err(ModelError::InvalidFeatureList);
             }
-            if !matches!(
+            let is_core_feature = matches!(
                 feature.as_str(),
                 "veyra.body/1"
                     | "veyra.canon.jcs/1"
                     | "veyra.topo.dir_cube/1"
                     | "veyra.topo.radial_1d/1"
                     | "veyra.codec.zstd-shuffle2/1"
-            ) {
+            );
+            if !is_core_feature && !capability_contracts.contains_key(feature) {
                 return Err(ModelError::UnknownRequiredFeature(feature.clone()));
             }
         }
@@ -483,15 +559,99 @@ impl BodyRoot {
     }
 
     fn validate_capabilities(&self) -> Result<(), ModelError> {
+        let contracts =
+            crate::capability::contracts().map_err(|_| ModelError::InvalidCapabilityContract)?;
+        let requirements = contracts
+            .iter()
+            .map(|(id, contract)| {
+                let required = contract
+                    .get("requires")
+                    .and_then(Value::as_array)
+                    .ok_or(ModelError::InvalidCapabilityContract)?
+                    .iter()
+                    .map(|required| {
+                        required
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or(ModelError::InvalidCapabilityContract)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((id.clone(), required))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, ModelError>>()?;
+        crate::capability::validate_dependency_graph(&requirements)
+            .map_err(|_| ModelError::InvalidCapabilityContract)?;
+
         let mut seen = std::collections::BTreeSet::new();
         for capability in &self.capabilities {
-            if !seen.insert(&capability.id) {
+            if !seen.insert(capability.id.as_str()) {
                 return Err(ModelError::InvalidCapability);
             }
-            if capability_numeric_id(&capability.id).is_none()
-                && capability.compat == Compatibility::Critical
+        }
+        for capability in &self.capabilities {
+            let Some(contract) = contracts.get(&capability.id) else {
+                if capability.compat == Compatibility::Critical {
+                    return Err(ModelError::UnknownCriticalCapability(capability.id.clone()));
+                }
+                continue;
+            };
+            let params_schema =
+                contract.get("params_schema").ok_or(ModelError::InvalidCapabilityContract)?;
+            if crate::capability::validate_instance(&capability.params, params_schema).is_err() {
+                return Err(ModelError::InvalidCapabilityParameters(capability.id.clone()));
+            }
+            for required in
+                requirements.get(&capability.id).ok_or(ModelError::InvalidCapabilityContract)?
             {
-                return Err(ModelError::UnknownCriticalCapability(capability.id.clone()));
+                if !seen.contains(required.as_str()) {
+                    return Err(ModelError::MissingCapabilityDependency(required.clone()));
+                }
+            }
+
+            let annotations = crate::capability::reference_annotations(params_schema)
+                .map_err(|_| ModelError::InvalidCapabilityContract)?;
+            for (parameter, target) in &annotations {
+                let Some(value) = capability.params.get(parameter) else {
+                    continue;
+                };
+                let reference = value
+                    .as_str()
+                    .ok_or(ModelError::InvalidCapabilityParameters(capability.id.clone()))?;
+                let resolves = match target.as_str() {
+                    "domain" => self.domains.iter().any(|domain| domain.id == reference),
+                    "reference_surface" => self.reference_surfaces.iter().any(|surface| {
+                        surface.get("id").and_then(Value::as_str) == Some(reference)
+                    }),
+                    "figure" => {
+                        reference == "figure" && self.figure.kind != "radial_profile_sphere"
+                    }
+                    _ => return Err(ModelError::InvalidCapabilityContract),
+                };
+                if !resolves {
+                    return Err(ModelError::InvalidCapabilityReference(parameter.clone()));
+                }
+            }
+
+            let required_kinds = contract
+                .get("required_reference_surface_kinds")
+                .and_then(Value::as_array)
+                .ok_or(ModelError::InvalidCapabilityContract)?;
+            for kind in required_kinds {
+                let kind = kind.as_str().ok_or(ModelError::InvalidCapabilityContract)?;
+                let explicitly_declared = self
+                    .reference_surfaces
+                    .iter()
+                    .any(|surface| surface.get("kind").and_then(Value::as_str) == Some(kind));
+                let figure_declared = kind == "figure_surface"
+                    && self.figure.kind != "radial_profile_sphere"
+                    && annotations.iter().any(|(parameter, target)| {
+                        target == "figure"
+                            && capability.params.get(parameter).and_then(Value::as_str)
+                                == Some("figure")
+                    });
+                if !explicitly_declared && !figure_declared {
+                    return Err(ModelError::InvalidCapabilityReference(kind.to_owned()));
+                }
             }
         }
         Ok(())
@@ -728,6 +888,32 @@ pub(crate) fn field_dtype(field: &FieldDescriptor) -> Option<DType> {
     }
 }
 
+pub(crate) fn field_nodata(field: &FieldDescriptor) -> Result<Option<i64>, ModelError> {
+    match field.storage.get("nodata") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .map(Some)
+            .ok_or(ModelError::InvalidField),
+        Some(_) => Err(ModelError::InvalidField),
+    }
+}
+
+pub(crate) fn raw_storage_value_fits(dtype: DType, raw: i64) -> bool {
+    match dtype {
+        DType::U8 => u8::try_from(raw).is_ok(),
+        DType::I8 => i8::try_from(raw).is_ok(),
+        DType::U16 => u16::try_from(raw).is_ok(),
+        DType::I16 => i16::try_from(raw).is_ok(),
+        DType::U32 => u32::try_from(raw).is_ok(),
+        DType::I32 => i32::try_from(raw).is_ok(),
+        // Const values use the low four bytes as the raw IEEE-754 bit pattern.
+        DType::F32 => u32::try_from(raw).is_ok(),
+        DType::Raw => false,
+    }
+}
+
 pub(crate) fn temporal_slice_count(field: &FieldDescriptor) -> Option<u16> {
     let temporal = field.temporal.as_object()?;
     match temporal.get("kind")?.as_str()? {
@@ -864,10 +1050,20 @@ pub enum ModelError {
     InvalidDecimal,
     /// Figure declaration is invalid or unsupported.
     InvalidFigure,
+    /// Star-convex radius field is missing or incompatible with its figure.
+    InvalidFigureField,
     /// Required feature list contains duplicates.
     InvalidFeatureList,
     /// Capability declarations are malformed or duplicated.
     InvalidCapability,
+    /// The embedded V1 capability-contract projection is malformed or cyclic.
+    InvalidCapabilityContract,
+    /// A known capability's params do not satisfy its declared schema.
+    InvalidCapabilityParameters(String),
+    /// A capability omits a dependency listed by its schema.
+    MissingCapabilityDependency(String),
+    /// A capability parameter or required surface does not resolve in this body.
+    InvalidCapabilityReference(String),
     /// An unknown critical capability is required.
     UnknownCriticalCapability(String),
     /// Domain declarations are malformed or unsupported.
@@ -928,8 +1124,23 @@ impl fmt::Display for ModelError {
             }
             Self::InvalidDecimal => formatter.write_str("invalid or nonpositive decimal string"),
             Self::InvalidFigure => formatter.write_str("invalid or unsupported figure"),
+            Self::InvalidFigureField => {
+                formatter.write_str("star-convex figure radius field is invalid")
+            }
             Self::InvalidFeatureList => formatter.write_str("required feature list is malformed"),
             Self::InvalidCapability => formatter.write_str("capability declaration is malformed"),
+            Self::InvalidCapabilityContract => {
+                formatter.write_str("embedded capability contracts are invalid")
+            }
+            Self::InvalidCapabilityParameters(id) => {
+                write!(formatter, "invalid params for capability {id}")
+            }
+            Self::MissingCapabilityDependency(id) => {
+                write!(formatter, "capability dependency {id} is missing")
+            }
+            Self::InvalidCapabilityReference(name) => {
+                write!(formatter, "capability reference {name} does not resolve")
+            }
             Self::UnknownCriticalCapability(id) => {
                 write!(formatter, "unknown critical capability {id}")
             }
@@ -970,7 +1181,7 @@ pub fn parse_hash(text: &str) -> Result<Hash32, ModelError> {
 mod tests {
     use serde_json::json;
 
-    use super::{BodyRoot, FieldId, capability_numeric_id};
+    use super::{BodyRoot, FieldId, NamedSectionRef, SectionRef, capability_numeric_id};
     use crate::ids::{ObjectAddress, ObjectId, RegionKey, UniverseId};
 
     fn fixture_object_id(name: &str) -> String {
@@ -995,14 +1206,28 @@ mod tests {
         })
     }
 
+    fn capability_root(name: &str, capabilities: serde_json::Value) -> BodyRoot {
+        let mut value = minimal_root(name);
+        value["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.dir_cube/1"));
+        value["capabilities"] = capabilities;
+        value["domains"] = json!([{"id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed","vertical":{"kind":"none"},"tile_log2":2,"max_level":5}]);
+        value["reference_surfaces"] = json!([{"id":"datum.mean","kind":"sphere","radius_m":"1"}]);
+        serde_json::from_value(value).unwrap()
+    }
+
     fn field_root(name: &str, with_domain: bool) -> BodyRoot {
         let mut value = minimal_root(name);
         value["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.dir_cube/1"));
-        value["capabilities"] = json!([{"id":"veyra.cap.topography/1","params":{}}]);
+        let capability_domain = if with_domain { "surface" } else { "other" };
+        value["capabilities"] = json!([
+            {"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}},
+            {"id":"veyra.cap.topography/1","params":{"reference_surface":"datum.mean","domain":capability_domain}}
+        ]);
+        value["reference_surfaces"] = json!([{"id":"datum.mean","kind":"sphere","radius_m":"1"}]);
         value["domains"] = if with_domain {
             json!([{"id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed","vertical":{"kind":"none"},"tile_log2":2,"max_level":5}])
         } else {
-            json!([])
+            json!([{"id":"other","topology":"veyra.topo.dir_cube/1","frame":"body_fixed","vertical":{"kind":"none"},"tile_log2":2,"max_level":5}])
         };
         serde_json::from_value(value).unwrap()
     }
@@ -1018,8 +1243,95 @@ mod tests {
         })
     }
 
+    fn star_convex_root(name: &str, include_index: bool) -> serde_json::Value {
+        let mut value = minimal_root(name);
+        value["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.dir_cube/1"));
+        value["figure"] = json!({"kind":"star_convex_radial","radius_field":"figure.radius_m"});
+        value["capabilities"] = json!([{
+            "id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}
+        }]);
+        value["domains"] = json!([{"id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed","vertical":{"kind":"none"},"tile_log2":2,"max_level":5}]);
+        if include_index {
+            value["indexes"] = json!({"0x01000001":"b3:0000000000000000000000000000000000000000000000000000000000000000"});
+        }
+        value
+    }
+
+    fn radius_field_descriptor() -> serde_json::Value {
+        json!({
+            "id":"0x01000001","name":"figure.radius_m","capability":"veyra.cap.solid_surface/1",
+            "domain":"surface","semantic":"scalar.distance","persistence":"invariant",
+            "storage":{"dtype":"u32","scale":"1","offset":"0"},"unit":"m","native_level":3,
+            "temporal":{"kind":"static"},"sampling":{"interp":"bilinear"},
+            "downsample":"mean","compat":"critical"
+        })
+    }
+
     fn registry(fields: Vec<serde_json::Value>) -> super::FieldRegistry {
         serde_json::from_value(json!({"schema":"veyra.field_registry/1","fields":fields})).unwrap()
+    }
+
+    #[test]
+    fn named_vocab_and_feature_references_preserve_names_while_plain_refs_stay_strict() {
+        let vocab: NamedSectionRef = serde_json::from_value(json!({
+            "name":"tectonics.crust_type/1","path":"vocab/tectonics.crust_type.json",
+            "hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"
+        }))
+        .unwrap();
+        let feature: NamedSectionRef = serde_json::from_value(json!({
+            "name":"tectonics.plate","path":"features/tectonics.plate.json",
+            "hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"
+        }))
+        .unwrap();
+        assert_eq!(vocab.name, "tectonics.crust_type/1");
+        assert_eq!(feature.name, "tectonics.plate");
+
+        let mut root_value = minimal_root("named-section-values");
+        root_value["sections"]["vocab"] = json!([vocab.clone()]);
+        root_value["sections"]["features"] = json!([feature.clone()]);
+        let root: BodyRoot = serde_json::from_value(root_value).unwrap();
+        assert_eq!(root.sections.vocab[0].name, "tectonics.crust_type/1");
+        assert_eq!(root.sections.features[0].name, "tectonics.plate");
+
+        assert!(
+            serde_json::from_value::<NamedSectionRef>(json!({
+                "path":"vocab/missing-name.json",
+                "hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NamedSectionRef>(json!({
+                "name":"vocab/missing-hash","path":"vocab/missing-hash.json"
+            }))
+            .is_err()
+        );
+        let empty_name: NamedSectionRef = serde_json::from_value(json!({
+            "name":"","path":"vocab/empty-name.json",
+            "hash":"b3:0000000000000000000000000000000000000000000000000000000000000000"
+        }))
+        .unwrap();
+        let mut root_value = minimal_root("named-section-empty-name");
+        root_value["sections"]["vocab"] = json!([empty_name]);
+        let root: BodyRoot = serde_json::from_value(root_value).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidSection));
+
+        assert!(
+            serde_json::from_value::<SectionRef>(json!({
+                "path":"registry/fields.json",
+                "hash":"b3:0000000000000000000000000000000000000000000000000000000000000000",
+                "unexpected":true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SectionRef>(json!({
+                "path":"registry/fields.json",
+                "hash":"b3:0000000000000000000000000000000000000000000000000000000000000000",
+                "name":"not-allowed-on-plain-reference"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1118,6 +1430,118 @@ mod tests {
             unsupported.validate(),
             Err(super::ModelError::UnsupportedOrigin("recipe".to_owned()))
         );
+    }
+
+    #[test]
+    fn known_capability_schemas_enforce_params_dependencies_and_references_generically() {
+        let solid = json!({"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}});
+        let topography = |params| json!({"id":"veyra.cap.topography/1","params":params});
+        let valid = capability_root(
+            "capability-contract-valid",
+            json!([
+                solid.clone(),
+                topography(json!({"reference_surface":"datum.mean","domain":"surface"}))
+            ]),
+        );
+        assert!(valid.validate().is_ok());
+        let mut required_capability = capability_root(
+            "capability-feature-known",
+            json!([
+                solid.clone(),
+                topography(json!({"reference_surface":"datum.mean","domain":"surface"}))
+            ]),
+        );
+        required_capability.required_features.push("veyra.cap.topography/1".to_owned());
+        assert!(required_capability.validate().is_ok());
+        let mut unknown_capability_feature = required_capability.clone();
+        unknown_capability_feature.required_features.push("veyra.cap.future/1".to_owned());
+        assert!(matches!(
+            unknown_capability_feature.validate(),
+            Err(super::ModelError::UnknownRequiredFeature(feature)) if feature == "veyra.cap.future/1"
+        ));
+
+        let missing_dependency = capability_root(
+            "capability-contract-missing-dependency",
+            json!([topography(json!({"reference_surface":"datum.mean","domain":"surface"}))]),
+        );
+        assert_eq!(
+            missing_dependency.validate(),
+            Err(super::ModelError::MissingCapabilityDependency(
+                "veyra.cap.solid_surface/1".to_owned()
+            ))
+        );
+
+        let missing_params = capability_root(
+            "capability-contract-missing-params",
+            json!([solid.clone(), topography(json!({"reference_surface":"datum.mean"}))]),
+        );
+        assert_eq!(
+            missing_params.validate(),
+            Err(super::ModelError::InvalidCapabilityParameters(
+                "veyra.cap.topography/1".to_owned()
+            ))
+        );
+
+        for (name, params, expected) in [
+            (
+                "capability-contract-bad-domain",
+                json!({"reference_surface":"datum.mean","domain":"missing"}),
+                "domain",
+            ),
+            (
+                "capability-contract-bad-surface",
+                json!({"reference_surface":"missing","domain":"surface"}),
+                "reference_surface",
+            ),
+        ] {
+            let invalid = capability_root(name, json!([solid.clone(), topography(params)]));
+            assert_eq!(
+                invalid.validate(),
+                Err(super::ModelError::InvalidCapabilityReference(expected.to_owned()))
+            );
+        }
+
+        let surface_material =
+            json!({"id":"veyra.cap.surface_material/1","params":{"domain":"surface"}});
+        assert!(
+            capability_root(
+                "capability-contract-other-capability",
+                json!([solid.clone(), surface_material.clone()])
+            )
+            .validate()
+            .is_ok()
+        );
+        assert_eq!(
+            capability_root("capability-contract-other-dependency", json!([surface_material]))
+                .validate(),
+            Err(super::ModelError::MissingCapabilityDependency(
+                "veyra.cap.solid_surface/1".to_owned()
+            ))
+        );
+
+        let mut stellar_value = minimal_root("capability-required-surface-kind");
+        stellar_value["required_features"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("veyra.topo.radial_1d/1"));
+        stellar_value["figure"] = json!({"kind":"radial_profile_sphere","extent_m":"2"});
+        stellar_value["capabilities"] = json!([{
+            "id":"veyra.cap.stellar_structure/1","params":{"domain":"interior"}
+        }]);
+        stellar_value["domains"] = json!([{
+            "id":"interior","topology":"veyra.topo.radial_1d/1","frame":"body_fixed",
+            "vertical":{"kind":"radius","extent_m":"2"},"tile_log2":2,"max_level":5
+        }]);
+        let stellar_without_surface: BodyRoot =
+            serde_json::from_value(stellar_value.clone()).unwrap();
+        assert_eq!(
+            stellar_without_surface.validate(),
+            Err(super::ModelError::InvalidCapabilityReference("sphere".to_owned()))
+        );
+        stellar_value["reference_surfaces"] =
+            json!([{"id":"photosphere","kind":"sphere","radius_m":"2"}]);
+        let stellar_with_surface: BodyRoot = serde_json::from_value(stellar_value).unwrap();
+        assert!(stellar_with_surface.validate().is_ok());
     }
 
     #[test]
@@ -1263,6 +1687,45 @@ mod tests {
     }
 
     #[test]
+    fn star_convex_figure_resolves_a_stored_cube_radius_field() {
+        let root: BodyRoot =
+            serde_json::from_value(star_convex_root("star-radius-valid", true)).unwrap();
+        assert!(root.validate().is_ok());
+        assert!(root.validate_registry(&registry(vec![radius_field_descriptor()])).is_ok());
+
+        let root_without_index: BodyRoot =
+            serde_json::from_value(star_convex_root("star-radius-not-indexed", false)).unwrap();
+        assert_eq!(
+            root_without_index.validate_registry(&registry(vec![radius_field_descriptor()])),
+            Err(super::ModelError::InvalidFigureField)
+        );
+
+        let root_with_index: BodyRoot =
+            serde_json::from_value(star_convex_root("star-radius-missing-field", true)).unwrap();
+        assert_eq!(
+            root_with_index.validate_registry(&registry(vec![])),
+            Err(super::ModelError::InvalidFigureField)
+        );
+
+        for (key, value) in
+            [("domain", json!("interior")), ("semantic", json!("category")), ("unit", json!("km"))]
+        {
+            let mut field = radius_field_descriptor();
+            field[key] = value;
+            assert!(root.validate_registry(&registry(vec![field])).is_err(), "{key}");
+        }
+
+        let sphere: BodyRoot = serde_json::from_value(minimal_root("sphere-unaffected")).unwrap();
+        assert!(sphere.validate().is_ok());
+        assert!(sphere.validate_registry(&registry(vec![])).is_ok());
+        let mut radial_value = minimal_root("radial-profile-unaffected");
+        radial_value["figure"] = json!({"kind":"radial_profile_sphere","extent_m":"2"});
+        let radial: BodyRoot = serde_json::from_value(radial_value).unwrap();
+        assert!(radial.validate().is_ok());
+        assert!(radial.validate_registry(&registry(vec![])).is_ok());
+    }
+
+    #[test]
     fn critical_field_metadata_accepts_v1_contract_and_refuses_unknown_operators() {
         let root = field_root("field-contract-valid", true);
         assert!(root.validate_registry(&registry(vec![field_descriptor_json()])).is_ok());
@@ -1272,8 +1735,11 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(json!("veyra.topo.radial_1d/1"));
-        radial_root_value["capabilities"] =
-            json!([{"id":"veyra.cap.stellar_structure/1","params":{}}]);
+        radial_root_value["capabilities"] = json!([{
+            "id":"veyra.cap.stellar_structure/1","params":{"domain":"interior"}
+        }]);
+        radial_root_value["reference_surfaces"] =
+            json!([{"id":"photosphere","kind":"sphere","radius_m":"2"}]);
         radial_root_value["domains"] = json!([{"id":"interior","topology":"veyra.topo.radial_1d/1","frame":"body_fixed","vertical":{"kind":"radius","extent_m":"2"},"tile_log2":2,"max_level":5}]);
         let radial_root: BodyRoot = serde_json::from_value(radial_root_value).unwrap();
         let mut radial_field = field_descriptor_json();
@@ -1320,6 +1786,18 @@ mod tests {
         incompatible_dtype["storage"]["dtype"] = json!("f32");
         assert_eq!(
             root.validate_registry(&registry(vec![incompatible_dtype])),
+            Err(super::ModelError::InvalidField)
+        );
+
+        let mut valid_nodata = field_descriptor_json();
+        valid_nodata["storage"]["dtype"] = json!("u8");
+        valid_nodata["storage"]["nodata"] = json!(255);
+        assert!(root.validate_registry(&registry(vec![valid_nodata])).is_ok());
+        let mut invalid_nodata = field_descriptor_json();
+        invalid_nodata["storage"]["dtype"] = json!("u8");
+        invalid_nodata["storage"]["nodata"] = json!(256);
+        assert_eq!(
+            root.validate_registry(&registry(vec![invalid_nodata])),
             Err(super::ModelError::InvalidField)
         );
     }

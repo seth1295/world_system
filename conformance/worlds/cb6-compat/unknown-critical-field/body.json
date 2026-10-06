@@ -1,8 +1,10 @@
 {
   "capabilities": [
     {
-      "id": "veyra.cap.topography/1",
-      "params": {}
+      "id": "veyra.cap.solid_surface/1",
+      "params": {
+        "figure_ref": "figure"
+      }
     }
   ],
   "classification": {
@@ -66,7 +68,7 @@
   "schema": "veyra.body/1",
   "sections": {
     "registry": {
-      "hash": "b3:89ecf4238f17dc58c3975b9d9024b73b2f102b104b8b58c00a6c80f261df607e",
+      "hash": "b3:98ebfbfc8b0dc8d85163ebb2aa6b6c078a44f5ae450afe92bcedcc1b197cd268",
       "path": "registry/fields.json"
     }
   }

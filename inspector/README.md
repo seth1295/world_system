@@ -1,29 +1,64 @@
-# VEYRA Inspector prototype
+# VEYRA Inspector adaptability prototype
 
-This is a browser-only, mock-data prototype of the VEYRA body Inspector. It is intentionally isolated under `inspector/` and is not a Rust-core implementation.
+This is a browser-only information-architecture and adaptability stress prototype. Its bodies, descriptors, reports, failures, and display geometry are deterministic **synthetic fixtures**, not canonical VEYRA worlds. A persistent `SYNTHETIC FIXTURE` label and `fixture:` object IDs make that status visible.
+
+The prototype asks whether the Inspector can display the information returned by different provider descriptors: from an empty catalogue to 72 views, 53 time choices, 36 legend categories, 46 point fields, deep explanations, multiple domains, diagnostics, overlays, partial responses, and explicit load failures. The models use neutral presentation geometry; they are not concept art or physically meaningful world data.
 
 ## Run it
 
 ```sh
-npm install
+npm ci
 npm run dev
 ```
 
-Open the local URL printed by Vite. For checks, run `npm run build`, `npm run lint`, `npm test`, and `npm run test:e2e`. The browser smoke test uses the environment's Chromium executable (`CHROMIUM_PATH` can override `/usr/bin/chromium`) and saves four body/view captures plus a selected-point capture under `screenshots/`.
+Vite prints the local browser URL. Select a fixture in the bottom fixture control, or open a reproducible scenario directly, for example `/?fixture=fixture%3Aview-catalog-extreme`.
 
-## Structure
+## Checks and captures
 
-- `src/domain.ts` defines the consumer contracts and display-only response types.
-- `src/mock-provider.ts` supplies three mock body summaries, capability-style view descriptors, representative query results, and presentation geometry/tiles.
-- `src/ui/app.ts` builds the toolbar, descriptor-driven Debug menu, info/legend card, point inspector, and status strip. It depends on `BodyCatalog` and `BodyProvider`, not on body-specific data.
-- `src/render/viewport.ts` consumes provider geometry and tiles, maps view palettes for display, renders with three.js/WebGL2, and sends picked surface directions or radii back through the provider.
+```sh
+npm run typecheck
+npm run lint
+npm test
+npx playwright install chromium
+npm run test:e2e
+npm run screenshots
+```
 
-The app keeps one large interactive viewport. Veyra and Irregular Rock use a lit surface presentation; Auren uses a radial cutaway disc and an inline radial profile chart. Descriptors returned by each provider determine which Debug groups and views exist.
+Playwright uses its managed Chromium when `CHROMIUM_PATH` is unset or blank. If browser downloads are blocked in an environment, set `CHROMIUM_PATH` to an installed Chromium executable for that run. The config has a unit test that confirms no executable path is set when the override is absent. E2E screenshots for the required viewport/scenario matrix are written to `screenshots/stress/` as JPEGs.
 
-## Provider boundary
+## Scenario fixtures
 
-`BodyCatalog` discovers and opens a body. A `BodyProvider` returns `summary()`, `views()`, `stats()`, `domainGeometry()`, `tile()`, `radialProfile()`, `inspect()`, `explain()`, `features()`, and `diagnostics()`. The UI does not contain a terrestrial menu or body-class switch. The intended seam is `MockBodyProvider → WasmBodyProvider` (and `MockBodyCatalog → WasmBodyCatalog`): the WASM adapter returns the same descriptors, typed arrays, and query reports to the same UI and renderer. The Rust/WASM core remains the only authority for canonical data and semantics.
+Scenario recipes live in `src/fixtures/scenarios.ts`. The typed builders expand a seed and a small set of parameters into domains, descriptor groups, views, legends, time selections, point reports, explanation chains, diagnostic stages, feature tables, display geometry, and scripted provider behavior. The same recipe and seed produce the same responses. To add a scenario, compose a `FixtureSpec`, add it to `SCENARIOS`, and use the existing builders; do not add UI cases or body-specific branches.
 
-## Explicit prototype limits
+Named scenarios include:
 
-All displayed bodies, views, statistics, point values, overlays, profile values, and render geometry are mock presentation data. This prototype does **not** implement CellKey logic, dir_cube projection, sampling, interpolation, refinement, field semantics, generation, body classification, orbital propagation, feature resolution, canonical parsing, `.veyra` loading, or any other world-system semantics. It does not depend on or copy the unmerged `phase/01-core-foundation` branch. It currently has no worker, static artifact loader, real WASM adapter, diagnostics snapshots, or canonical error handling.
+- `void`, `minimal`, `normal-surface`, `radial`, `irregular`
+- `view-catalog-extreme`, `temporal-heavy`, `category-heavy`
+- `point-heavy`, `provenance-heavy`, `multi-domain`
+- `diagnostics`, `diagnostics-single`, `diagnostics-unavailable`
+- `features`, `features-no-geometry`, `features-none`
+- `loading`, `view-loading`, `partial-data`, `missing-content`
+- `validation-failure`, `unsupported-critical`, `retryable-error`, `non-retryable-error`
+
+The `fixture:` selector is a prototype-only control separate from the Inspector toolbar. It also updates the URL query so tests and captures can reproduce a state.
+
+## Provider and rendering boundary
+
+The UI receives a `BodyCatalog` and depends on the `BodyProvider` interface in `src/provider/contracts.ts`. `MockBodyCatalog` and `MockBodyProvider` implement those interfaces using only `src/fixtures/` data. The UI requests summaries, domains, ordered view descriptors, stats, geometry, tiles, point inspection, explanations, feature geometry, and diagnostics through that provider. It formats returned values, draws the returned model/tile, runs camera controls, filters descriptors, and exposes provider status.
+
+The intended adapter path is:
+
+```text
+Inspector UI → BodyProvider → MockBodyProvider (today)
+                         ↘ WasmBodyProvider (future)
+```
+
+`WasmBodyProvider` is not implemented here. It should call `veyra-wasm` for body queries and return core-produced descriptors, values, reports, geometry, feature responses, diagnostics, and failures through the same contract. Fixture construction remains replaceable without changing the UI.
+
+The UI and renderer cannot import fixture construction or `MockBodyProvider`; ESLint and a unit import-boundary test enforce this. A separate architecture test scans every other source file under `src/` for forbidden semantic vocabulary. The vocabulary list lives in `tests/architecture-guard.test.ts`.
+
+## Explicit limits
+
+This prototype does not implement CellKey or address generation, topology projection, sampling, interpolation, refinement, field semantics or derived-field calculation, feature resolution, propagation, body-class interpretation, artifact or `.veyra` parsing, canonical validation, or generation of worlds. It has no Rust or WASM integration and does not consume the unmerged `phase/01-core-foundation` branch. Procedural values and geometry exist only as presentation fixtures and must not be treated as VEYRA data.
+
+Provider-shape gaps found while implementing the display contract are listed in [`docs/PROVIDER_CONTRACT_FINDINGS.md`](docs/PROVIDER_CONTRACT_FINDINGS.md).

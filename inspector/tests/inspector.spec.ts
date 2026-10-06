@@ -1,63 +1,431 @@
-import { mkdir } from 'node:fs/promises';
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+import { buildFixture, SCENARIOS } from '../src/fixtures/scenarios';
+import { orderedGroups } from '../src/ui/view-model';
 
-test('opens all mock bodies, adapts the Debug menu, changes views, and inspects a point', async ({ page }) => {
-  const pageErrors: string[] = [];
-  page.on('pageerror', (error) => pageErrors.push(error.message));
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/');
-  await expect(page.locator('.brand-lockup')).toBeVisible();
-  await expect(page.getByTestId('viewport-canvas')).toBeVisible();
-  await expect(page.locator('#body-name')).toHaveText('Veyra');
-  await page.waitForTimeout(300);
-  await mkdir('screenshots', { recursive: true });
-  await page.screenshot({ path: 'screenshots/veyra-default.png', fullPage: true });
-  const surfaceLegend = await page.locator('#legend .legend-scale').getAttribute('style');
-  const featuresButton = page.locator('#features-button');
-  await expect(featuresButton).toBeVisible();
-  await featuresButton.click();
-  await expect(featuresButton).toHaveAttribute('aria-pressed', 'true');
-  await featuresButton.click();
-  await expect(featuresButton).toHaveAttribute('aria-pressed', 'false');
+const viewSizes = [
+  { width: 3440, height: 1440 },
+  { width: 1440, height: 900 },
+  { width: 820, height: 1100 },
+];
 
-  await page.getByTestId('debug-button').click();
-  await expect(page.locator('#debug-menu')).toContainText('Topography');
-  await expect(page.locator('#debug-menu')).toContainText('Tectonics');
-  await page.locator('[data-view-id="height"]').click();
-  await expect(page.locator('#view-name')).toHaveText('Height');
-  const heightLegend = await page.locator('#legend .legend-scale').getAttribute('style');
-  expect(heightLegend).not.toBe(surfaceLegend);
-  await page.waitForTimeout(350);
-  await page.screenshot({ path: 'screenshots/veyra-topography.png', fullPage: true });
+test('void fixture is stable, empty, and produces no browser errors', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/?fixture=fixture%3Avoid');
+  await waitForReady(page);
+  await expect(page.locator('#body-name')).toHaveText('Empty fixture');
+  await expect(page.getByTestId('debug-button')).toBeDisabled();
+  await expect(page.getByTestId('debug-button')).toHaveText('Debug · none');
+  await expect(page.locator('#debug-menu .catalog-group')).toHaveCount(0);
+  await expect(page.locator('#view-name')).toHaveText('No view declared');
+  expect(errors).toEqual([]);
+});
 
-  await page.getByTestId('body-selector').selectOption('obj:6b18e441');
-  await expect(page.locator('#body-name')).toHaveText('Auren');
-  await page.getByTestId('debug-button').click();
-  await expect(page.locator('#debug-menu')).toContainText('Stellar structure');
-  await expect(page.locator('#debug-menu')).not.toContainText('Topography');
-  await page.getByTestId('debug-button').click();
-  await page.waitForTimeout(500);
-  await page.screenshot({ path: 'screenshots/auren-radial.png', fullPage: true });
-
-  await page.getByTestId('body-selector').selectOption('obj:c8a0472d');
-  await expect(page.locator('#body-name')).toHaveText('Irregular Rock');
-  await expect(page.locator('#view-name')).toHaveText('Shape');
-  await page.getByTestId('debug-button').click();
-  await expect(page.locator('#debug-menu')).toContainText('Surface material');
-  await expect(page.locator('#debug-menu')).not.toContainText('Climate');
-  await page.keyboard.press('Escape');
-  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-  await page.waitForTimeout(120);
-  await page.screenshot({ path: 'screenshots/irregular-rock.png', fullPage: true });
-
-  await page.getByTestId('body-selector').selectOption('obj:9f3c2a7d');
-  await expect(page.locator('#body-name')).toHaveText('Veyra');
+test('canvas picking opens a point report through the provider', async ({ page }) => {
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/?fixture=fixture%3Anormal-surface');
+  await waitForReady(page);
   const canvas = page.getByTestId('viewport-canvas');
   const bounds = await canvas.boundingBox();
-  if (!bounds) throw new Error('The viewport canvas has no layout bounds');
-  await canvas.click({ position: { x: bounds.width * 0.47, y: bounds.height * 0.51 } });
-  await expect(page.getByTestId('selection-card')).toBeVisible({ timeout: 5_000 });
-  await expect(page.locator('#selection-fields')).toContainText('Height');
-  await page.screenshot({ path: 'screenshots/veyra-point-inspection.png', fullPage: true });
-  expect(pageErrors).toEqual([]);
+  expect(bounds).not.toBeNull();
+  await canvas.click({ position: { x: bounds!.width * 0.5, y: bounds!.height * 0.5 } });
+  await expect(page.locator('#inspection-panel')).toBeVisible();
+  const point = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:normal-surface')!).pointReport;
+  await expect(page.locator('#inspection-panel .field-row')).toHaveCount(point.groups.reduce((sum, group) => sum + group.fields.length, 0));
 });
+
+test('descriptor and provider response counts match generated fixture data', async ({ page }) => {
+  test.setTimeout(180_000);
+  const successScenarios = SCENARIOS.filter(({ openFailure, failFirstOpen, metadataFailure }) => !openFailure && !failFirstOpen && !metadataFailure);
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/?fixture=fixture%3Avoid');
+  await waitForReady(page);
+  for (const scenario of successScenarios) {
+    const fixture = buildFixture(scenario);
+    await switchFixture(page, scenario.id);
+    await expect(page.locator('.synthetic-tag')).toHaveText('SYNTHETIC FIXTURE');
+
+    const defaultDomain = fixture.domains[0];
+    const catalog = defaultDomain ? fixture.catalogs.get(defaultDomain.id) : undefined;
+    const views = catalog?.views ?? [];
+    const groups = catalog ? orderedGroups(catalog) : [];
+    const active = views[0];
+    const categoryCount = active?.legend.kind === 'categorical' ? active.legend.categories.length : 0;
+    expect(await page.locator('#legend-panel .category-row').count()).toBe(categoryCount);
+
+    if (views.length > 1) {
+      await page.getByTestId('debug-button').click();
+      expect(await page.locator('#debug-menu .catalog-group').count()).toBe(groups.length);
+      expect(await page.locator('#debug-menu [data-view-id]').count()).toBe(views.length);
+      await page.keyboard.press('Escape');
+    } else {
+      await expect(page.getByTestId('debug-button')).toBeDisabled();
+    }
+
+    if (fixture.pointReport.groups.length > 0) {
+      await page.getByRole('button', { name: 'Inspect point' }).click();
+      await expect(page.locator('#inspection-panel')).toBeVisible();
+      const expectedFields = fixture.pointReport.groups.reduce((sum, group) => sum + group.fields.length, 0);
+      expect(await page.locator('#inspection-panel .field-row').count()).toBe(expectedFields);
+      await page.locator('.close-inspection').click();
+    }
+
+    const stages = fixture.diagnosticStages ?? [];
+    if (stages.length > 0) {
+      await page.getByRole('button', { name: /Diagnostics/ }).click();
+      expect(await page.locator('#diagnostics-menu [data-stage-id]').count()).toBe(stages.length);
+      await page.keyboard.press('Escape');
+    } else {
+      await expect(page.locator('#diagnostics-button')).toBeHidden();
+    }
+
+    const tables = fixture.featureCatalog.tables;
+    const hasGeometry = tables.some(({ geometry }) => geometry !== undefined);
+    if (hasGeometry) {
+      await page.getByRole('button', { name: /Features/ }).click();
+      expect(await page.locator('#features-menu .feature-option').count()).toBe(tables.length);
+      const firstGeometry = page.locator('#features-menu input[data-feature-id]:not([disabled])').first();
+      await firstGeometry.check();
+      await expect(firstGeometry).toBeChecked();
+      await page.keyboard.press('Escape');
+    } else {
+      await expect(page.locator('#features-button')).toBeHidden();
+    }
+  }
+});
+
+test('extreme view catalogue is bounded, searchable, and traversable with the keyboard at three sizes', async ({ page }) => {
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:view-catalog-extreme')!);
+  const catalog = fixture.catalogs.get(fixture.domains[0]!.id)!;
+  await page.setViewportSize(viewSizes[0]!);
+  await page.goto('/?fixture=fixture%3Aview-catalog-extreme');
+  await waitForReady(page);
+  for (const size of viewSizes) {
+    await page.setViewportSize(size);
+    await page.keyboard.press('Escape');
+    await page.getByTestId('debug-button').click();
+    const menu = page.getByRole('dialog', { name: 'View catalogue' });
+    await expect(menu).toBeVisible();
+    await expect(menu.locator('[data-view-id]')).toHaveCount(catalog.views.length);
+    const bounds = await menu.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(size.width + 1);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(size.height + 1);
+
+    const search = page.getByRole('searchbox', { name: 'Search views' });
+    const last = catalog.views.at(-1)!;
+    await search.fill(last.label);
+    await expect(menu.locator('[data-view-id]:visible')).toHaveCount(1);
+    await expect(menu.locator(`[data-view-id="${last.id}"]`)).toBeVisible();
+    await search.fill('no descriptor can match this phrase');
+    await expect(page.locator('#debug-empty')).toBeVisible();
+    await search.fill('');
+    await expect(menu.locator('[data-view-id]:visible')).toHaveCount(catalog.views.length);
+
+    await search.focus();
+    await page.keyboard.press('ArrowDown');
+    for (const view of catalog.views) {
+      await expect(page.locator(':focus')).toHaveAttribute('data-view-id', view.id);
+      await page.keyboard.press('ArrowDown');
+    }
+    await page.keyboard.press('Enter');
+    await expect(menu).toBeHidden();
+    await expect(page.getByTestId('debug-button')).toBeFocused();
+    await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', last.id);
+  }
+});
+
+test('temporal choices remain separate from view selection and preserve descriptor labels', async ({ page }) => {
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:temporal-heavy')!);
+  const views = fixture.catalogs.get(fixture.domains[0]!.id)!.views;
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/?fixture=fixture%3Atemporal-heavy');
+  await waitForReady(page);
+  for (const view of views) {
+    if (view.id !== views[0]!.id) {
+      await page.getByTestId('debug-button').click();
+      await page.locator(`[data-view-id="${view.id}"]`).click();
+      await waitForReady(page);
+    }
+    await expect(page.locator('#temporal-control')).toBeVisible();
+    expect(await page.locator('#time-selector option').count()).toBe(view.timeSelections?.length);
+    const finalSelection = view.timeSelections?.at(-1);
+    if (finalSelection) {
+      await page.locator('#time-selector').selectOption(finalSelection.id);
+      await waitForReady(page);
+      await expect(page.locator(`#time-selector option[value="${finalSelection.id}"]`)).toHaveAttribute('title', finalSelection.label);
+    }
+  }
+});
+
+test('dense legends keep all provider categories reachable and show optional data explicitly', async ({ page }) => {
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:category-heavy')!);
+  const catalog = fixture.catalogs.get(fixture.domains[0]!.id)!;
+  const categories = catalog.views[0]!.legend;
+  if (categories.kind !== 'categorical') throw new Error('Category fixture did not declare categorical data');
+  await page.setViewportSize(viewSizes[0]!);
+  await page.goto('/?fixture=fixture%3Acategory-heavy');
+  await waitForReady(page);
+  const list = page.locator('.category-list');
+  await expect(list.locator('.category-row')).toHaveCount(categories.categories.length);
+  const last = list.locator('.category-row').last();
+  await last.scrollIntoViewIfNeeded();
+  await expect(last).toBeVisible();
+  await expect(last).toHaveAttribute('title', categories.categories.at(-1)!.label);
+  const bounds = await page.locator('#legend-panel').boundingBox();
+  expect(bounds!.height).toBeLessThan(viewSizes[0]!.height * 0.45);
+  expect(await list.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+
+  const hugeRange = catalog.views[1]!;
+  await page.getByTestId('debug-button').click();
+  await page.locator(`[data-view-id="${hugeRange.id}"]`).click();
+  await waitForReady(page);
+  await expect(page.locator('#legend-panel')).toContainText('No unit provided');
+  await expect(page.locator('#legend-panel .range-value')).toContainText('e');
+  await expect(page.locator('#legend-panel .no-stats')).toHaveText('No statistics available');
+  const noStatsView = catalog.views[2]!;
+  await page.getByTestId('debug-button').click();
+  await page.locator(`[data-view-id="${noStatsView.id}"]`).click();
+  await waitForReady(page);
+  await expect(page.locator('#legend-panel .no-stats')).toBeVisible();
+});
+
+test('large point and explanation reports stay bounded, searchable, and copyable', async ({ page }) => {
+  const pointFixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:point-heavy')!);
+  const expectedFields = pointFixture.pointReport.groups.reduce((sum, group) => sum + group.fields.length, 0);
+  await page.setViewportSize(viewSizes[2]!);
+  await page.goto('/?fixture=fixture%3Apoint-heavy');
+  await waitForReady(page);
+  await page.getByRole('button', { name: 'Inspect point' }).click();
+  const panel = page.locator('#inspection-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel.locator('.field-row')).toHaveCount(expectedFields);
+  const bounds = await panel.boundingBox();
+  expect(bounds!.height).toBeLessThan(viewSizes[2]!.height);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole('searchbox', { name: 'Filter point fields' }).fill('Field 46');
+  await expect(panel.locator('.field-row:visible')).toHaveCount(1);
+  await expect(panel.locator('.field-row:visible .field-name')).toHaveAttribute('title', /Field 46/);
+  await page.getByRole('searchbox', { name: 'Filter point fields' }).fill('');
+  await page.getByRole('button', { name: 'Copy position' }).click();
+  await expect(page.locator('#copy-status')).toHaveText(/Copied|Clipboard unavailable/);
+
+  const explainFixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:provenance-heavy')!);
+  await page.goto('/?fixture=fixture%3Aprovenance-heavy');
+  await waitForReady(page);
+  await page.getByRole('button', { name: 'Inspect point' }).click();
+  await expect(page.locator('.explain-step')).toHaveCount(explainFixture.explainDepth);
+  await page.getByText('Provider explanation').click();
+  for (let level = 1; level <= explainFixture.explainDepth; level += 1) {
+    const step = page.locator('.explain-step').nth(level - 1);
+    await step.locator(':scope > summary').click();
+  }
+  await expect(page.locator('.reference-list')).toHaveCount(explainFixture.explainDepth);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('domain switching replaces descriptors, geometry, and the selected report', async ({ page }) => {
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:multi-domain')!);
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/?fixture=fixture%3Amulti-domain');
+  await waitForReady(page);
+  const before = await page.locator('#legend-panel').getAttribute('data-view-id');
+  await page.getByRole('button', { name: 'Inspect point' }).click();
+  await expect(page.locator('#inspection-panel')).toBeVisible();
+  await page.locator('#domain-selector').selectOption(fixture.domains[1]!.id);
+  await waitForReady(page);
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await expect(page.locator('#status-domain')).toContainText(fixture.domains[1]!.topology);
+  expect(await page.locator('#legend-panel').getAttribute('data-view-id')).not.toBe(before);
+  await page.getByTestId('debug-button').click();
+  const nextCatalog = fixture.catalogs.get(fixture.domains[1]!.id)!;
+  expect(await page.locator('#debug-menu [data-view-id]').count()).toBe(nextCatalog.views.length);
+});
+
+test('loading, partial response, and each explicit provider failure are visible', async ({ page }) => {
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/?fixture=fixture%3Aloading');
+  await expect(page.locator('#provider-state')).toContainText('Opening fixture');
+  await expect.poll(async () => await page.locator('#provider-state').getAttribute('data-state')).toBe('metadata');
+  await expect(page.locator('#provider-state')).toContainText('Loading provider metadata');
+  await waitForReady(page);
+
+  await page.locator('#fixture-selector').selectOption('fixture:view-loading');
+  await expect(page.locator('#provider-state')).toContainText('Loading view data');
+  await waitForReady(page);
+
+  await switchFixture(page, 'fixture:partial-data');
+  await waitForReady(page);
+  await expect(page.locator('#provider-state')).toContainText('INCOMPLETE DATA');
+  await expect(page.locator('#legend-panel .incomplete-note')).toContainText('tile/03');
+
+  const cases = [
+    ['missing-content', 'E_CONTENT_MISSING', 'Required content missing', 'Retry'],
+    ['validation-failure', 'E_VALIDATION_DESCRIPTOR', 'Provider validation failure', 'Retry'],
+    ['unsupported-critical', 'E_CRITICAL_FEATURE_UNSUPPORTED', 'Unsupported required feature', 'Retry'],
+    ['retryable-error', 'E_RESOURCE_TEMPORARY', 'Temporary load error', 'Recover'],
+    ['non-retryable-error', 'E_RESOURCE_UNAVAILABLE', 'Provider load error', 'NoRetry'],
+  ] as const;
+  for (const [fixtureId, code, title, action] of cases) {
+    await switchFixture(page, `fixture:${fixtureId}`);
+    const error = page.getByRole('alert');
+    await expect(error).toBeVisible();
+    await expect(error.locator('.error-code')).toHaveText(code);
+    await expect(error.locator('h2')).toHaveText(title);
+    if (action === 'Recover') {
+      await page.getByRole('button', { name: 'Retry' }).click();
+      await waitForReady(page);
+      await expect(page.locator('#provider-error')).toBeHidden();
+    } else if (action === 'NoRetry') {
+      await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+    } else {
+      await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+    }
+  }
+});
+
+test('diagnostic stage selection changes the displayed provider snapshot', async ({ page }) => {
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:diagnostics')!);
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/?fixture=fixture%3Adiagnostics');
+  await waitForReady(page);
+  await page.getByRole('button', { name: /Diagnostics/ }).click();
+  const stages = page.locator('#diagnostics-menu [data-stage-id]:visible');
+  await expect(stages).toHaveCount(fixture.diagnosticStages!.length);
+  await page.locator('#diagnostic-search').fill(fixture.diagnosticStages!.at(-1)!.label);
+  await expect(stages).toHaveCount(1);
+  await stages.first().click();
+  await expect(page.locator('.stage-snapshot')).toContainText('Synthetic state 16');
+  const firstSnapshot = await page.locator('.stage-snapshot').innerText();
+  await page.locator('#diagnostic-search').fill(fixture.diagnosticStages![0]!.label);
+  await expect(stages).toHaveCount(1);
+  await stages.first().click();
+  await expect(page.locator('.stage-snapshot')).toContainText('Synthetic state 1');
+  const secondSnapshot = await page.locator('.stage-snapshot').innerText();
+  expect(secondSnapshot).not.toBe(firstSnapshot);
+});
+
+test('generic layout boundaries hold for every fixture at the target viewports', async ({ page }) => {
+  test.setTimeout(240_000);
+  await page.goto('/?fixture=fixture%3Avoid');
+  await waitForReady(page);
+  for (const size of viewSizes) {
+    await page.setViewportSize(size);
+    for (const scenario of SCENARIOS) {
+      await switchFixture(page, scenario.id);
+      const layout = await page.evaluate(() => {
+        const panels = [...document.querySelectorAll<HTMLElement>('[data-panel]:not([hidden])')]
+          .filter((element) => getComputedStyle(element).display !== 'none')
+          .map((element) => { const rect = element.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, name: element.dataset.panel }; });
+        const overlays = [...document.querySelectorAll<HTMLElement>('[role="dialog"]:not([hidden]), .provider-error:not([hidden])')]
+          .filter((element) => getComputedStyle(element).display !== 'none')
+          .map((element) => { const rect = element.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom }; });
+        return { width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, bodyWidth: document.body.scrollWidth, panels, overlays };
+      });
+      expect(layout.documentWidth, `${scenario.id} at ${size.width}`).toBeLessThanOrEqual(size.width);
+      expect(layout.bodyWidth, `${scenario.id} at ${size.width}`).toBeLessThanOrEqual(size.width);
+      for (const panel of layout.panels) {
+        expect(panel.x, `${scenario.id} ${panel.name} left`).toBeGreaterThanOrEqual(-1);
+        expect(panel.y, `${scenario.id} ${panel.name} top`).toBeGreaterThanOrEqual(-1);
+        expect(panel.right, `${scenario.id} ${panel.name} right`).toBeLessThanOrEqual(size.width + 1);
+        expect(panel.bottom, `${scenario.id} ${panel.name} bottom`).toBeLessThanOrEqual(size.height + 1);
+      }
+      for (let i = 0; i < layout.panels.length; i += 1) for (let j = i + 1; j < layout.panels.length; j += 1) {
+        const left = layout.panels[i]!;
+        const right = layout.panels[j]!;
+        const overlapX = Math.min(left.right, right.right) - Math.max(left.x, right.x);
+        const overlapY = Math.min(left.bottom, right.bottom) - Math.max(left.y, right.y);
+        expect(overlapX > 0 && overlapY > 0, `${scenario.id} panels ${left.name}/${right.name} overlap`).toBe(false);
+      }
+      for (const overlay of layout.overlays) {
+        expect(overlay.x).toBeGreaterThanOrEqual(-1);
+        expect(overlay.y).toBeGreaterThanOrEqual(-1);
+        expect(overlay.right).toBeLessThanOrEqual(size.width + 1);
+        expect(overlay.bottom).toBeLessThanOrEqual(size.height + 1);
+      }
+    }
+  }
+});
+
+test('keyboard-only view choice and point inspection keep focus visible', async ({ page }) => {
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/?fixture=fixture%3Anormal-surface');
+  await waitForReady(page);
+  const debug = page.getByTestId('debug-button');
+  await debug.focus();
+  await page.keyboard.press('Enter');
+  const search = page.getByRole('searchbox', { name: 'Search views' });
+  await expect(search).toBeFocused();
+  await search.fill('Roughness');
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator(':focus')).toHaveAttribute('data-view-id');
+  await page.keyboard.press('Enter');
+  await expect(debug).toBeFocused();
+  await waitForReady(page);
+  await page.keyboard.press('Tab');
+  const features = page.getByRole('button', { name: /Features/ });
+  if (await features.isVisible()) {
+    await expect(features).toBeFocused();
+    await page.keyboard.press('Tab');
+  }
+  await expect(page.getByRole('button', { name: 'Inspect point' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#inspection-panel')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Inspect point' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Inspect point' })).toBeFocused();
+});
+
+test('compact layout keeps a large inspection report and menu panels distinct', async ({ page }) => {
+  await page.setViewportSize(viewSizes[2]!);
+  await page.goto('/?fixture=fixture%3Apoint-heavy');
+  await waitForReady(page);
+  await page.getByRole('button', { name: 'Inspect point' }).click();
+  await expect(page.locator('#inspection-panel')).toBeVisible();
+  await expect(page.locator('#legend-panel')).toBeVisible();
+  await assertPanelsDoNotOverlap(page);
+  await page.keyboard.press('Escape');
+  await switchFixture(page, 'fixture:view-catalog-extreme');
+  await waitForReady(page);
+  await page.getByTestId('debug-button').click();
+  await assertOverlayWithinViewport(page, '#debug-menu');
+});
+
+async function waitForReady(page: Page): Promise<void> {
+  await expect.poll(async () => await page.locator('#provider-state').getAttribute('data-state'), { timeout: 15_000 }).toBe('ready');
+}
+
+async function switchFixture(page: Page, fixtureId: string): Promise<void> {
+  const selected = new URL(page.url()).searchParams.get('fixture');
+  if (selected !== fixtureId) await page.locator('#fixture-selector').selectOption(fixtureId);
+  await expect.poll(async () => await page.locator('#provider-state').getAttribute('data-state'), { timeout: 20_000 }).toMatch(/^(ready|error)$/);
+}
+
+async function assertPanelsDoNotOverlap(page: Page): Promise<void> {
+  const panelBounds = await page.locator('[data-panel]:visible').evaluateAll((elements) => elements.map((element) => {
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom };
+  }));
+  for (let leftIndex = 0; leftIndex < panelBounds.length; leftIndex += 1) for (let rightIndex = leftIndex + 1; rightIndex < panelBounds.length; rightIndex += 1) {
+    const left = panelBounds[leftIndex]!;
+    const right = panelBounds[rightIndex]!;
+    const overlapX = Math.min(left.right, right.right) - Math.max(left.x, right.x);
+    const overlapY = Math.min(left.bottom, right.bottom) - Math.max(left.y, right.y);
+    expect(overlapX > 0 && overlapY > 0).toBe(false);
+  }
+}
+
+async function assertOverlayWithinViewport(page: Page, selector: string): Promise<void> {
+  const bounds = await page.locator(selector).boundingBox();
+  const viewport = page.viewportSize();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.y).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport!.width + 1);
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport!.height + 1);
+}

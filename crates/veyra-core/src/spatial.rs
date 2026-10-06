@@ -142,6 +142,8 @@ pub trait Topology {
     fn children(&self, key: CellKey) -> Result<Vec<CellKey>, SpatialError>;
     /// Returns the containing tile key.
     fn tile_key(&self, key: CellKey, tile_log2: u8) -> Result<TileKey, SpatialError>;
+    /// Verifies that an encoded tile key is canonical for its topology and field level.
+    fn validate_tile_key(&self, tile: TileKey, tile_log2: u8) -> Result<(), SpatialError>;
     /// Returns the cell measure in the topology's declared measure.
     fn cell_measure(&self, key: CellKey) -> Result<f64, SpatialError>;
     /// Returns cardinal neighbors in topology order.
@@ -453,6 +455,20 @@ impl Topology for DirCube {
         Ok(TileKey { level, address: Self::key(face, i >> shift, j >> shift, ancestor_level)? })
     }
 
+    fn validate_tile_key(&self, tile: TileKey, tile_log2: u8) -> Result<(), SpatialError> {
+        if tile_log2 > 30 {
+            return Err(SpatialError::InvalidTileLog2);
+        }
+        if tile.level > 30 {
+            return Err(SpatialError::InvalidLevel);
+        }
+        let (_, _, _, address_level) = Self::decode(tile.address)?;
+        if address_level != tile.level.saturating_sub(tile_log2) {
+            return Err(SpatialError::InvalidTileKey);
+        }
+        Ok(())
+    }
+
     fn cell_measure(&self, key: CellKey) -> Result<f64, SpatialError> {
         let (face, i, j, level) = Self::decode(key)?;
         let count = (1_u64 << level) as f64;
@@ -554,6 +570,21 @@ impl Topology for Radial1d {
         Ok(TileKey { level, address: Self::key(level, index >> tile_log2.min(level))? })
     }
 
+    fn validate_tile_key(&self, tile: TileKey, tile_log2: u8) -> Result<(), SpatialError> {
+        if tile_log2 > 30 {
+            return Err(SpatialError::InvalidTileLog2);
+        }
+        if tile.level > 30 {
+            return Err(SpatialError::InvalidLevel);
+        }
+        let (address_level, tile_index) = Self::decode(tile.address)?;
+        let tile_count = 1_u64 << tile.level.saturating_sub(tile_log2);
+        if address_level != tile.level || tile_index >= tile_count {
+            return Err(SpatialError::InvalidTileKey);
+        }
+        Ok(())
+    }
+
     fn cell_measure(&self, key: CellKey) -> Result<f64, SpatialError> {
         let (level, index) = Self::decode(key)?;
         let count = (1_u64 << level) as f64;
@@ -653,6 +684,8 @@ pub enum SpatialError {
     InvalidFace,
     /// Tile size exponent is outside the V1 range.
     InvalidTileLog2,
+    /// Tile address is not the canonical tile ancestor for its level.
+    InvalidTileKey,
     /// Radial extent is negative or nonfinite.
     InvalidExtent,
 }
@@ -666,6 +699,7 @@ impl fmt::Display for SpatialError {
             Self::InvalidCellKey => "cell key is malformed for its topology",
             Self::InvalidFace => "face number is outside the V1 range",
             Self::InvalidTileLog2 => "tile_log2 is outside the V1 range",
+            Self::InvalidTileKey => "tile key is not canonical for its topology",
             Self::InvalidExtent => "radial extent must be finite and nonnegative",
         })
     }

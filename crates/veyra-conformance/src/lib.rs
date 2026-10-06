@@ -120,15 +120,26 @@ fn generate_cb0(path: &Path) -> Result<Hash32, ConformanceError> {
     for face in 0..6_u8 {
         let i = u64::from(face % 4);
         let j = u64::from((face * 3) % 4);
-        let payload =
-            [u32::from(face), i as u32, j as u32].into_iter().flat_map(u32::to_le_bytes).collect();
-        let blob = CanonicalBlob::new(BlobKind::RasterTile, DType::U32, 3, 1, 1, payload)
+        let mut payload = Vec::with_capacity(4 * 4 * 4);
+        for tile_j in 0..4_u32 {
+            for tile_i in 0..4_u32 {
+                let encoded_cell = (u32::from(face) << 4) | (tile_i << 2) | tile_j;
+                payload.extend_from_slice(&encoded_cell.to_le_bytes());
+            }
+        }
+        let blob = CanonicalBlob::new(BlobKind::RasterTile, DType::U32, 4, 4, 1, payload)
             .map_err(|_| ConformanceError::Assertion("cb0 raster payload shape"))?;
         let canonical = blob.encode();
         let hash = hash::hash(&canonical);
-        let key =
+        let cell =
             DirCube::key(face, i, j, 2).map_err(|_| ConformanceError::Assertion("cb0 cell key"))?;
-        entries.push(IndexEntry { level: 2, key: key.0, value: IndexValue::Blob(hash) });
+        let tile =
+            DirCube.tile_key(cell, 3).map_err(|_| ConformanceError::Assertion("cb0 tile key"))?;
+        entries.push(IndexEntry {
+            level: tile.level,
+            key: tile.address.0,
+            value: IndexValue::Blob(hash),
+        });
         blobs.push(canonical);
     }
     let index =
@@ -147,8 +158,15 @@ fn generate_cb0(path: &Path) -> Result<Hash32, ConformanceError> {
 }
 
 fn generate_cb5(path: &Path) -> Result<(Hash32, Vec<Hash32>), ConformanceError> {
-    let blob = CanonicalBlob::new(BlobKind::RasterTile, DType::U8, 1, 1, 1, vec![42])
-        .map_err(|_| ConformanceError::Assertion("cb5 canonical raster"))?;
+    let blob = CanonicalBlob::new(
+        BlobKind::RasterTile,
+        DType::U32,
+        1,
+        1,
+        1,
+        42_u32.to_le_bytes().to_vec(),
+    )
+    .map_err(|_| ConformanceError::Assertion("cb5 canonical raster"))?;
     let canonical = blob.encode();
     let blob_id = hash::hash(&canonical);
     let entries = (0..4_u8)
@@ -248,7 +266,7 @@ fn generate_cb6(path: &Path, cb5: PathBuf, cb5_blobs: &[Hash32]) -> Result<(), C
         "cb6-unknown-critical-field",
         vec![unknown_critical_field()],
         vec![json!({"id":"veyra.cap.topography/1","params":{}})],
-        None,
+        Some(dir_cube_domain()),
         Vec::new(),
         Vec::new(),
         0,
@@ -457,15 +475,28 @@ fn verify_cb0(body: &veyra_core::io::Body, vector_path: &Path) -> Result<(), Con
         let expected_key = parse_key(
             expected["key"].as_str().ok_or(ConformanceError::Assertion("cb0 vector key"))?,
         )?;
+        let cell = DirCube::key(
+            u8::try_from(expected_face)
+                .map_err(|_| ConformanceError::Assertion("cb0 face range"))?,
+            expected_i,
+            expected_j,
+            u8::try_from(expected_level)
+                .map_err(|_| ConformanceError::Assertion("cb0 level range"))?,
+        )
+        .map_err(|_| ConformanceError::Assertion("cb0 vector cell"))?;
+        if cell.0 != expected_key || u64::from(entry.level) != expected_level {
+            return Err(ConformanceError::Assertion("cb0 vector cell or index level mismatch"));
+        }
+        let expected_tile = DirCube
+            .tile_key(cell, index.tile_log2)
+            .map_err(|_| ConformanceError::Assertion("cb0 vector tile"))?;
         let key = CellKey(entry.key);
-        let (decoded_face, i, j, level) =
+        let (decoded_face, _, _, address_level) =
             DirCube::decode(key).map_err(|_| ConformanceError::Assertion("cb0 key decode"))?;
         if usize::from(decoded_face) != face
             || u64::from(decoded_face) != expected_face
-            || i != expected_i
-            || j != expected_j
-            || u64::from(level) != expected_level
-            || key.0 != expected_key
+            || address_level != expected_tile.level.saturating_sub(index.tile_log2)
+            || key != expected_tile.address
         {
             return Err(ConformanceError::Assertion("cb0 face or level mismatch"));
         }
@@ -479,15 +510,29 @@ fn verify_cb0(body: &veyra_core::io::Body, vector_path: &Path) -> Result<(), Con
         };
         let blob = CanonicalBlob::decode(canonical)
             .map_err(|_| ConformanceError::Assertion("cb0 blob header"))?;
+        if blob.kind != BlobKind::RasterTile
+            || blob.dim_i != 4
+            || blob.dim_j != 4
+            || blob.slices != 1
+        {
+            return Err(ConformanceError::Assertion("cb0 raster dimensions match its tile"));
+        }
         let (chunks, remainder) = blob.payload.as_chunks::<4>();
         if !remainder.is_empty() {
             return Err(ConformanceError::Assertion("cb0 payload is aligned"));
         }
         let values: Vec<u32> = chunks.iter().map(|bytes| u32::from_le_bytes(*bytes)).collect();
-        if values != [face as u32, i as u32, j as u32] {
-            return Err(ConformanceError::Assertion(
-                "cb0 stored cell address disagrees with the key",
-            ));
+        for tile_j in 0..4_u32 {
+            for tile_i in 0..4_u32 {
+                let expected_value = (u32::from(decoded_face) << 4) | (tile_i << 2) | tile_j;
+                let offset = usize::try_from(tile_j * 4 + tile_i)
+                    .map_err(|_| ConformanceError::Assertion("cb0 tile offset range"))?;
+                if values[offset] != expected_value {
+                    return Err(ConformanceError::Assertion(
+                        "cb0 stored cell addresses disagree with the raster tile positions",
+                    ));
+                }
+            }
         }
     }
     Ok(())

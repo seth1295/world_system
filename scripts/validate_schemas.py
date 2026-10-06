@@ -33,6 +33,27 @@ def main() -> int:
     registry_validator = Draft202012Validator(registry_schema)
     field_validator = Draft202012Validator(field_schema)
 
+    gm_fixture = read_json(FIXTURES / "cb9-minimal-void" / "body.json")
+    for gm in ("1", "0.1", "1e3", "1.25e-3", "1e2147483647", "1e-2147483648"):
+        gm_fixture["physical"]["gm_m3_s2"] = gm
+        body_validator.validate(gm_fixture)
+    for gm in (
+        "0",
+        "-1",
+        "-0",
+        "-0.0",
+        "-0e3",
+        "0.0",
+        "0e3",
+        "0.0e-3",
+        "1e2147483648",
+        "1e-2147483649",
+        "+1",
+    ):
+        gm_fixture["physical"]["gm_m3_s2"] = gm
+        if body_validator.is_valid(gm_fixture):
+            raise SystemExit(f"body schema accepted invalid positive GM decimal: {gm}")
+
     capability_count = 0
     capability_ids = tomllib.loads((ROOT / "schema" / "capability_ids.toml").read_text(encoding="utf-8"))
     allocated = capability_ids["capabilities"]

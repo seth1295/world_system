@@ -4,8 +4,11 @@ use core::fmt;
 
 use serde_json::Value;
 
-use crate::body::{BodyRoot, FieldId, FieldRegistry, ModelError, SectionRef, parse_hash};
-use crate::canon::blob::{CanonicalBlob, decode_zstd_shuffle2};
+use crate::body::{
+    BodyRoot, FieldId, FieldRegistry, ModelError, SectionRef, field_dtype, parse_hash,
+    temporal_slice_count,
+};
+use crate::canon::blob::{BlobKind, CanonicalBlob, decode_zstd_shuffle2};
 use crate::canon::hash;
 use crate::canon::index::IndexBlob;
 use crate::canon::jcs;
@@ -214,12 +217,13 @@ impl BodyLoader {
                 .iter()
                 .find(|field| field.id == *field_id)
                 .ok_or(LoaderError::IndexFieldMismatch)?;
-            let domain = self
-                .root
-                .domains
-                .iter()
-                .find(|domain| domain.id == field.domain)
-                .ok_or(LoaderError::IndexFieldMismatch)?;
+            let domain = self.root.domains.iter().find(|domain| domain.id == field.domain);
+            let Some(domain) = domain else {
+                if field.compat == crate::body::Compatibility::Ancillary {
+                    continue;
+                }
+                return Err(LoaderError::IndexFieldMismatch);
+            };
             let expected_topology = match domain.topology.as_str() {
                 "veyra.topo.dir_cube/1" => crate::canon::index::TopologyTag::DirCube,
                 "veyra.topo.radial_1d/1" => crate::canon::index::TopologyTag::Radial1d,
@@ -227,15 +231,42 @@ impl BodyLoader {
             };
             if index.topology != expected_topology
                 || index.tile_log2 != domain.tile_log2
-                || index.entries.iter().any(|entry| entry.level > domain.max_level)
+                || index
+                    .entries
+                    .iter()
+                    .any(|entry| entry.level > domain.max_level || entry.level > field.native_level)
             {
                 return Err(LoaderError::IndexFieldMismatch);
             }
             for entry in &index.entries {
-                if let crate::canon::index::IndexValue::Blob(expected) = entry.value
-                    && !self.blobs.contains_key(&expected)
-                {
-                    return Err(LoaderError::Missing(vec![Need::Blob { hash: expected }]));
+                if let crate::canon::index::IndexValue::Blob(expected) = entry.value {
+                    let canonical = self
+                        .blobs
+                        .get(&expected)
+                        .ok_or_else(|| LoaderError::Missing(vec![Need::Blob { hash: expected }]))?;
+                    let blob =
+                        CanonicalBlob::decode(canonical).map_err(|_| LoaderError::InvalidBlob)?;
+                    if blob.kind != BlobKind::RasterTile {
+                        return Err(LoaderError::RasterKindMismatch);
+                    }
+                    if field_dtype(field).is_some_and(|dtype| dtype != blob.dtype) {
+                        return Err(LoaderError::RasterDTypeMismatch);
+                    }
+                    let edge = 1_u64 << entry.level.min(index.tile_log2);
+                    let expected_dimensions = match expected_topology {
+                        crate::canon::index::TopologyTag::DirCube => (edge, edge),
+                        crate::canon::index::TopologyTag::Radial1d => (edge, 1),
+                    };
+                    if expected_dimensions.0 > u64::from(u16::MAX)
+                        || expected_dimensions.1 > u64::from(u16::MAX)
+                        || u64::from(blob.dim_i) != expected_dimensions.0
+                        || u64::from(blob.dim_j) != expected_dimensions.1
+                    {
+                        return Err(LoaderError::RasterDimensionsMismatch);
+                    }
+                    if temporal_slice_count(field).is_some_and(|slices| slices != blob.slices) {
+                        return Err(LoaderError::RasterSlicesMismatch);
+                    }
                 }
             }
         }
@@ -393,6 +424,14 @@ pub enum LoaderError {
     InvalidIndex,
     /// Index field ID does not match the root mapping.
     IndexFieldMismatch,
+    /// An indexed field references a non-raster blob.
+    RasterKindMismatch,
+    /// Raster storage dtype does not match the field descriptor.
+    RasterDTypeMismatch,
+    /// Raster dimensions do not match the tile topology and level.
+    RasterDimensionsMismatch,
+    /// Raster slice count does not match the field temporal contract.
+    RasterSlicesMismatch,
     /// A ledger chain is invalid.
     InvalidLedger,
     /// Canonical JSON validation failed.
@@ -420,6 +459,18 @@ impl fmt::Display for LoaderError {
             Self::IndexFieldMismatch => {
                 formatter.write_str("index field ID does not match its root entry")
             }
+            Self::RasterKindMismatch => {
+                formatter.write_str("indexed field content is not a raster tile")
+            }
+            Self::RasterDTypeMismatch => {
+                formatter.write_str("raster tile dtype does not match its field descriptor")
+            }
+            Self::RasterDimensionsMismatch => {
+                formatter.write_str("raster tile dimensions do not match its tile address")
+            }
+            Self::RasterSlicesMismatch => {
+                formatter.write_str("raster tile slices do not match its temporal descriptor")
+            }
             Self::InvalidLedger => formatter.write_str("hash-chained ledger is invalid"),
             Self::Jcs(error) => error.fmt(formatter),
             Self::Model(error) => error.fmt(formatter),
@@ -434,8 +485,138 @@ mod tests {
     use serde_json::json;
 
     use super::{BodyLoader, LoaderError, Need};
+    use crate::canon::blob::{BlobKind, CanonicalBlob, DType, shuffle2};
     use crate::canon::hash;
+    use crate::canon::index::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
     use crate::canon::jcs;
+    use crate::ids::{ObjectAddress, ObjectId, UniverseId};
+    use crate::spatial::{DirCube, Radial1d, Topology};
+
+    fn compressed(canonical: &[u8]) -> Vec<u8> {
+        zstd::stream::encode_all(shuffle2(canonical).as_slice(), 0).unwrap()
+    }
+
+    fn verify_raster_blob(
+        indexed_blob: &[u8],
+        supplied_blob: &[u8],
+    ) -> Result<super::Body, LoaderError> {
+        verify_raster_blob_on_topology(indexed_blob, supplied_blob, TopologyTag::DirCube)
+    }
+
+    fn verify_raster_blob_on_topology(
+        indexed_blob: &[u8],
+        supplied_blob: &[u8],
+        topology: TopologyTag,
+    ) -> Result<super::Body, LoaderError> {
+        let field_id = 0x0101_0001;
+        let (cell, topology_id, domain_id, vertical, interpolation) = match topology {
+            TopologyTag::DirCube => (
+                DirCube::key(2, 6, 3, 3).unwrap(),
+                "veyra.topo.dir_cube/1",
+                "surface",
+                json!({"kind":"none"}),
+                "bilinear",
+            ),
+            TopologyTag::Radial1d => (
+                Radial1d::key(3, 6).unwrap(),
+                "veyra.topo.radial_1d/1",
+                "interior",
+                json!({"kind":"radius","extent_m":"2"}),
+                "linear",
+            ),
+        };
+        let tile = match topology {
+            TopologyTag::DirCube => DirCube.tile_key(cell, 2).unwrap(),
+            TopologyTag::Radial1d => Radial1d::default().tile_key(cell, 2).unwrap(),
+        };
+        let index = IndexBlob {
+            field_id,
+            topology,
+            tile_log2: 2,
+            entries: vec![IndexEntry {
+                level: 3,
+                key: tile.address.0,
+                value: IndexValue::Blob(hash::hash(indexed_blob)),
+            }],
+        }
+        .encode()
+        .unwrap();
+        let index_hash = hash::hash(&index);
+        let registry = json!({
+            "schema":"veyra.field_registry/1",
+            "fields":[{
+                "id":"0x01010001","name":"topography.height_m","capability":"veyra.cap.topography/1",
+                "domain":domain_id,"semantic":"scalar.height","persistence":"invariant",
+                "storage":{"dtype":"i16","scale":"0.5","offset":"0"},"native_level":3,
+                "temporal":{"kind":"static"},
+                "sampling":{"interp":interpolation,"below_native":"pyramid","above_native":"refine"},
+                "downsample":"mean","compat":"critical"
+            }]
+        });
+        let descriptor = json!({"schema":"veyra.dynamics_descriptor/1"});
+        let origin = json!({"schema":"veyra.dynamics_origin/1"});
+        let sections: Vec<(String, Vec<u8>)> = [
+            ("registry/fields.json", registry),
+            ("dynamics/descriptor.json", descriptor),
+            ("dynamics/origin.json", origin),
+        ]
+        .into_iter()
+        .map(|(path, value)| (path.to_owned(), serde_json::to_vec(&value).expect("section JSON")))
+        .collect();
+        let section_refs: serde_json::Map<String, serde_json::Value> = sections
+            .iter()
+            .map(|(path, bytes)| {
+                let canonical = jcs::canonicalize_json(bytes).unwrap();
+                (path.clone(), json!({"path":path,"hash":hash::hash(&canonical).to_string()}))
+            })
+            .collect();
+        let object_id = ObjectId::derive(
+            UniverseId::fixture_sentinel(),
+            &ObjectAddress::Fixture { name: "raster-contract".to_owned() },
+        )
+        .unwrap();
+        let body = json!({
+            "schema":"veyra.body/1","format_version":{"major":1,"minor":0},
+            "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1",topology_id],
+            "identity":{"object_id":object_id.to_string(),"origin":{"kind":"fixture","name":"raster-contract"}},
+            "classification":{},"physical":{"gm_m3_s2":"1"},"figure":{"kind":"sphere","radius_m":"1"},
+            "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":[],
+            "dynamics":{"descriptor":section_refs["dynamics/descriptor.json"],"origin_keyframe":section_refs["dynamics/origin.json"]},
+            "capabilities":[{"id":"veyra.cap.topography/1","params":{}}],
+            "domains":[{"id":domain_id,"topology":topology_id,"frame":"body_fixed","vertical":vertical,"tile_log2":2,"max_level":5}],
+            "codec":"zstd+shuffle2","sections":{"registry":section_refs["registry/fields.json"]},
+            "indexes":{"0x01010001":index_hash.to_string()}
+        });
+        let (mut loader, needs) = BodyLoader::begin(&serde_json::to_vec(&body).unwrap())?;
+        let encoded_index = compressed(&index);
+        for need in needs {
+            let bytes = match &need {
+                Need::Section { path, .. } => sections
+                    .iter()
+                    .find(|(section_path, _)| section_path == path)
+                    .unwrap()
+                    .1
+                    .clone(),
+                Need::Index { .. } => encoded_index.clone(),
+                _ => unreachable!("initial needs contain sections and indexes only"),
+            };
+            loader.provide(&need, bytes)?;
+        }
+        for need in loader.needs() {
+            if matches!(need, Need::Blob { .. }) {
+                loader.provide(&need, compressed(supplied_blob))?;
+            }
+        }
+        loader.finish()
+    }
+
+    fn raster_blob(kind: BlobKind, dtype: DType, dim_i: u16, dim_j: u16, slices: u16) -> Vec<u8> {
+        let byte_count = dtype
+            .width()
+            .map(|width| usize::from(dim_i) * usize::from(dim_j) * usize::from(slices) * width)
+            .unwrap_or_default();
+        CanonicalBlob::new(kind, dtype, dim_i, dim_j, slices, vec![7; byte_count]).unwrap().encode()
+    }
 
     fn fixture_root() -> (Vec<u8>, Vec<(Need, Vec<u8>)>) {
         let registry = json!({"schema":"veyra.field_registry/1","fields":[]});
@@ -454,10 +635,15 @@ mod tests {
                 (path.to_owned(), hash::hash(&canonical).to_string(), bytes)
             })
             .collect();
+        let object_id = ObjectId::derive(
+            UniverseId::fixture_sentinel(),
+            &ObjectAddress::Fixture { name: "loader-test".to_owned() },
+        )
+        .unwrap();
         let root = json!({
             "schema":"veyra.body/1","format_version":{"major":1,"minor":0},
             "required_features":["veyra.body/1","veyra.canon.jcs/1","veyra.codec.zstd-shuffle2/1"],
-            "identity":{"object_id":"obj:00000000000000000000000000000009","origin":{"kind":"fixture","name":"loader-test"}},
+            "identity":{"object_id":object_id.to_string(),"origin":{"kind":"fixture","name":"loader-test"}},
             "classification":{},"physical":{"gm_m3_s2":"1"},"figure":{"kind":"sphere","radius_m":"1"},
             "frames":{"body_fixed":{"axes":"right-handed"}},"reference_surfaces":[],
             "dynamics":{"descriptor":{"path":refs[1].0,"hash":refs[1].1},"origin_keyframe":{"path":refs[2].0,"hash":refs[2].1}},
@@ -487,7 +673,15 @@ mod tests {
         }
         let body = loader.finish().unwrap();
         assert_eq!(body.fields().len(), 0);
-        assert_eq!(body.object_id().unwrap().to_string(), "obj:00000000000000000000000000000009");
+        assert_eq!(
+            body.object_id().unwrap().to_string(),
+            ObjectId::derive(
+                UniverseId::fixture_sentinel(),
+                &ObjectAddress::Fixture { name: "loader-test".to_owned() },
+            )
+            .unwrap()
+            .to_string()
+        );
     }
 
     #[test]
@@ -539,6 +733,61 @@ mod tests {
         loader.provide(&ledger_need, ledger_bytes.clone()).unwrap();
         let body = loader.finish().unwrap();
         assert_eq!(body.ledger("extensions"), Some(ledger_bytes.as_slice()));
+    }
+
+    #[test]
+    fn loader_requires_indexed_blobs_to_match_raster_field_contract() {
+        let correct = raster_blob(BlobKind::RasterTile, DType::I16, 4, 4, 1);
+        assert!(verify_raster_blob(&correct, &correct).is_ok());
+
+        for kind in [BlobKind::Index, BlobKind::Columnar] {
+            let wrong_kind = raster_blob(kind, DType::Raw, 0, 0, 0);
+            assert_eq!(
+                verify_raster_blob(&wrong_kind, &wrong_kind).unwrap_err(),
+                LoaderError::RasterKindMismatch
+            );
+        }
+
+        let wrong_dtype = raster_blob(BlobKind::RasterTile, DType::U8, 4, 4, 1);
+        assert_eq!(
+            verify_raster_blob(&wrong_dtype, &wrong_dtype).unwrap_err(),
+            LoaderError::RasterDTypeMismatch
+        );
+
+        let wrong_dimensions = raster_blob(BlobKind::RasterTile, DType::I16, 2, 8, 1);
+        assert_eq!(
+            verify_raster_blob(&wrong_dimensions, &wrong_dimensions).unwrap_err(),
+            LoaderError::RasterDimensionsMismatch
+        );
+
+        let wrong_slices = raster_blob(BlobKind::RasterTile, DType::I16, 4, 4, 2);
+        assert_eq!(
+            verify_raster_blob(&wrong_slices, &wrong_slices).unwrap_err(),
+            LoaderError::RasterSlicesMismatch
+        );
+    }
+
+    #[test]
+    fn radial_index_raster_tiles_use_the_declared_one_dimensional_shape() {
+        let correct = raster_blob(BlobKind::RasterTile, DType::I16, 4, 1, 1);
+        assert!(verify_raster_blob_on_topology(&correct, &correct, TopologyTag::Radial1d).is_ok());
+
+        let wrong_shape = raster_blob(BlobKind::RasterTile, DType::I16, 4, 4, 1);
+        assert_eq!(
+            verify_raster_blob_on_topology(&wrong_shape, &wrong_shape, TopologyTag::Radial1d)
+                .unwrap_err(),
+            LoaderError::RasterDimensionsMismatch
+        );
+    }
+
+    #[test]
+    fn raster_content_hash_mismatch_is_reported_before_contract_validation() {
+        let indexed = raster_blob(BlobKind::RasterTile, DType::I16, 4, 4, 1);
+        let supplied = raster_blob(BlobKind::RasterTile, DType::U8, 4, 4, 1);
+        assert_eq!(
+            verify_raster_blob(&indexed, &supplied).unwrap_err(),
+            LoaderError::HashMismatch(hash::hash(&indexed))
+        );
     }
 
     use serde_json::Value;

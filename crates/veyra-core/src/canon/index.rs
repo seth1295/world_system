@@ -4,7 +4,7 @@ use core::fmt;
 
 use crate::canon::blob::{BlobKind, CanonicalBlob, DType};
 use crate::ids::Hash32;
-use crate::spatial::{CellKey, DirCube, Radial1d};
+use crate::spatial::{CellKey, DirCube, Radial1d, TileKey, Topology};
 
 /// Cell addressing topology tag stored in an index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,12 +169,14 @@ impl IndexBlob {
             return Err(IndexError::InvalidIndex);
         }
         for entry in &self.entries {
-            let level = match self.topology {
-                TopologyTag::DirCube => DirCube::decode(CellKey(entry.key)).map(|value| value.3),
-                TopologyTag::Radial1d => Radial1d::decode(CellKey(entry.key)).map(|value| value.0),
-            }
-            .map_err(|_| IndexError::InvalidIndex)?;
-            if level != entry.level {
+            let tile = TileKey { level: entry.level, address: CellKey(entry.key) };
+            let result = match self.topology {
+                TopologyTag::DirCube => DirCube.validate_tile_key(tile, self.tile_log2),
+                TopologyTag::Radial1d => {
+                    Radial1d::default().validate_tile_key(tile, self.tile_log2)
+                }
+            };
+            if result.is_err() {
                 return Err(IndexError::InvalidIndex);
             }
         }
@@ -201,7 +203,7 @@ impl std::error::Error for IndexError {}
 mod tests {
     use super::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
     use crate::ids::Hash32;
-    use crate::spatial::DirCube;
+    use crate::spatial::{DirCube, Radial1d, Topology};
 
     #[test]
     fn blob_and_const_entries_round_trip() {
@@ -238,5 +240,72 @@ mod tests {
             ],
         };
         assert!(index.encode().is_err());
+    }
+
+    #[test]
+    fn dir_cube_indexes_accept_topology_canonical_tile_ancestors() {
+        let topology = DirCube;
+        for (level, tile_log2) in [(0, 3), (2, 3), (3, 3), (5, 2), (9, 4)] {
+            let cell = DirCube::key(4, 0, 1_u64.min((1_u64 << level) - 1), level).unwrap();
+            let tile = topology.tile_key(cell, tile_log2).unwrap();
+            let index = IndexBlob {
+                field_id: 1,
+                topology: TopologyTag::DirCube,
+                tile_log2,
+                entries: vec![IndexEntry {
+                    level,
+                    key: tile.address.0,
+                    value: IndexValue::Const(0),
+                }],
+            };
+            assert_eq!(IndexBlob::decode(&index.encode().unwrap()).unwrap(), index);
+        }
+    }
+
+    #[test]
+    fn dir_cube_indexes_reject_a_cell_key_instead_of_its_tile_ancestor() {
+        let invalid = IndexBlob {
+            field_id: 1,
+            topology: TopologyTag::DirCube,
+            tile_log2: 2,
+            entries: vec![IndexEntry {
+                level: 5,
+                key: DirCube::key(2, 0, 0, 5).unwrap().0,
+                value: IndexValue::Const(0),
+            }],
+        };
+        assert_eq!(invalid.encode(), Err(super::IndexError::InvalidIndex));
+    }
+
+    #[test]
+    fn radial_indexes_accept_only_tile_ordinals_at_the_declared_level() {
+        let topology = Radial1d::default();
+        for (level, tile_log2, cell_index) in [(2, 3, 3), (3, 3, 7), (5, 2, 19)] {
+            let cell = Radial1d::key(level, cell_index).unwrap();
+            let tile = topology.tile_key(cell, tile_log2).unwrap();
+            let index = IndexBlob {
+                field_id: 1,
+                topology: TopologyTag::Radial1d,
+                tile_log2,
+                entries: vec![IndexEntry {
+                    level,
+                    key: tile.address.0,
+                    value: IndexValue::Const(0),
+                }],
+            };
+            assert_eq!(IndexBlob::decode(&index.encode().unwrap()).unwrap(), index);
+        }
+
+        let invalid = IndexBlob {
+            field_id: 1,
+            topology: TopologyTag::Radial1d,
+            tile_log2: 2,
+            entries: vec![IndexEntry {
+                level: 5,
+                key: Radial1d::key(5, 8).unwrap().0,
+                value: IndexValue::Const(0),
+            }],
+        };
+        assert_eq!(invalid.encode(), Err(super::IndexError::InvalidIndex));
     }
 }

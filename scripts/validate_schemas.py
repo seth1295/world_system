@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from copy import deepcopy
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
@@ -53,6 +54,77 @@ def main() -> int:
         gm_fixture["physical"]["gm_m3_s2"] = gm
         if body_validator.is_valid(gm_fixture):
             raise SystemExit(f"body schema accepted invalid positive GM decimal: {gm}")
+
+    frame_fixture = read_json(FIXTURES / "cb9-minimal-void" / "body.json")
+    frame_mutations = []
+    for frame in (None, 1, "body_fixed"):
+        body = deepcopy(frame_fixture)
+        body["frames"]["body_fixed"] = frame
+        frame_mutations.append(("frame shape", body))
+    body = deepcopy(frame_fixture)
+    body["frames"]["body_fixed"].pop("axes")
+    frame_mutations.append(("missing axes", body))
+    for axes in ("", "right-handed"):
+        body = deepcopy(frame_fixture)
+        body["frames"]["body_fixed"]["axes"] = axes
+        frame_mutations.append(("invalid axes", body))
+    body = deepcopy(frame_fixture)
+    body["frames"]["body_fixed"].pop("rotation")
+    frame_mutations.append(("missing rotation", body))
+    for key in ("kind", "period_s", "epoch", "orientation_q_at_epoch", "relative_to"):
+        body = deepcopy(frame_fixture)
+        body["frames"]["body_fixed"]["rotation"].pop(key)
+        frame_mutations.append((f"missing rotation {key}", body))
+    for rotation in (None, 1, "uniform"):
+        body = deepcopy(frame_fixture)
+        body["frames"]["body_fixed"]["rotation"] = rotation
+        frame_mutations.append(("rotation shape", body))
+    for key, value in (
+        ("kind", "precessing"),
+        ("period_s", "not-a-period"),
+        ("period_s", "0"),
+        ("epoch", "00"),
+        ("relative_to", "unknown_frame"),
+    ):
+        body = deepcopy(frame_fixture)
+        body["frames"]["body_fixed"]["rotation"][key] = value
+        frame_mutations.append((f"invalid rotation {key}", body))
+    for quaternion in (["1", "0", "0"], ["1", "0", "NaN", "0"], ["1", "0", 0, "0"]):
+        body = deepcopy(frame_fixture)
+        body["frames"]["body_fixed"]["rotation"]["orientation_q_at_epoch"] = quaternion
+        frame_mutations.append(("invalid orientation quaternion", body))
+    body = deepcopy(frame_fixture)
+    body["required_features"].append("veyra.topo.dir_cube/1")
+    body["domains"] = [{
+        "id": "surface", "topology": "veyra.topo.dir_cube/1", "frame": "missing_frame",
+        "vertical": {"kind": "none"}, "tile_log2": 2, "max_level": 5,
+    }]
+    frame_mutations.append(("domain missing frame", body))
+    for description, body in frame_mutations:
+        if body_validator.is_valid(body):
+            raise SystemExit(f"body schema accepted invalid {description}")
+
+    radial_surface = deepcopy(frame_fixture)
+    radial_surface["figure"] = {"kind": "radial_profile_sphere", "extent_m": "2"}
+    radial_surface["reference_surfaces"] = [{"id": "figure.boundary", "kind": "figure_surface"}]
+    if body_validator.is_valid(radial_surface):
+        raise SystemExit("body schema accepted figure_surface for radial_profile_sphere")
+    radial_photosphere = deepcopy(frame_fixture)
+    radial_photosphere["figure"] = {"kind": "radial_profile_sphere", "extent_m": "2"}
+    radial_photosphere["reference_surfaces"] = [{"id": "photosphere", "kind": "sphere", "radius_m": "2"}]
+    body_validator.validate(radial_photosphere)
+    for figure in (
+        {"kind": "sphere", "radius_m": "2"},
+        {"kind": "star_convex_radial", "radius_field": "figure.radius_m"},
+    ):
+        solid_figure = deepcopy(frame_fixture)
+        solid_figure["figure"] = figure
+        solid_figure["reference_surfaces"] = [{"id": "solid.boundary", "kind": "figure_surface"}]
+        body_validator.validate(solid_figure)
+    reserved_surface = deepcopy(frame_fixture)
+    reserved_surface["reference_surfaces"] = [{"id": "reserved", "kind": "ellipsoid"}]
+    if body_validator.is_valid(reserved_surface):
+        raise SystemExit("body schema accepted a reserved reference-surface kind")
 
     named_refs_body = read_json(FIXTURES / "cb9-minimal-void" / "body.json")
     named_refs_body["sections"]["vocab"] = [

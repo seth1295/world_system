@@ -54,7 +54,7 @@ fn baseline_writer_refuses_dynamic_fields() {
         "classification":{},
         "physical":{"gm_m3_s2":"1"},
         "figure":{"kind":"sphere","radius_m":"1"},
-        "frames":{"body_fixed":{"axes":"right-handed"}},
+        "frames":{"body_fixed":{"axes":"+Z is the positive rotation pole; +X is the prime meridian; right-handed","rotation":{"kind":"uniform","period_s":"86400","epoch":"0","orientation_q_at_epoch":["1","0","0","0"],"relative_to":"universe_inertial"}}},
         "reference_surfaces":[],
         "dynamics":{"descriptor":{"path":"dynamics/descriptor.json","hash":descriptor_hash.to_string()},"origin_keyframe":{"path":"dynamics/origin.json","hash":origin_hash.to_string()}},
         "capabilities":[{"id":"x-veyra.conformance.foundation/1","compat":"ancillary","params":{}}],

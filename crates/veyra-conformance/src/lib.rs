@@ -360,7 +360,7 @@ fn build_artifact(
         "classification":{"tags":[]},
         "physical":{"gm_m3_s2":"1","gravity_model":"point_mass"},
         "figure":{"kind":"sphere","radius_m":"1"},
-        "frames":{"body_fixed":{"axes":"+Z is the positive rotation pole; +X is the prime meridian; right-handed"}},
+        "frames":{"body_fixed":{"axes":"+Z is the positive rotation pole; +X is the prime meridian; right-handed","rotation":{"kind":"uniform","period_s":"86400","epoch":"0","orientation_q_at_epoch":["1","0","0","0"],"relative_to":"universe_inertial"}}},
         "reference_surfaces":[],
         "dynamics":{
             "descriptor":{"path":"dynamics/descriptor.json","hash":descriptor_hash.to_string()},

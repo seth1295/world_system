@@ -5,8 +5,10 @@
 
 pub mod body;
 pub mod canon;
+mod capability;
 pub mod ids;
 pub mod io;
+pub mod path;
 pub mod spatial;
 pub mod time;
 

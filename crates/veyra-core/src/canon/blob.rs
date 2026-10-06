@@ -5,6 +5,21 @@ use std::io::Read;
 
 use crate::ids::Hash32;
 
+/// Hard reader-side limit for one decompressed V1 canonical blob.
+///
+/// V1 production uses 128-cell tiles. The cap admits 1023 slices of a 128 × 128
+/// `f32` tile (including its header), far above the documented 12-slice climate
+/// example while keeping untrusted decoding bounded. Index blobs are subject
+/// to the same explicit implementation resource limit.
+pub const MAX_CANONICAL_BLOB_BYTES: usize = 64 * 1024 * 1024;
+
+/// Largest documented production raster tile: T=7, 12 slices, and 4-byte dtype.
+pub const MAX_DOCUMENTED_PRODUCTION_TILE_BYTES: usize = 16 + 128 * 128 * 12 * 4;
+
+const MAX_ZSTD_WINDOW_BYTES: u64 = MAX_CANONICAL_BLOB_BYTES as u64;
+const MIN_ZSTD_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
+const DECODE_CHUNK_BYTES: usize = 8192;
+
 /// Canonical blob kinds assigned by the V1 header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -132,6 +147,9 @@ impl CanonicalBlob {
 
     /// Parses and validates canonical VYB1 bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, BlobError> {
+        if bytes.len() > MAX_CANONICAL_BLOB_BYTES {
+            return Err(BlobError::OutputLimitExceeded);
+        }
         if bytes.len() < 16
             || &bytes[..4] != b"VYB1"
             || bytes[6] != 0
@@ -158,6 +176,9 @@ impl CanonicalBlob {
     }
 
     fn validate(&self) -> Result<(), BlobError> {
+        if self.payload.len().checked_add(16).is_none_or(|size| size > MAX_CANONICAL_BLOB_BYTES) {
+            return Err(BlobError::OutputLimitExceeded);
+        }
         if self.kind == BlobKind::RasterTile {
             if self.dim_i == 0 || self.dim_j == 0 || self.slices == 0 {
                 return Err(BlobError::InvalidDimensions);
@@ -200,12 +221,54 @@ pub fn unshuffle2(shuffled: &[u8]) -> Vec<u8> {
 
 /// Decodes one Zstandard frame and restores canonical bytes from the shuffled payload.
 pub fn decode_zstd_shuffle2(encoded: &[u8]) -> Result<Vec<u8>, BlobError> {
+    decode_zstd_shuffle2_bounded(encoded, MAX_CANONICAL_BLOB_BYTES)
+}
+
+/// Decodes one frame while refusing output beyond both the caller's allowance and the V1 cap.
+///
+/// The bound applies to bytes actually emitted by the decoder. Zstandard frame content-size
+/// metadata is not used as an allocation size or trusted as a limit.
+pub fn decode_zstd_shuffle2_bounded(
+    encoded: &[u8],
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, BlobError> {
+    let limit = max_output_bytes.min(MAX_CANONICAL_BLOB_BYTES);
     let cursor = std::io::Cursor::new(encoded);
+    let max_window = u64::try_from(limit)
+        .map_err(|_| BlobError::OutputLimitExceeded)?
+        .clamp(MIN_ZSTD_WINDOW_BYTES, MAX_ZSTD_WINDOW_BYTES);
     let mut decoder =
-        ruzstd::decoding::StreamingDecoder::new(cursor).map_err(|_| BlobError::Codec)?;
+        ruzstd::decoding::StreamingDecoder::new_with_max_window_size(cursor, max_window)
+            .map_err(|_| BlobError::Codec)?;
     let mut shuffled = Vec::new();
-    decoder.read_to_end(&mut shuffled).map_err(|_| BlobError::Codec)?;
-    Ok(unshuffle2(&shuffled))
+    let mut chunk = [0_u8; DECODE_CHUNK_BYTES];
+    loop {
+        let length = decoder.read(&mut chunk).map_err(|_| BlobError::Codec)?;
+        if length == 0 {
+            break;
+        }
+        if shuffled.len().checked_add(length).is_none_or(|size| size > limit) {
+            return Err(BlobError::OutputLimitExceeded);
+        }
+        shuffled.try_reserve_exact(length).map_err(|_| BlobError::AllocationFailed)?;
+        shuffled.extend_from_slice(&chunk[..length]);
+    }
+    unshuffle2_bounded(&shuffled)
+}
+
+fn unshuffle2_bounded(shuffled: &[u8]) -> Result<Vec<u8>, BlobError> {
+    let even_count = shuffled.len().div_ceil(2);
+    let (even, odd) = shuffled.split_at(even_count);
+    let mut output = Vec::new();
+    output.try_reserve_exact(shuffled.len()).map_err(|_| BlobError::AllocationFailed)?;
+    output.resize(shuffled.len(), 0);
+    for (index, byte) in even.iter().enumerate() {
+        output[index * 2] = *byte;
+    }
+    for (index, byte) in odd.iter().enumerate() {
+        output[index * 2 + 1] = *byte;
+    }
+    Ok(output)
 }
 
 /// Canonical blob or codec error.
@@ -217,6 +280,10 @@ pub enum BlobError {
     InvalidDimensions,
     /// Zstandard data is invalid or cannot be decoded.
     Codec,
+    /// The decompressed or canonical representation exceeds its V1 resource limit.
+    OutputLimitExceeded,
+    /// Memory could not be reserved within the declared decoding limit.
+    AllocationFailed,
 }
 
 impl fmt::Display for BlobError {
@@ -225,6 +292,8 @@ impl fmt::Display for BlobError {
             Self::InvalidHeader => "invalid VYB1 header",
             Self::InvalidDimensions => "VYB1 dimensions do not match payload length",
             Self::Codec => "invalid zstd-shuffle2 codec data",
+            Self::OutputLimitExceeded => "zstd-shuffle2 output exceeds the V1 blob limit",
+            Self::AllocationFailed => "could not reserve bounded zstd-shuffle2 output",
         })
     }
 }
@@ -233,7 +302,11 @@ impl std::error::Error for BlobError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{BlobKind, CanonicalBlob, DType, decode_zstd_shuffle2, shuffle2, unshuffle2};
+    use super::{
+        BlobError, BlobKind, CanonicalBlob, DType, MAX_DOCUMENTED_PRODUCTION_TILE_BYTES,
+        decode_zstd_shuffle2, decode_zstd_shuffle2_bounded, shuffle2, unshuffle2,
+    };
+    use std::io::Write;
 
     #[test]
     fn header_round_trip_and_shuffle_round_trip() {
@@ -254,6 +327,61 @@ mod tests {
         let compressed = zstd::stream::encode_all(shuffled.as_slice(), 3).unwrap();
         assert_eq!(decode_zstd_shuffle2(&compressed).unwrap(), canonical);
         assert_ne!(compressed, canonical);
+    }
+
+    #[test]
+    fn documented_maximum_production_tile_decodes_at_its_declared_size() {
+        let canonical = CanonicalBlob::new(
+            BlobKind::RasterTile,
+            DType::F32,
+            128,
+            128,
+            12,
+            vec![0; 128 * 128 * 12 * 4],
+        )
+        .unwrap()
+        .encode();
+        assert_eq!(canonical.len(), MAX_DOCUMENTED_PRODUCTION_TILE_BYTES);
+        let compressed = zstd::stream::encode_all(shuffle2(&canonical).as_slice(), 3).unwrap();
+        assert_eq!(
+            decode_zstd_shuffle2_bounded(&compressed, MAX_DOCUMENTED_PRODUCTION_TILE_BYTES)
+                .unwrap(),
+            canonical
+        );
+    }
+
+    #[test]
+    fn bounded_decoder_accepts_its_limit_and_rejects_one_byte_over() {
+        let canonical = vec![0x5a; 64 * 1024];
+        let compressed = zstd::stream::encode_all(canonical.as_slice(), 3).unwrap();
+        assert_eq!(
+            decode_zstd_shuffle2_bounded(&compressed, canonical.len()).unwrap(),
+            unshuffle2(&canonical)
+        );
+        assert_eq!(
+            decode_zstd_shuffle2_bounded(&compressed, canonical.len() - 1),
+            Err(BlobError::OutputLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn small_zstd_bomb_is_stopped_at_the_output_limit() {
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+        let repeated = [0x41_u8; 8192];
+        for _ in 0..64 {
+            encoder.write_all(&repeated).unwrap();
+        }
+        let compressed = encoder.finish().unwrap();
+        assert!(compressed.len() < 64 * 1024);
+        assert_eq!(
+            decode_zstd_shuffle2_bounded(&compressed, 4096),
+            Err(BlobError::OutputLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn malformed_zstd_is_distinct_from_a_size_limit_failure() {
+        assert_eq!(decode_zstd_shuffle2(&[1, 2, 3]), Err(BlobError::Codec));
     }
 
     #[test]

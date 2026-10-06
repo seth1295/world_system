@@ -5,10 +5,10 @@
 use core::fmt;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use veyra_core::body::{BodyRoot, FieldId, FieldRegistry, parse_hash};
+use veyra_core::body::{BodyRoot, FieldId, FieldRegistry, NamedSectionRef, parse_hash};
 use veyra_core::canon::blob::{CanonicalBlob, shuffle2};
 use veyra_core::canon::hash;
 use veyra_core::canon::index::IndexBlob;
@@ -16,6 +16,7 @@ use veyra_core::canon::jcs;
 use veyra_core::canon::ledger;
 use veyra_core::ids::Hash32;
 use veyra_core::io::{BlobSource, Body, BodyLoader, LoaderError, Need, SourceError};
+use veyra_core::path::validate_artifact_path;
 
 /// Writes new body files and refuses to overwrite existing paths.
 pub struct ArtifactWriter {
@@ -23,7 +24,9 @@ pub struct ArtifactWriter {
     sections: std::collections::BTreeMap<String, (Hash32, Vec<u8>)>,
     indexes: std::collections::BTreeMap<FieldId, Hash32>,
     blobs: std::collections::BTreeSet<Hash32>,
-    ledgers: std::collections::BTreeMap<String, Hash32>,
+    ledgers: std::collections::BTreeMap<String, (String, Hash32)>,
+    ledger_paths: std::collections::BTreeSet<String>,
+    written_paths: std::collections::BTreeSet<String>,
     body_written: bool,
 }
 
@@ -38,13 +41,15 @@ impl ArtifactWriter {
             indexes: std::collections::BTreeMap::new(),
             blobs: std::collections::BTreeSet::new(),
             ledgers: std::collections::BTreeMap::new(),
+            ledger_paths: std::collections::BTreeSet::new(),
+            written_paths: std::collections::BTreeSet::new(),
             body_written: false,
         })
     }
 
     /// Writes a section and returns the hash of its parsed JCS content.
     pub fn write_json_section(&mut self, path: &str, bytes: &[u8]) -> Result<Hash32, WriterError> {
-        validate_relative_path(path)?;
+        validate_artifact_path(path).map_err(|_| WriterError::InvalidPath)?;
         if self.sections.contains_key(path) {
             return Err(WriterError::DuplicateSection);
         }
@@ -106,13 +111,18 @@ impl ArtifactWriter {
         bytes: &[u8],
         expected_head: Hash32,
     ) -> Result<(), WriterError> {
-        validate_relative_path(path)?;
+        validate_artifact_path(path).map_err(|_| WriterError::InvalidPath)?;
         let head = ledger::verify(bytes).map_err(|_| WriterError::InvalidLedger)?;
-        if head.hash != expected_head || self.ledgers.contains_key(name) {
+        if name.is_empty()
+            || head.hash != expected_head
+            || self.ledgers.contains_key(name)
+            || self.ledger_paths.contains(path)
+        {
             return Err(WriterError::InvalidLedger);
         }
         self.write_new(path, bytes)?;
-        self.ledgers.insert(name.to_owned(), head.hash);
+        self.ledger_paths.insert(path.to_owned());
+        self.ledgers.insert(name.to_owned(), (path.to_owned(), head.hash));
         Ok(())
     }
 
@@ -120,6 +130,9 @@ impl ArtifactWriter {
     pub fn write_body_json(&mut self, body_json: &[u8]) -> Result<Hash32, WriterError> {
         if self.body_written {
             return Err(WriterError::BodyAlreadyWritten);
+        }
+        if self.written_paths.contains("body.json") || self.written_paths.contains("body.id") {
+            return Err(WriterError::DuplicatePath);
         }
         let canonical = jcs::canonicalize_json(body_json).map_err(WriterError::Jcs)?;
         let value: Value =
@@ -129,7 +142,7 @@ impl ArtifactWriter {
         root.validate().map_err(WriterError::Model)?;
         verify_section_ref(&root.sections.registry, &self.sections)?;
         for reference in root.sections.vocab.iter().chain(root.sections.features.iter()) {
-            verify_section_ref(reference, &self.sections)?;
+            verify_named_section_ref(reference, &self.sections)?;
         }
         if let Some(provenance) = &root.sections.provenance {
             verify_section_ref(&provenance.dag, &self.sections)?;
@@ -149,7 +162,7 @@ impl ArtifactWriter {
         }
         if let Some(extension_ledger) = &root.extensions_ledger {
             let expected = parse_hash(&extension_ledger.hash).map_err(WriterError::Model)?;
-            if self.ledgers.get("extensions") != Some(&expected) {
+            if self.ledgers.get("extensions") != Some(&(extension_ledger.path.clone(), expected)) {
                 return Err(WriterError::InvalidLedger);
             }
         }
@@ -158,6 +171,14 @@ impl ArtifactWriter {
         let registry: FieldRegistry =
             serde_json::from_slice(&registry_value.1).map_err(|_| WriterError::InvalidSection)?;
         root.validate_registry(&registry).map_err(WriterError::Model)?;
+        for field_text in root.indexes.keys() {
+            let field_id = FieldId::parse(field_text).map_err(WriterError::Model)?;
+            if !registry.fields.iter().any(|field| field.id == field_id) {
+                return Err(WriterError::IndexFieldMismatch);
+            }
+        }
+
+        verify_reader_contract(body_json, &self.root)?;
 
         let baseline_id = hash::hash(&canonical);
         let pretty = serde_json::to_vec_pretty(&value).map_err(|_| WriterError::InvalidJson)?;
@@ -167,8 +188,11 @@ impl ArtifactWriter {
         Ok(baseline_id)
     }
 
-    fn write_new(&self, relative: &str, bytes: &[u8]) -> Result<(), WriterError> {
-        validate_relative_path(relative)?;
+    fn write_new(&mut self, relative: &str, bytes: &[u8]) -> Result<(), WriterError> {
+        validate_artifact_path(relative).map_err(|_| WriterError::InvalidPath)?;
+        if self.written_paths.contains(relative) {
+            return Err(WriterError::DuplicatePath);
+        }
         let path = safe_join(&self.root, relative)?;
         let parent = path.parent().ok_or(WriterError::InvalidPath)?;
         fs::create_dir_all(parent).map_err(WriterError::Io)?;
@@ -180,6 +204,7 @@ impl ArtifactWriter {
         use std::io::Write;
         file.write_all(bytes).map_err(WriterError::Io)?;
         file.sync_all().map_err(WriterError::Io)?;
+        self.written_paths.insert(relative.to_owned());
         Ok(())
     }
 }
@@ -249,27 +274,44 @@ fn verify_section_ref(
     reference: &veyra_core::body::SectionRef,
     sections: &std::collections::BTreeMap<String, (Hash32, Vec<u8>)>,
 ) -> Result<(), WriterError> {
-    let expected = parse_hash(&reference.hash).map_err(WriterError::Model)?;
-    if sections.get(&reference.path).map(|section| section.0) != Some(expected) {
+    verify_content_reference(&reference.path, &reference.hash, sections)
+}
+
+fn verify_named_section_ref(
+    reference: &NamedSectionRef,
+    sections: &std::collections::BTreeMap<String, (Hash32, Vec<u8>)>,
+) -> Result<(), WriterError> {
+    if reference.name.is_empty() {
+        return Err(WriterError::InvalidSection);
+    }
+    verify_content_reference(&reference.path, &reference.hash, sections)
+}
+
+fn verify_content_reference(
+    path: &str,
+    hash: &str,
+    sections: &std::collections::BTreeMap<String, (Hash32, Vec<u8>)>,
+) -> Result<(), WriterError> {
+    let expected = parse_hash(hash).map_err(WriterError::Model)?;
+    if sections.get(path).map(|section| section.0) != Some(expected) {
         return Err(WriterError::InvalidSection);
     }
     Ok(())
 }
 
-fn validate_relative_path(path: &str) -> Result<(), WriterError> {
-    let parsed = Path::new(path);
-    if path.is_empty()
-        || parsed.is_absolute()
-        || parsed.components().any(|component| !matches!(component, Component::Normal(_)))
-        || path.contains('\\')
-    {
-        return Err(WriterError::InvalidPath);
+fn verify_reader_contract(body_json: &[u8], root: &Path) -> Result<(), WriterError> {
+    let (mut loader, mut needs) = BodyLoader::begin(body_json).map_err(WriterError::Loader)?;
+    let source = DirectoryBlobSource::new(root);
+    while let Some(need) = needs.first().cloned() {
+        let bytes = source.load(&need).map_err(|error| WriterError::Source(error.0))?;
+        needs = loader.provide(&need, bytes).map_err(WriterError::Loader)?;
     }
+    loader.finish().map_err(WriterError::Loader)?;
     Ok(())
 }
 
 fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, WriterError> {
-    validate_relative_path(relative)?;
+    validate_artifact_path(relative).map_err(|_| WriterError::InvalidPath)?;
     Ok(root.join(relative))
 }
 
@@ -304,12 +346,16 @@ pub enum WriterError {
     InvalidPath,
     /// A writer attempted to add the same section twice.
     DuplicateSection,
+    /// A writer attempted to reuse an artifact path for different content.
+    DuplicatePath,
     /// A writer attempted to add the same field index twice.
     DuplicateIndex,
     /// An index references a blob that has not been written.
     MissingBlob(Hash32),
     /// Canonical index bytes are invalid.
     InvalidIndex,
+    /// A body root index does not refer to a registered field.
+    IndexFieldMismatch,
     /// Canonical VYB1 bytes are invalid.
     InvalidBlob,
     /// Ledger content or head is invalid.
@@ -334,9 +380,13 @@ impl fmt::Display for WriterError {
             Self::DuplicateSection => {
                 formatter.write_str("section path was written more than once")
             }
+            Self::DuplicatePath => formatter.write_str("artifact path was written more than once"),
             Self::DuplicateIndex => formatter.write_str("field index was written more than once"),
             Self::MissingBlob(hash) => write!(formatter, "index references missing blob {hash}"),
             Self::InvalidIndex => formatter.write_str("invalid index blob"),
+            Self::IndexFieldMismatch => {
+                formatter.write_str("root index refers to an unregistered field")
+            }
             Self::InvalidBlob => formatter.write_str("invalid canonical blob"),
             Self::InvalidLedger => formatter.write_str("invalid ledger or head hash"),
             Self::BodyAlreadyWritten => formatter.write_str("body root has already been written"),

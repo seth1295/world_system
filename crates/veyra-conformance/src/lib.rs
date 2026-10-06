@@ -265,7 +265,7 @@ fn generate_cb6(path: &Path, cb5: PathBuf, cb5_blobs: &[Hash32]) -> Result<(), C
         &critical_field,
         "cb6-unknown-critical-field",
         vec![unknown_critical_field()],
-        vec![json!({"id":"veyra.cap.topography/1","params":{}})],
+        vec![json!({"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}})],
         Some(dir_cube_domain()),
         Vec::new(),
         Vec::new(),
@@ -411,7 +411,7 @@ fn ancillary_field() -> FieldDescriptor {
 fn unknown_critical_field() -> FieldDescriptor {
     field_descriptor(
         "x-conformance.unknown",
-        "veyra.cap.topography/1",
+        "veyra.cap.solid_surface/1",
         "scalar.test",
         "u8",
         Compatibility::Ancillary,
@@ -431,8 +431,11 @@ fn field_descriptor(
         Compatibility::Critical => "critical",
         Compatibility::Ancillary => "ancillary",
     };
-    let id =
-        if capability == "veyra.cap.topography/1" { FieldId::new(0x0101, 1) } else { FIELD_ID };
+    let id = match capability {
+        "veyra.cap.topography/1" => FieldId::new(0x0101, 1),
+        "veyra.cap.solid_surface/1" => FieldId::new(0x0100, 1),
+        _ => FIELD_ID,
+    };
     serde_json::from_value(json!({
         "id":id.to_string(),"name":name,"capability":capability,"domain":"surface","semantic":semantic,
         "persistence":"invariant","storage":{"dtype":dtype,"scale":"1","offset":"0"},

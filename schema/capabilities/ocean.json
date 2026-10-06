@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "id": "veyra.cap.ocean/1", "version": 1, "compat": "critical", "requires": ["veyra.cap.solid_surface/1", "veyra.cap.topography/1"],
-  "params_schema": {"type": "object", "required": ["level_surface", "domain"], "properties": {"level_surface": {"type": "string"}, "domain": {"type": "string"}}, "additionalProperties": true},
+  "params_schema": {"type": "object", "required": ["level_surface", "domain"], "properties": {"level_surface": {"type": "string", "x-veyra-reference": "reference_surface"}, "domain": {"type": "string", "x-veyra-reference": "domain"}}, "additionalProperties": true},
   "field_templates": [], "feature_tables": [], "vocab": [], "derived_views": [{"id": "derived.land_ocean", "needs": ["topography.height_m"], "op": "core.threshold_partition/1"}], "explain_recipes": [],
   "required_reference_surface_kinds": [], "display": {"group": "Ocean", "label": "Ocean", "order": 40}
 }

@@ -1,0 +1,152 @@
+{
+  "schema": "veyra.capability_contracts/1",
+  "capabilities": {
+    "veyra.cap.climate/1": {
+      "requires": [],
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "x-veyra-reference": "domain"
+          },
+          "slices": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true
+      },
+      "required_reference_surface_kinds": []
+    },
+    "veyra.cap.ocean/1": {
+      "requires": [
+        "veyra.cap.solid_surface/1",
+        "veyra.cap.topography/1"
+      ],
+      "params_schema": {
+        "type": "object",
+        "required": [
+          "level_surface",
+          "domain"
+        ],
+        "properties": {
+          "level_surface": {
+            "type": "string",
+            "x-veyra-reference": "reference_surface"
+          },
+          "domain": {
+            "type": "string",
+            "x-veyra-reference": "domain"
+          }
+        },
+        "additionalProperties": true
+      },
+      "required_reference_surface_kinds": []
+    },
+    "veyra.cap.solid_surface/1": {
+      "requires": [],
+      "params_schema": {
+        "type": "object",
+        "required": [
+          "figure_ref"
+        ],
+        "properties": {
+          "figure_ref": {
+            "type": "string",
+            "x-veyra-reference": "figure"
+          }
+        },
+        "additionalProperties": true
+      },
+      "required_reference_surface_kinds": [
+        "figure_surface"
+      ]
+    },
+    "veyra.cap.stellar_structure/1": {
+      "requires": [],
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "x-veyra-reference": "domain"
+          }
+        },
+        "additionalProperties": true
+      },
+      "required_reference_surface_kinds": [
+        "sphere"
+      ]
+    },
+    "veyra.cap.surface_material/1": {
+      "requires": [
+        "veyra.cap.solid_surface/1"
+      ],
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "x-veyra-reference": "domain"
+          }
+        },
+        "additionalProperties": true
+      },
+      "required_reference_surface_kinds": []
+    },
+    "veyra.cap.tectonics/1": {
+      "requires": [
+        "veyra.cap.solid_surface/1"
+      ],
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "x-veyra-reference": "domain"
+          }
+        },
+        "additionalProperties": true
+      },
+      "required_reference_surface_kinds": []
+    },
+    "veyra.cap.thermal_state/1": {
+      "requires": [],
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "x-veyra-reference": "domain"
+          }
+        },
+        "additionalProperties": true
+      },
+      "required_reference_surface_kinds": []
+    },
+    "veyra.cap.topography/1": {
+      "requires": [
+        "veyra.cap.solid_surface/1"
+      ],
+      "params_schema": {
+        "type": "object",
+        "required": [
+          "reference_surface",
+          "domain"
+        ],
+        "properties": {
+          "reference_surface": {
+            "type": "string",
+            "x-veyra-reference": "reference_surface"
+          },
+          "domain": {
+            "type": "string",
+            "x-veyra-reference": "domain"
+          }
+        },
+        "additionalProperties": true
+      },
+      "required_reference_surface_kinds": []
+    }
+  }
+}

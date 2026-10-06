@@ -54,6 +54,18 @@ def main() -> int:
         if body_validator.is_valid(gm_fixture):
             raise SystemExit(f"body schema accepted invalid positive GM decimal: {gm}")
 
+    named_refs_body = read_json(FIXTURES / "cb9-minimal-void" / "body.json")
+    named_refs_body["sections"]["vocab"] = [
+        {"name": "test.vocab/1", "path": "vocab/test.json", "hash": "b3:" + "0" * 64}
+    ]
+    named_refs_body["sections"]["features"] = [
+        {"name": "test.feature/1", "path": "features/test.json", "hash": "b3:" + "0" * 64}
+    ]
+    body_validator.validate(named_refs_body)
+    named_refs_body["sections"]["vocab"][0].pop("name")
+    if body_validator.is_valid(named_refs_body):
+        raise SystemExit("body schema accepted a vocabulary reference without its name")
+
     capability_count = 0
     capability_ids = tomllib.loads((ROOT / "schema" / "capability_ids.toml").read_text(encoding="utf-8"))
     allocated = capability_ids["capabilities"]
@@ -86,6 +98,23 @@ def main() -> int:
         missing = sorted(set(document["requires"]) - declared_ids)
         if missing:
             raise SystemExit(f"{document['id']} requires unknown capabilities: {', '.join(missing)}")
+
+    compiled_contracts = {
+        document["id"]: {
+            "requires": document["requires"],
+            "params_schema": document["params_schema"],
+            "required_reference_surface_kinds": document["required_reference_surface_kinds"],
+        }
+        for document in capability_documents
+    }
+    compiled_contract_file = read_json(ROOT / "schema" / "capability_contracts.v1.json")
+    if compiled_contract_file != {
+        "schema": "veyra.capability_contracts/1",
+        "capabilities": compiled_contracts,
+    }:
+        raise SystemExit(
+            "embedded capability contracts are stale; run py scripts/generate_capability_contracts.py"
+        )
 
     fixture_count = 0
     for path in sorted(FIXTURES.rglob("body.json")):

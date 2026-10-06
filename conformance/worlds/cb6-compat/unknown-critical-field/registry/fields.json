@@ -1,11 +1,11 @@
 {
   "fields": [
     {
-      "capability": "veyra.cap.topography/1",
+      "capability": "veyra.cap.solid_surface/1",
       "compat": "critical",
       "domain": "surface",
       "downsample": "mean",
-      "id": "0x01010001",
+      "id": "0x01000001",
       "name": "x-conformance.unknown",
       "native_level": 0,
       "persistence": "invariant",

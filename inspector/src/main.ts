@@ -1,6 +1,6 @@
 import './styles.css';
 import { InspectorApp } from './ui/app';
-import { MockBodyCatalog } from './mock-provider';
+import { MockBodyCatalog } from './provider/mock-provider';
 
 const root = document.querySelector<HTMLDivElement>('#app');
 if (!root) throw new Error('Inspector app root is missing');

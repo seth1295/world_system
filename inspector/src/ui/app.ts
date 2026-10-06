@@ -2,360 +2,772 @@ import type {
   BodyCatalog,
   BodyProvider,
   BodySummary,
-  FeatureOverlay,
+  ExplainStep,
+  DiagnosticSnapshot,
+  DiagnosticsDescriptor,
+  DomainDescriptor,
+  FeatureCatalog,
+  FixtureOption,
   PickPosition,
   PointReport,
+  ProviderFailure,
+  RenderGeometry,
+  ViewCatalog,
   ViewDescriptor,
   ViewStats,
-} from '../domain';
+} from '../provider/contracts';
+import { asProviderFailure } from '../provider/contracts';
 import { Viewport } from '../render/viewport';
-import { groupViews } from './view-model';
+import { orderedGroups } from './view-model';
+
+type LoadState = 'opening' | 'metadata' | 'view' | 'ready' | 'error';
 
 export class InspectorApp {
   private readonly viewport: Viewport;
+  private readonly fixtures: readonly FixtureOption[];
+  private fixtureId: string;
   private provider: BodyProvider | null = null;
   private summary: BodySummary | null = null;
-  private views: readonly ViewDescriptor[] = [];
-  private features: readonly FeatureOverlay[] = [];
+  private domains: readonly DomainDescriptor[] = [];
+  private activeDomain: DomainDescriptor | null = null;
+  private catalog: ViewCatalog = { groups: [], views: [] };
   private activeView: ViewDescriptor | null = null;
-  private featuresEnabled = false;
-  private autoRotate = false;
+  private activeTimeId: string | undefined;
+  private activeStageId: string | undefined;
+  private geometry: RenderGeometry | null = null;
+  private stats: ViewStats | undefined;
+  private diagnostics: DiagnosticsDescriptor = { available: false };
+  private snapshot: DiagnosticSnapshot | null = null;
+  private featureCatalog: FeatureCatalog = { tables: [] };
+  private selectedOverlays = new Set<string>();
+  private selectedPosition: PickPosition | null = null;
+  private pointReport: PointReport | null = null;
+  private failure: ProviderFailure | null = null;
+  private loadState: LoadState = 'opening';
+  private debugOpen = false;
+  private diagnosticsOpen = false;
+  private featuresOpen = false;
+  private requestVersion = 0;
 
-  constructor(
-    private readonly root: HTMLDivElement,
-    private readonly catalog: BodyCatalog,
-  ) {
-    this.root.innerHTML = shellMarkup();
-    const viewportElement = requiredElement<HTMLDivElement>(this.root, '#body-viewport');
-    this.viewport = new Viewport(viewportElement, (position) => void this.selectPoint(position));
-    this.bindControls();
+  constructor(private readonly root: HTMLDivElement, private readonly bodyCatalog: BodyCatalog) {
+    this.fixtures = bodyCatalog.fixtures();
+    const requested = new URL(window.location.href).searchParams.get('fixture');
+    this.fixtureId = this.fixtures.some(({ id }) => id === requested) ? requested! : 'fixture:normal-surface';
+    this.root.innerHTML = this.shell();
+    this.viewport = new Viewport(this.element<HTMLDivElement>('#viewport'), (position) => void this.inspect(position));
+    this.root.addEventListener('click', this.handleClick);
+    this.root.addEventListener('change', this.handleChange);
+    this.root.addEventListener('input', this.handleInput);
+    this.root.addEventListener('keydown', this.handleKeydown);
   }
 
   async start(): Promise<void> {
-    try {
-      const options = await this.catalog.bodies();
-      const selector = requiredElement<HTMLSelectElement>(this.root, '#body-selector');
-      selector.innerHTML = options.map((option) =>
-        `<option value="${escapeAttribute(option.objectId)}">${escapeHtml(option.label)} · ${escapeHtml(option.subtitle.split(' · ')[0] ?? '')}</option>`,
-      ).join('');
-      await this.openBody(options[0]?.objectId ?? '');
-    } catch (error) {
-      this.showError(error);
-    }
-  }
-
-  private bindControls(): void {
-    requiredElement<HTMLSelectElement>(this.root, '#body-selector').addEventListener('change', (event) => {
-      const target = event.currentTarget;
-      if (target instanceof HTMLSelectElement) void this.openBody(target.value);
-    });
-    requiredElement<HTMLButtonElement>(this.root, '#debug-button').addEventListener('click', () => this.toggleDebugMenu());
-    requiredElement<HTMLButtonElement>(this.root, '#features-button').addEventListener('click', () => this.toggleFeatures());
-    requiredElement<HTMLButtonElement>(this.root, '#settings-button').addEventListener('click', () => this.toggleAutoRotate());
-    this.root.addEventListener('click', (event) => {
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-      const viewButton = target.closest<HTMLButtonElement>('[data-view-id]');
-      if (viewButton?.dataset.viewId) void this.selectView(viewButton.dataset.viewId);
-      if (!target.closest('#debug-menu') && !target.closest('#debug-button')) this.closeDebugMenu();
-      if (target.closest('[data-dismiss-selection]')) this.hideSelection();
-    });
-    document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        this.closeDebugMenu();
-        this.hideSelection();
-      }
-    });
-  }
-
-  private async openBody(objectId: string): Promise<void> {
-    if (!objectId) return;
-    this.closeDebugMenu();
-    this.hideSelection();
-    this.featuresEnabled = false;
-    this.summary = null;
-    this.provider = await this.catalog.open(objectId);
-    const [summary, views, geometry, featureList, diagnostics] = await Promise.all([
-      this.provider.summary(),
-      this.provider.views(),
-      this.provider.domainGeometry(),
-      this.provider.features(),
-      this.provider.diagnostics(),
-    ]);
-    this.summary = summary;
-    this.root.classList.toggle('is-radial', summary.presentation === 'radial-profile');
-    this.views = views;
-    this.features = featureList;
-    this.activeView = views.find((candidate) => candidate.id === summary.defaultViewId) ?? views[0] ?? null;
-    requiredElement<HTMLElement>(this.root, '#body-name').textContent = summary.name;
-    requiredElement<HTMLElement>(this.root, '#body-classification').textContent = summary.classification;
-    requiredElement<HTMLElement>(this.root, '#body-description').textContent = summary.description;
-    requiredElement<HTMLElement>(this.root, '#status-body').textContent = summary.name;
-    requiredElement<HTMLElement>(this.root, '#status-object-id').textContent = `${summary.objectId.slice(0, 11)}…`;
-    requiredElement<HTMLElement>(this.root, '#status-lod').textContent = summary.lod;
-    requiredElement<HTMLElement>(this.root, '#status-source').textContent = summary.sourceLabel;
-    requiredElement<HTMLElement>(this.root, '#domain-label').textContent = summary.domainLabel;
-    requiredElement<HTMLElement>(this.root, '#viewport-instruction').textContent = summary.presentation === 'radial-profile'
-      ? 'SCROLL TO ZOOM  ·  CLICK TO INSPECT PROFILE'
-      : 'DRAG TO ORBIT  ·  SCROLL TO ZOOM';
-    const diagnosticsBadge = requiredElement<HTMLElement>(this.root, '#diagnostics-state');
-    diagnosticsBadge.textContent = diagnostics.available ? diagnostics.label ?? 'Diagnostics available' : 'Diagnostics unavailable';
-    diagnosticsBadge.classList.toggle('is-available', diagnostics.available);
-    const featureButton = requiredElement<HTMLButtonElement>(this.root, '#features-button');
-    featureButton.hidden = featureList.length === 0;
-    featureButton.setAttribute('aria-pressed', 'false');
-    requiredElement<HTMLElement>(this.root, '#body-marker').textContent = summary.marker;
-    await this.renderMenu();
-    if (this.activeView) await this.applyView(this.activeView, geometry);
-  }
-
-  private async renderMenu(): Promise<void> {
-    const menu = requiredElement<HTMLDivElement>(this.root, '#debug-menu');
-    const groups = groupViews(this.views);
-    const groupMarkup = Array.from(groups, ([groupName, groupViews]) => `
-      <section class="debug-group" aria-label="${escapeAttribute(groupName)}">
-        <div class="debug-group-title">${escapeHtml(groupName)}</div>
-        ${groupViews.map((descriptor) => `
-          <button class="debug-option${descriptor.id === this.activeView?.id ? ' is-active' : ''}" type="button" data-view-id="${escapeAttribute(descriptor.id)}">
-            <span>${escapeHtml(descriptor.label)}</span>
-            <span class="debug-option-domain">${escapeHtml(descriptor.domain)}</span>
-          </button>`).join('')}
-      </section>`).join('');
-    menu.innerHTML = groupMarkup || '<div class="menu-empty">No declared views</div>';
-  }
-
-  private async selectView(viewId: string): Promise<void> {
-    const descriptor = this.views.find((candidate) => candidate.id === viewId);
-    if (!descriptor || !this.provider || !this.summary) return;
-    this.activeView = descriptor;
-    await this.renderMenu();
-    const geometry = await this.provider.domainGeometry();
-    await this.applyView(descriptor, geometry);
-    this.closeDebugMenu();
-  }
-
-  private async applyView(descriptor: ViewDescriptor, geometry: Awaited<ReturnType<BodyProvider['domainGeometry']>>): Promise<void> {
-    if (!this.provider || !this.summary) return;
-    const [stats, tile, profile] = await Promise.all([
-      this.provider.stats(descriptor.id),
-      this.provider.tile(descriptor.id),
-      this.provider.radialProfile(descriptor.id),
-    ]);
-    this.updateInfo(descriptor, stats, profile);
-    this.viewport.setBody(this.summary, geometry, descriptor, tile);
-    this.viewport.setFeatures(this.featuresEnabled ? this.features : []);
-    this.viewport.setAutoRotate(this.autoRotate && this.summary.presentation === 'surface');
-  }
-
-  private updateInfo(descriptor: ViewDescriptor, stats: ViewStats, profile: Awaited<ReturnType<BodyProvider['radialProfile']>>): void {
-    requiredElement<HTMLElement>(this.root, '#view-name').textContent = descriptor.label;
-    requiredElement<HTMLElement>(this.root, '#view-domain').textContent = descriptor.domain;
-    requiredElement<HTMLElement>(this.root, '#view-description').textContent = descriptor.description;
-    requiredElement<HTMLElement>(this.root, '#stat-min').textContent = formatNumber(stats.min);
-    requiredElement<HTMLElement>(this.root, '#stat-max').textContent = formatNumber(stats.max);
-    requiredElement<HTMLElement>(this.root, '#stat-mean').textContent = formatNumber(stats.mean);
-    const unit = descriptor.legend.unit ? ` ${descriptor.legend.unit}` : '';
-    requiredElement<HTMLElement>(this.root, '#stats-unit').textContent = unit;
-    requiredElement<HTMLElement>(this.root, '#sample-count').textContent = stats.countLabel;
-    const legend = requiredElement<HTMLDivElement>(this.root, '#legend');
-    const gradient = descriptor.legend.stops.map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(', ');
-    legend.innerHTML = `
-      <div class="legend-scale" style="--legend-gradient: linear-gradient(90deg, ${escapeAttribute(gradient)})"></div>
-      <div class="legend-range"><span>${formatNumber(stats.min)}${escapeHtml(unit)}</span><span>${formatNumber(stats.max)}${escapeHtml(unit)}</span></div>`;
-    const radialCard = requiredElement<HTMLElement>(this.root, '#radial-profile');
-    const radial = this.summary?.presentation === 'radial-profile';
-    radialCard.hidden = !radial;
-    if (radial) radialCard.innerHTML = radialChartMarkup(profile);
-  }
-
-  private async selectPoint(position: PickPosition): Promise<void> {
-    if (!this.provider || !this.activeView) return;
-    const [report, explanation] = await Promise.all([
-      this.provider.inspect(position),
-      this.provider.explain(position, this.activeView.id),
-    ]);
-    this.showSelection(report, explanation);
-  }
-
-  private showSelection(report: PointReport, explanation: readonly string[]): void {
-    const card = requiredElement<HTMLElement>(this.root, '#selection-card');
-    card.hidden = false;
-    requiredElement<HTMLElement>(card, '#selection-position').textContent = report.positionLabel;
-    requiredElement<HTMLElement>(card, '#selection-source').textContent = report.source;
-    requiredElement<HTMLElement>(card, '#selection-level').textContent = report.levelUsed;
-    const fieldContainer = requiredElement<HTMLDivElement>(card, '#selection-fields');
-    fieldContainer.replaceChildren(...report.fields.map((field) => {
-      const item = document.createElement('div');
-      item.className = 'point-field';
-      const label = document.createElement('span');
-      label.className = 'point-field-label';
-      label.textContent = field.label;
-      const value = document.createElement('strong');
-      value.textContent = `${field.value}${field.unit ? ` ${field.unit}` : ''}`;
-      if (field.color) value.style.setProperty('--field-color', field.color);
-      item.append(label, value);
-      return item;
-    }));
-    const explanationNode = requiredElement<HTMLUListElement>(card, '#selection-explanation');
-    explanationNode.replaceChildren(...explanation.map((line) => {
-      const item = document.createElement('li');
-      item.textContent = line;
-      return item;
-    }));
-  }
-
-  private hideSelection(): void {
-    const card = this.root.querySelector<HTMLElement>('#selection-card');
-    if (card) card.hidden = true;
-  }
-
-  private toggleDebugMenu(): void {
-    const menu = requiredElement<HTMLElement>(this.root, '#debug-menu');
-    const isOpen = menu.classList.toggle('is-open');
-    requiredElement<HTMLButtonElement>(this.root, '#debug-button').setAttribute('aria-expanded', `${isOpen}`);
-  }
-
-  private closeDebugMenu(): void {
-    this.root.querySelector<HTMLElement>('#debug-menu')?.classList.remove('is-open');
-    this.root.querySelector<HTMLButtonElement>('#debug-button')?.setAttribute('aria-expanded', 'false');
-  }
-
-  private toggleFeatures(): void {
-    if (this.features.length === 0) return;
-    this.featuresEnabled = !this.featuresEnabled;
-    const button = requiredElement<HTMLButtonElement>(this.root, '#features-button');
-    button.setAttribute('aria-pressed', `${this.featuresEnabled}`);
-    button.classList.toggle('is-active', this.featuresEnabled);
-    this.viewport.setFeatures(this.featuresEnabled ? this.features : []);
-  }
-
-  private toggleAutoRotate(): void {
-    this.autoRotate = !this.autoRotate;
-    const button = requiredElement<HTMLButtonElement>(this.root, '#settings-button');
-    button.setAttribute('aria-pressed', `${this.autoRotate}`);
-    button.title = this.autoRotate ? 'Auto rotation on' : 'Auto rotation off';
-    this.viewport.setAutoRotate(this.autoRotate && this.summary?.presentation === 'surface');
-  }
-
-  private showError(error: unknown): void {
-    const message = error instanceof Error ? error.message : 'Unable to load this mock body.';
-    const alert = requiredElement<HTMLElement>(this.root, '#error-message');
-    alert.textContent = message;
-    alert.hidden = false;
+    this.renderAll();
+    await this.openFixture(this.fixtureId);
   }
 
   destroy(): void {
+    this.root.removeEventListener('click', this.handleClick);
+    this.root.removeEventListener('change', this.handleChange);
+    this.root.removeEventListener('input', this.handleInput);
+    this.root.removeEventListener('keydown', this.handleKeydown);
     this.viewport.destroy();
+  }
+
+  private shell(): string {
+    return `<div class="app-shell">
+      <header class="topbar">
+        <a class="brand-lockup" href="#" aria-label="VEYRA Inspector"><span class="brand-mark" aria-hidden="true">V</span><span>VEYRA <b>Inspector</b></span></a>
+        <div class="body-identity"><span id="body-name">Opening fixture…</span><span class="synthetic-tag">SYNTHETIC FIXTURE</span></div>
+        <div class="toolbar-controls">
+          <label class="control-label domain-control">Domain <select id="domain-selector" aria-label="Domain"></select></label>
+          <button id="debug-button" class="toolbar-button" data-testid="debug-button" aria-haspopup="dialog" aria-expanded="false" aria-controls="debug-menu">Debug · …</button>
+          <label id="temporal-control" class="control-label temporal-control" hidden>Time <select id="time-selector" aria-label="Time selection"></select></label>
+          <button id="diagnostics-button" class="toolbar-button" aria-haspopup="dialog" aria-expanded="false" hidden>Diagnostics</button>
+          <button id="features-button" class="toolbar-button" aria-haspopup="dialog" aria-expanded="false" hidden>Features</button>
+          <button id="inspect-center" class="toolbar-button inspect-action" title="Inspect the center of the displayed model">Inspect point</button>
+          <button id="settings-button" class="icon-button" aria-label="Display settings" title="Display settings">⋯</button>
+        </div>
+      </header>
+      <main class="workspace">
+        <div id="viewport" class="viewport" aria-label="Main interactive viewport"></div>
+        <div class="viewport-hint" aria-hidden="true">Drag to rotate · Scroll to zoom · Select a point to inspect</div>
+        <div id="provider-state" class="provider-state" role="status" aria-live="polite"></div>
+        <section id="provider-error" class="provider-error" role="alert" hidden></section>
+        <div class="right-rail">
+          <section id="legend-panel" class="panel legend-panel" data-panel="legend" aria-labelledby="view-name"></section>
+          <aside id="inspection-panel" class="panel inspection-panel" data-panel="inspection" aria-label="Point inspection" hidden></aside>
+        </div>
+        <section id="debug-menu" class="popover debug-menu" role="dialog" aria-label="View catalogue" hidden></section>
+        <section id="diagnostics-menu" class="popover diagnostics-menu" role="dialog" aria-label="Diagnostics stages" hidden></section>
+        <section id="features-menu" class="popover features-menu" role="dialog" aria-label="Feature overlays" hidden></section>
+      </main>
+      <footer class="status-strip">
+        <span class="footer-fixture"><span class="status-dot"></span><label for="fixture-selector">Fixture</label><select id="fixture-selector" aria-label="Synthetic fixture"></select></span>
+        <span id="status-body">BODY · —</span><span id="status-domain">DOMAIN · —</span>
+        <span class="status-source">SOURCE · SYNTHETIC FIXTURE</span>
+      </footer>
+    </div>`;
+  }
+
+  private async openFixture(fixtureId: string): Promise<void> {
+    const version = ++this.requestVersion;
+    this.fixtureId = fixtureId;
+    this.provider = null;
+    this.summary = null;
+    this.domains = [];
+    this.activeDomain = null;
+    this.catalog = { groups: [], views: [] };
+    this.activeView = null;
+    this.activeTimeId = undefined;
+    this.activeStageId = undefined;
+    this.geometry = null;
+    this.stats = undefined;
+    this.diagnostics = { available: false };
+    this.snapshot = null;
+    this.featureCatalog = { tables: [] };
+    this.selectedOverlays.clear();
+    this.selectedPosition = null;
+    this.pointReport = null;
+    this.failure = null;
+    this.loadState = 'opening';
+    this.setFixtureQuery(fixtureId);
+    this.closePopovers(false);
+    this.viewport.clearData();
+    this.renderAll();
+    try {
+      const provider = await this.bodyCatalog.open(fixtureId);
+      if (version !== this.requestVersion) return;
+      this.provider = provider;
+      this.loadState = 'metadata';
+      this.renderStatus();
+      const [summary, domains, diagnostics, featureCatalog] = await Promise.all([
+        provider.summary(), provider.domains(), provider.diagnostics(), provider.features(),
+      ]);
+      if (version !== this.requestVersion) return;
+      this.summary = summary;
+      this.domains = domains;
+      this.diagnostics = diagnostics;
+      this.featureCatalog = featureCatalog;
+      this.activeDomain = domains[0] ?? null;
+      if (this.activeDomain) {
+        this.catalog = await provider.views(this.activeDomain.id);
+        this.activeView = this.catalog.views[0] ?? null;
+        this.activeTimeId = this.defaultTime(this.activeView);
+        this.geometry = await provider.domainGeometry(this.activeDomain.id);
+      }
+      this.loadState = 'ready';
+      this.renderAll();
+      if (this.activeView) await this.loadActiveView(version);
+    } catch (error) {
+      if (version !== this.requestVersion) return;
+      this.showFailure(error);
+    }
+  }
+
+  private async changeDomain(domainId: string): Promise<void> {
+    const domain = this.domains.find(({ id }) => id === domainId);
+    if (!domain || !this.provider) return;
+    const version = ++this.requestVersion;
+    this.activeDomain = domain;
+    this.activeStageId = undefined;
+    this.snapshot = null;
+    this.pointReport = null;
+    this.selectedPosition = null;
+    this.geometry = null;
+    this.stats = undefined;
+    this.viewport.clearData();
+    this.loadState = 'metadata';
+    this.renderAll();
+    try {
+      const [catalog, geometry] = await Promise.all([this.provider.views(domain.id), this.provider.domainGeometry(domain.id)]);
+      if (version !== this.requestVersion) return;
+      this.catalog = catalog;
+      this.geometry = geometry;
+      this.activeView = catalog.views[0] ?? null;
+      this.activeTimeId = this.defaultTime(this.activeView);
+      this.loadState = 'ready';
+      this.renderAll();
+      if (this.activeView) await this.loadActiveView(version);
+      this.element<HTMLSelectElement>('#domain-selector').focus();
+    } catch (error) {
+      if (version !== this.requestVersion) return;
+      this.showFailure(error);
+    }
+  }
+
+  private async selectView(viewId: string): Promise<void> {
+    const view = this.catalog.views.find(({ id }) => id === viewId);
+    if (!view || !this.provider) return;
+    const version = ++this.requestVersion;
+    this.activeView = view;
+    this.activeTimeId = this.defaultTime(view);
+    this.stats = undefined;
+    this.closePopovers(true);
+    this.loadState = 'view';
+    this.failure = null;
+    this.viewport.clearData();
+    this.renderAll();
+    await this.loadActiveView(version);
+  }
+
+  private async loadActiveView(version: number): Promise<void> {
+    const provider = this.provider;
+    const view = this.activeView;
+    const domain = this.activeDomain;
+    if (!provider || !view || !domain) {
+      this.loadState = 'ready';
+      this.renderAll();
+      return;
+    }
+    this.loadState = 'view';
+    this.failure = null;
+    this.renderStatus();
+    this.renderLegend();
+    try {
+      const [geometry, tile, stats] = await Promise.all([
+        this.geometry ? Promise.resolve(this.geometry) : provider.domainGeometry(domain.id),
+        provider.tile(view.id, this.activeTimeId, this.activeStageId),
+        provider.stats(view.id),
+      ]);
+      if (version !== this.requestVersion) return;
+      this.geometry = geometry;
+      this.stats = stats;
+      this.loadState = 'ready';
+      this.viewport.setData(geometry, view, tile);
+      this.viewport.setOverlays(this.featureCatalog.tables.filter((table) => this.selectedOverlays.has(table.id)));
+      this.renderAll(tile.missingResources ?? []);
+    } catch (error) {
+      if (version !== this.requestVersion) return;
+      this.viewport.clearData();
+      this.showFailure(error);
+    }
+  }
+
+  private async inspect(position: PickPosition): Promise<void> {
+    if (!this.provider) return;
+    this.selectedPosition = position;
+    this.pointReport = null;
+    this.renderInspection();
+    try {
+      const report = await this.provider.inspect(position);
+      if (this.selectedPosition !== position) return;
+      this.pointReport = report;
+      this.renderInspection();
+      const input = this.root.querySelector<HTMLInputElement>('#field-search');
+      if (input) input.focus();
+    } catch (error) {
+      this.showFailure(error);
+    }
+  }
+
+  private async selectStage(stageId: string): Promise<void> {
+    if (!this.provider) return;
+    this.activeStageId = stageId;
+    this.snapshot = null;
+    const version = ++this.requestVersion;
+    this.renderDiagnostics();
+    this.focusStage(stageId);
+    try {
+      this.snapshot = await this.provider.diagnosticStage(stageId);
+      if (version !== this.requestVersion) return;
+      this.renderDiagnostics();
+      this.focusStage(stageId);
+      if (this.activeView) await this.loadActiveView(version);
+      this.focusStage(stageId);
+    } catch (error) {
+      if (version === this.requestVersion) this.showFailure(error);
+    }
+  }
+
+  private async selectTime(timeId: string): Promise<void> {
+    if (!this.activeView?.timeSelections?.some(({ id }) => id === timeId)) return;
+    this.activeTimeId = timeId;
+    const version = ++this.requestVersion;
+    this.loadState = 'view';
+    this.viewport.clearData();
+    this.renderStatus();
+    await this.loadActiveView(version);
+    this.element<HTMLSelectElement>('#time-selector').focus();
+  }
+
+  private async copy(text: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      this.setCopyStatus('Copied');
+    } catch {
+      this.setCopyStatus('Clipboard unavailable');
+    }
+  }
+
+  private setCopyStatus(message: string): void {
+    const output = this.root.querySelector<HTMLElement>('#copy-status');
+    if (output) output.textContent = message;
+  }
+
+  private showFailure(error: unknown): void {
+    this.failure = asProviderFailure(error);
+    this.loadState = 'error';
+    this.renderAll();
+  }
+
+  private renderAll(missingResources: readonly string[] = []): void {
+    this.renderFixtureSelector();
+    this.renderIdentity();
+    this.renderDomainSelector();
+    this.renderDebugButton();
+    this.renderTemporalControl();
+    this.renderDiagnosticsButton();
+    this.renderFeaturesButton();
+    this.renderStatus(missingResources);
+    this.renderError();
+    this.renderLegend(missingResources);
+    this.renderInspection();
+    this.renderDebugMenu();
+    this.renderDiagnostics();
+    this.renderFeatures();
+  }
+
+  private renderFixtureSelector(): void {
+    const selector = this.element<HTMLSelectElement>('#fixture-selector');
+    selector.innerHTML = this.fixtures.map((fixture) => `<option value="${attr(fixture.id)}" title="${attr(fixture.description)}">${escape(fixture.label)}</option>`).join('');
+    selector.value = this.fixtureId;
+  }
+
+  private renderIdentity(): void {
+    this.element<HTMLElement>('#body-name').textContent = this.summary?.name ?? this.currentFixture()?.label ?? 'Opening fixture…';
+    this.element<HTMLElement>('#status-body').textContent = `BODY · ${this.summary ? shorten(this.summary.objectId) : '—'}`;
+    this.element<HTMLElement>('#status-domain').textContent = this.activeDomain ? `DOMAIN · ${this.activeDomain.topology}` : 'DOMAIN · NONE';
+  }
+
+  private renderDomainSelector(): void {
+    const selector = this.element<HTMLSelectElement>('#domain-selector');
+    selector.innerHTML = this.domains.map((domain) => `<option value="${attr(domain.id)}">${escape(domain.label)} · ${escape(domain.topology)}</option>`).join('');
+    selector.disabled = this.domains.length <= 1;
+    selector.hidden = this.domains.length === 0;
+    if (this.activeDomain) selector.value = this.activeDomain.id;
+  }
+
+  private renderDebugButton(): void {
+    const button = this.element<HTMLButtonElement>('#debug-button');
+    const count = this.catalog.views.length;
+    button.disabled = count <= 1;
+    button.setAttribute('aria-expanded', String(this.debugOpen && count > 1));
+    button.textContent = count === 0 ? 'Debug · none' : count === 1 ? `View · ${this.activeView?.label ?? '1 view'}` : `Debug · ${count}`;
+    button.title = count <= 1 ? (count === 0 ? 'This fixture declares no views.' : 'This fixture declares a single view; no catalogue is needed.') : 'Search the provider-declared view catalogue.';
+  }
+
+  private renderTemporalControl(): void {
+    const wrap = this.element<HTMLLabelElement>('#temporal-control');
+    const select = this.element<HTMLSelectElement>('#time-selector');
+    const choices = this.activeView?.timeSelections ?? [];
+    wrap.hidden = choices.length === 0;
+    select.innerHTML = choices.map((item) => `<option value="${attr(item.id)}" title="${attr(item.label)}">${escape(item.label)}</option>`).join('');
+    select.value = this.activeTimeId ?? choices[0]?.id ?? '';
+  }
+
+  private renderDiagnosticsButton(): void {
+    const button = this.element<HTMLButtonElement>('#diagnostics-button');
+    const stages = this.diagnostics.available ? this.diagnostics.stages : [];
+    const available = stages.length > 0;
+    button.hidden = !available;
+    button.setAttribute('aria-expanded', String(this.diagnosticsOpen && available));
+    button.textContent = available ? `Diagnostics · ${stages.length}` : 'Diagnostics';
+  }
+
+  private renderFeaturesButton(): void {
+    const button = this.element<HTMLButtonElement>('#features-button');
+    const available = this.featureCatalog.tables.some(({ geometry }) => geometry !== undefined);
+    button.hidden = !available;
+    button.setAttribute('aria-expanded', String(this.featuresOpen && available));
+    button.textContent = available ? `Features · ${this.featureCatalog.tables.length}` : 'Features';
+  }
+
+  private renderStatus(missingResources: readonly string[] = []): void {
+    const status = this.element<HTMLElement>('#provider-state');
+    status.dataset.state = this.loadState;
+    const messages: Record<LoadState, string> = {
+      opening: 'Opening fixture…',
+      metadata: 'Loading provider metadata…',
+      view: 'Loading view data…',
+      ready: '',
+      error: '',
+    };
+    if (this.loadState === 'ready' && missingResources.length > 0) {
+      status.textContent = `INCOMPLETE DATA · ${missingResources.length} missing resources · available values are shown`;
+      status.hidden = false;
+    } else {
+      status.textContent = messages[this.loadState];
+      status.hidden = status.textContent.length === 0;
+    }
+  }
+
+  private renderError(): void {
+    const panel = this.element<HTMLElement>('#provider-error');
+    if (!this.failure) {
+      panel.hidden = true;
+      panel.innerHTML = '';
+      return;
+    }
+    const failure = this.failure;
+    panel.hidden = false;
+    panel.innerHTML = `<div class="error-heading"><span class="error-mark" aria-hidden="true">!</span><div><p class="eyebrow">PROVIDER RESPONSE</p><h2>${escape(errorTitle(failure))}</h2></div></div>
+      <code class="error-code">${escape(failure.code)}</code><p class="error-message">${escape(failure.message)}</p>
+      ${failure.offendingItem ? `<p class="error-item">Item · <code title="${attr(failure.offendingItem)}">${escape(failure.offendingItem)}</code></p>` : ''}
+      ${failure.retryable ? '<button id="retry-button" class="secondary-button">Retry</button>' : ''}`;
+  }
+
+  private renderLegend(missingResources: readonly string[] = []): void {
+    const panel = this.element<HTMLElement>('#legend-panel');
+    const view = this.activeView;
+    if (!view) {
+      const pending = this.loadState === 'opening' || this.loadState === 'metadata';
+      const title = pending ? 'Waiting for metadata' : this.failure ? 'No view available' : 'No view declared';
+      const description = pending
+        ? 'The provider is opening this fixture and has not returned its descriptors yet.'
+        : this.failure
+          ? 'The provider did not return a view catalogue for this fixture.'
+          : this.domains.length
+            ? 'The provider returned no views for this domain.'
+            : 'The provider returned no domains for this fixture.';
+      panel.innerHTML = `<div class="panel-heading"><p class="eyebrow">CURRENT VIEW</p><h2 id="view-name">${title}</h2></div><p class="muted">${description}</p>`;
+      return;
+    }
+    const group = this.catalog.groups.find(({ id }) => id === view.groupId);
+    panel.innerHTML = `<div class="panel-heading"><div><p class="eyebrow">${escape(group?.label ?? 'View')}</p><h2 id="view-name" title="${attr(view.label)}">${escape(view.label)}</h2></div><span class="view-counter">${this.catalog.views.indexOf(view) + 1} / ${this.catalog.views.length}</span></div>
+      <p id="view-description" class="view-description" title="${attr(view.description)}">${escape(view.description)}</p>
+      <div class="legend-body">${this.renderLegendContent(view, this.stats)}</div>
+      ${this.activeDomain?.renderKind === 'radial-profile' && this.geometry?.profile ? `<div class="profile-chart"><p class="eyebrow">PROFILE · PROVIDER VALUES</p>${profileSvg(this.geometry.profile)}</div>` : ''}
+      ${missingResources.length ? `<div class="incomplete-note" role="status"><b>Incomplete response</b><span>${missingResources.map((item) => `<span title="${attr(item)}">${escape(item)}</span>`).join(', ')}</span></div>` : ''}
+      <p class="legend-source">All values are synthetic fixture responses.</p>`;
+    panel.dataset.viewId = view.id;
+  }
+
+  private renderLegendContent(view: ViewDescriptor, stats: ViewStats | undefined): string {
+    const legend = view.legend;
+    if (legend.kind === 'categorical') {
+      return `<div class="legend-unit-row">${legend.unit ? `<span class="unit-tag">${escape(legend.unit)}</span>` : '<span class="muted">No unit provided</span>'}<span class="muted">${legend.categories.length} categories</span></div>
+        <div class="category-list" role="list" aria-label="Legend categories">${legend.categories.map((category) => `<div class="category-row" role="listitem" tabindex="0" title="${attr(category.label)}"><span class="category-swatch" style="--swatch:${attr(category.color)}"></span><span class="category-name" title="${attr(category.label)}">${escape(category.label)}</span><span class="category-metrics">${category.count === undefined ? '—' : formatCount(category.count)}${category.weightedPercent === undefined ? '' : `<small>${formatPercent(category.weightedPercent)}</small>`}</span></div>`).join('')}</div>`;
+    }
+    const gradient = legend.stops.map(({ at, color }) => `${color} ${(at * 100).toFixed(0)}%`).join(', ');
+    const statText = legend.statsAvailable && stats
+      ? `<div class="stats-grid"><div><span>MIN</span><b title="${attr(String(stats.min))}">${formatNumber(stats.min)}</b></div><div><span>MAX</span><b title="${attr(String(stats.max))}">${formatNumber(stats.max)}</b></div><div><span>MEAN</span><b title="${attr(String(stats.mean))}">${formatNumber(stats.mean)}</b></div></div>${stats.count === undefined ? '' : `<p class="sample-count">${formatCount(stats.count)} provider records</p>`}`
+      : '<p class="no-stats">No statistics available</p>';
+    return `<div class="legend-unit-row">${legend.unit ? `<span class="unit-tag">${escape(legend.unit)}</span>` : '<span class="muted">No unit provided</span>'}${legend.range ? `<span class="muted range-value" title="${attr(`${legend.range.min} – ${legend.range.max}`)}">${formatNumber(legend.range.min)} – ${formatNumber(legend.range.max)}</span>` : ''}</div>
+      <div class="legend-scale" role="img" aria-label="Continuous colour scale${legend.unit ? ` in ${attr(legend.unit)}` : ''}" style="--scale:linear-gradient(90deg, ${gradient})"></div>
+      <div class="scale-ends"><span>${legend.range ? formatNumber(legend.range.min) : 'Low'}</span><span>${legend.range ? formatNumber(legend.range.max) : 'High'}</span></div>${statText}`;
+  }
+
+  private renderInspection(): void {
+    const panel = this.element<HTMLElement>('#inspection-panel');
+    if (!this.selectedPosition) {
+      panel.hidden = true;
+      panel.innerHTML = '';
+      return;
+    }
+    panel.hidden = false;
+    if (!this.pointReport) {
+      panel.classList.remove('large-report');
+      panel.innerHTML = '<div class="panel-heading"><h2>Point inspection</h2><span class="muted">Loading response…</span></div>';
+      return;
+    }
+    const report = this.pointReport;
+    const count = report.groups.reduce((total, group) => total + group.fields.length, 0);
+    panel.classList.toggle('large-report', count > 12);
+    const groups = report.groups.map((group, index) => `<details class="field-group" ${index < 2 ? 'open' : ''}>
+      <summary><span title="${attr(group.label)}">${escape(group.label)}</span><small>${group.fields.length}</small></summary>
+      <div class="field-list">${group.fields.map((field) => this.renderField(field, group.label)).join('')}</div>
+    </details>`).join('');
+    const explain = this.activeView && this.provider && this.selectedPosition
+      ? `<details class="explain-block"><summary>Provider explanation</summary><div class="explain-tree">${this.renderExplain(this.snapshotExplain)}</div></details>`
+      : '';
+    panel.innerHTML = `<header class="inspection-header"><div><p class="eyebrow">SELECTED POSITION · ${count} FIELDS</p><h2 title="${attr(report.positionLabel)}">${escape(report.positionLabel)}</h2><code title="${attr(report.positionValue)}">${escape(report.positionValue)}</code></div><button class="icon-button close-inspection" aria-label="Close point inspection">×</button></header>
+      ${count > 8 ? '<label class="search-wrap field-search-wrap"><span aria-hidden="true">⌕</span><input id="field-search" type="search" placeholder="Filter fields and groups" aria-label="Filter point fields"></label>' : ''}
+      <div class="report-scroll"><div class="field-groups" id="field-groups">${groups || '<p class="muted">No fields supplied for this position.</p>'}</div>
+      ${explain}<div class="copy-row"><button class="secondary-button copy-position">Copy position</button><span id="copy-status" class="sr-only" aria-live="polite"></span></div></div>`;
+    void this.loadExplain();
+  }
+
+  private snapshotExplain: readonly ExplainStep[] = [];
+
+  private async loadExplain(): Promise<void> {
+    if (!this.provider || !this.activeView || !this.selectedPosition) return;
+    const position = this.selectedPosition;
+    try {
+      const chain = await this.provider.explain(position, this.activeView.id);
+      if (this.selectedPosition !== position) return;
+      this.snapshotExplain = chain;
+      const target = this.root.querySelector<HTMLElement>('.explain-tree');
+      if (target) target.innerHTML = this.renderExplain(chain);
+    } catch (error) {
+      this.showFailure(error);
+    }
+  }
+
+  private renderField(field: PointReport['groups'][number]['fields'][number], groupLabel: string): string {
+    const value = field.nodata || field.value == null ? 'No data' : field.value;
+    const unit = field.unit ? `<span class="field-unit">${escape(field.unit)}</span>` : '';
+    const level = field.levelUsed == null ? 'Level not provided' : `Level ${escape(String(field.levelUsed))}`;
+    const searchable = `${groupLabel} ${field.label} ${value} ${field.sourceKind} ${level} ${field.unit ?? ''}`.toLowerCase();
+    return `<div class="field-row" data-field="${attr(field.id)}" data-search="${attr(searchable)}">
+      <div class="field-copy"><span class="field-name" tabindex="0" aria-label="${attr(field.label)}" title="${attr(field.label)}">${escape(field.label)}</span><span class="field-source" title="Source ${attr(field.sourceKind)} · ${attr(level)}">${escape(field.sourceKind)} · ${level}</span></div>
+      <div class="field-result"><span class="field-value" tabindex="0" aria-label="${attr(`${value}${field.unit ? ` ${field.unit}` : ''}`)}" title="${attr(`${value}${field.unit ? ` ${field.unit}` : ''}`)}">${escape(value)}</span>${unit}<button class="copy-value" data-value="${attr(value)}" data-field-label="${attr(field.label)}" aria-label="Copy ${attr(field.label)} value" title="Copy value">⧉</button></div>
+    </div>`;
+  }
+
+  private renderExplain(nodes: readonly ExplainStep[]): string {
+    return nodes.map((node) => `<details class="explain-step"><summary title="${attr(node.label)}">${escape(node.label)}</summary><p title="${attr(node.description)}">${escape(node.description)}</p>
+      ${(node.references?.length ?? 0) ? `<dl class="reference-list">${node.references!.map((reference) => `<div><dt>${escape(reference.label)}</dt><dd title="${attr(reference.value)}">${escape(reference.value)}</dd></div>`).join('')}</dl>` : ''}
+      ${(node.children?.length ?? 0) ? `<div class="explain-children">${this.renderExplain(node.children!)}</div>` : ''}</details>`).join('');
+  }
+
+  private renderDebugMenu(): void {
+    const menu = this.element<HTMLElement>('#debug-menu');
+    const button = this.element<HTMLButtonElement>('#debug-button');
+    const enabled = this.debugOpen && this.catalog.views.length > 1;
+    menu.hidden = !enabled;
+    if (!enabled) return;
+    const groups = orderedGroups(this.catalog);
+    const records = groups.map(({ group, views }) => `<details class="catalog-group" data-group-id="${attr(group.id)}" open>
+      <summary><span class="group-label" title="${attr(group.label)}">${escape(group.label)}</span><small>${views.length}</small></summary>
+      <div class="catalog-options" role="group" aria-label="${attr(group.label)}">${views.map((view) => `<button class="view-option" role="option" aria-selected="${view.id === this.activeView?.id}" data-view-id="${attr(view.id)}" data-search="${attr(`${group.label} ${view.label} ${view.description}`.toLowerCase())}" title="${attr(view.label)}"><span class="option-label">${escape(view.label)}</span>${view.id === this.activeView?.id ? '<span class="current-mark">CURRENT</span>' : ''}</button>`).join('')}</div>
+    </details>`).join('');
+    menu.innerHTML = `<div class="popover-heading"><div><p class="eyebrow">PROVIDER CATALOGUE</p><h2>Debug views</h2></div><button class="icon-button close-popover" aria-label="Close view catalogue">×</button></div>
+      <label class="search-wrap"><span aria-hidden="true">⌕</span><input id="debug-search" type="search" placeholder="Search ${this.catalog.views.length} views" aria-label="Search views" autocomplete="off"></label>
+      <div id="view-catalog-list" class="catalog-scroll" role="listbox" aria-label="Declared view groups">${records}</div><p id="debug-empty" class="empty-search" hidden>No views match this search.</p>`;
+    button.setAttribute('aria-expanded', 'true');
+  }
+
+  private renderDiagnostics(): void {
+    const menu = this.element<HTMLElement>('#diagnostics-menu');
+    const available = this.diagnostics.available && this.diagnostics.stages.length > 0;
+    menu.hidden = !(this.diagnosticsOpen && available);
+    if (menu.hidden) return;
+    const stages = this.diagnostics.available ? this.diagnostics.stages : [];
+    menu.innerHTML = `<div class="popover-heading"><div><p class="eyebrow">PROVIDER SNAPSHOTS</p><h2>Diagnostic stages</h2></div><button class="icon-button close-popover" aria-label="Close diagnostics">×</button></div>
+      <label class="search-wrap"><span aria-hidden="true">⌕</span><input id="diagnostic-search" type="search" placeholder="Search ${stages.length} stages" aria-label="Search diagnostic stages"></label>
+      <div class="catalog-scroll stage-list" role="listbox" aria-label="Diagnostic stages">${stages.map((stage) => `<button class="stage-option" role="option" aria-selected="${stage.id === this.activeStageId}" data-stage-id="${attr(stage.id)}" data-search="${attr(stage.label.toLowerCase())}" title="${attr(stage.label)}"><span>${escape(stage.label)}</span>${stage.id === this.activeStageId ? '<small>SELECTED</small>' : ''}</button>`).join('')}</div>
+      ${this.snapshot ? `<div class="stage-snapshot"><b title="${attr(this.diagnostics.available ? stages.find(({ id }) => id === this.snapshot?.stageId)?.label ?? '' : '')}">${escape(this.diagnostics.available ? stages.find(({ id }) => id === this.snapshot?.stageId)?.label ?? 'Selected stage' : 'Selected stage')}</b><p>${escape(this.snapshot.message)}</p>${this.snapshot.values.map((item) => `<div><span>${escape(item.label)}</span><b>${escape(item.value)}</b></div>`).join('')}</div>` : '<p class="muted">Select a stage to display its provider snapshot.</p>'}
+      <p id="diagnostic-empty" class="empty-search" hidden>No stages match this search.</p>`;
+  }
+
+  private renderFeatures(): void {
+    const menu = this.element<HTMLElement>('#features-menu');
+    const enabled = this.featuresOpen && this.featureCatalog.tables.some(({ geometry }) => geometry !== undefined);
+    menu.hidden = !enabled;
+    if (!enabled) return;
+    const overlayTables = this.featureCatalog.tables.filter(({ geometry }) => geometry !== undefined);
+    menu.innerHTML = `<div class="popover-heading"><div><p class="eyebrow">PROVIDER GEOMETRY</p><h2>Feature overlays</h2></div><button class="icon-button close-popover" aria-label="Close overlays">×</button></div>
+      <div class="feature-summary">${this.featureCatalog.tables.length} tables · ${overlayTables.length} with display geometry</div>
+      <div class="catalog-scroll feature-list">${this.featureCatalog.tables.map((table) => `<label class="feature-option ${table.geometry ? '' : 'no-geometry'}" title="${attr(table.label)}"><input type="checkbox" data-feature-id="${attr(table.id)}" ${this.selectedOverlays.has(table.id) ? 'checked' : ''} ${table.geometry ? '' : 'disabled'}><span>${escape(table.label)}</span><small>${formatCount(table.count)}${table.geometry ? '' : ' · no geometry'}</small></label>`).join('')}</div>`;
+  }
+
+  private toggleDebug(): void {
+    if (this.catalog.views.length <= 1) return;
+    this.debugOpen = !this.debugOpen;
+    this.diagnosticsOpen = false;
+    this.featuresOpen = false;
+    this.renderDebugMenu();
+    this.renderDiagnostics();
+    this.renderFeatures();
+    this.element<HTMLButtonElement>('#debug-button').setAttribute('aria-expanded', String(this.debugOpen));
+    if (this.debugOpen) this.root.querySelector<HTMLInputElement>('#debug-search')?.focus();
+  }
+
+  private closePopovers(returnFocus: boolean): void {
+    const focusSelector = this.debugOpen ? '#debug-button' : this.diagnosticsOpen ? '#diagnostics-button' : this.featuresOpen ? '#features-button' : null;
+    this.debugOpen = false;
+    this.diagnosticsOpen = false;
+    this.featuresOpen = false;
+    this.renderDebugMenu();
+    this.renderDiagnostics();
+    this.renderFeatures();
+    this.element<HTMLButtonElement>('#debug-button').setAttribute('aria-expanded', 'false');
+    this.element<HTMLButtonElement>('#diagnostics-button').setAttribute('aria-expanded', 'false');
+    this.element<HTMLButtonElement>('#features-button').setAttribute('aria-expanded', 'false');
+    if (returnFocus && focusSelector) this.root.querySelector<HTMLButtonElement>(focusSelector)?.focus();
+  }
+
+  private focusStage(stageId: string): void {
+    const stage = [...this.root.querySelectorAll<HTMLButtonElement>('[data-stage-id]')].find((button) => button.dataset.stageId === stageId);
+    stage?.focus();
+  }
+
+  private handleClick = (event: Event): void => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('#debug-button')) { this.toggleDebug(); return; }
+    if (target.closest('#diagnostics-button')) {
+      this.diagnosticsOpen = !this.diagnosticsOpen;
+      this.debugOpen = false;
+      this.featuresOpen = false;
+      this.renderDebugMenu(); this.renderFeatures(); this.renderDiagnostics();
+      this.element<HTMLButtonElement>('#diagnostics-button').setAttribute('aria-expanded', String(this.diagnosticsOpen));
+      if (this.diagnosticsOpen) this.root.querySelector<HTMLInputElement>('#diagnostic-search')?.focus();
+      return;
+    }
+    if (target.closest('#features-button')) {
+      this.featuresOpen = !this.featuresOpen;
+      this.debugOpen = false;
+      this.diagnosticsOpen = false;
+      this.renderDebugMenu(); this.renderDiagnostics(); this.renderFeatures();
+      this.element<HTMLButtonElement>('#features-button').setAttribute('aria-expanded', String(this.featuresOpen));
+      return;
+    }
+    const viewButton = target.closest<HTMLElement>('[data-view-id]');
+    if (viewButton?.dataset.viewId) { void this.selectView(viewButton.dataset.viewId); return; }
+    const stageButton = target.closest<HTMLElement>('[data-stage-id]');
+    if (stageButton?.dataset.stageId) { void this.selectStage(stageButton.dataset.stageId); return; }
+    if (target.closest('.close-popover')) { this.closePopovers(true); return; }
+    if (target.closest('.close-inspection')) { this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
+    if (target.closest('#inspect-center')) { this.viewport.inspectCenter(); return; }
+    if (target.closest('#retry-button')) { void this.openFixture(this.fixtureId); return; }
+    if (target.closest('.copy-position') && this.pointReport) { void this.copy(this.pointReport.positionValue); return; }
+    const copyValue = target.closest<HTMLElement>('.copy-value');
+    if (copyValue) { void this.copy(`${copyValue.dataset.fieldLabel ?? ''}: ${copyValue.dataset.value ?? ''}`); return; }
+    if (target.closest('#settings-button')) { this.root.classList.toggle('compact-labels'); }
+  };
+
+  private handleChange = (event: Event): void => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement || target instanceof HTMLInputElement)) return;
+    if (target.id === 'fixture-selector') void this.openFixture(target.value);
+    if (target.id === 'domain-selector') void this.changeDomain(target.value);
+    if (target.id === 'time-selector') void this.selectTime(target.value);
+    if (target instanceof HTMLInputElement && target.matches('[data-feature-id]')) {
+      const id = target.dataset.featureId;
+      if (id) {
+        if (target.checked) this.selectedOverlays.add(id); else this.selectedOverlays.delete(id);
+        this.viewport.setOverlays(this.featureCatalog.tables.filter((table) => this.selectedOverlays.has(table.id)));
+      }
+    }
+  };
+
+  private handleInput = (event: Event): void => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.id === 'debug-search') this.filterOptions(target.value, '#view-catalog-list', '#debug-empty');
+    if (target.id === 'diagnostic-search') this.filterOptions(target.value, '.stage-list', '#diagnostic-empty');
+    if (target.id === 'field-search') this.filterFields(target.value);
+  };
+
+  private handleKeydown = (event: KeyboardEvent): void => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (event.key === 'Escape') {
+      if (this.debugOpen || this.diagnosticsOpen || this.featuresOpen) {
+        event.preventDefault(); this.closePopovers(true); return;
+      }
+      if (this.selectedPosition) { this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
+    }
+    const isDebugSearch = target.id === 'debug-search';
+    const isStageSearch = target.id === 'diagnostic-search';
+    const option = target.closest<HTMLButtonElement>('.view-option, .stage-option');
+    const list = isDebugSearch || option?.classList.contains('view-option') ? '#view-catalog-list' : isStageSearch || option?.classList.contains('stage-option') ? '.stage-list' : null;
+    if (!list) return;
+    if (option && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const search = this.root.querySelector<HTMLInputElement>(isStageSearch || option.classList.contains('stage-option') ? '#diagnostic-search' : '#debug-search');
+      if (search) { event.preventDefault(); search.focus(); search.value += event.key; this.filterOptions(search.value, isStageSearch || option.classList.contains('stage-option') ? '.stage-list' : '#view-catalog-list', isStageSearch || option.classList.contains('stage-option') ? '#diagnostic-empty' : '#debug-empty'); }
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
+    event.preventDefault();
+    const isStage = list === '.stage-list';
+    const selector = isStage ? '.stage-option:not([hidden])' : '.view-option:not([hidden])';
+    const options = [...this.root.querySelectorAll<HTMLButtonElement>(`${list} ${selector}`)];
+    if (event.key === 'Enter') { (option ?? options[0])?.click(); return; }
+    if (!option) { options[0]?.focus(); return; }
+    const currentGroup = option.closest<HTMLDetailsElement>('.catalog-group');
+    if (currentGroup) { currentGroup.hidden = false; currentGroup.open = true; }
+    const current = options.indexOf(option);
+    const next = event.key === 'ArrowDown' ? Math.min(options.length - 1, current + 1) : Math.max(0, current - 1);
+    const nextOption = options[next];
+    const nextGroup = nextOption?.closest<HTMLDetailsElement>('.catalog-group');
+    if (nextGroup) { nextGroup.hidden = false; nextGroup.open = true; }
+    nextOption?.focus();
+    nextOption?.scrollIntoView({ block: 'nearest' });
+  };
+
+  private filterOptions(value: string, listSelector: string, emptySelector: string): void {
+    const query = value.trim().toLowerCase();
+    const list = this.root.querySelector<HTMLElement>(listSelector);
+    if (!list) return;
+    let visible = 0;
+    const buttons = [...list.querySelectorAll<HTMLButtonElement>('[data-search]')];
+    for (const button of buttons) {
+      const match = button.dataset.search?.includes(query) ?? true;
+      button.hidden = !match;
+      if (match) visible += 1;
+    }
+    for (const group of list.querySelectorAll<HTMLElement>('.catalog-group')) {
+      const groupButtons = group.querySelectorAll<HTMLButtonElement>('[data-search]');
+      const groupVisible = [...groupButtons].some((button) => !button.hidden);
+      group.hidden = !groupVisible;
+      if (query && groupVisible) (group as HTMLDetailsElement).open = true;
+    }
+    const empty = this.root.querySelector<HTMLElement>(emptySelector);
+    if (empty) empty.hidden = visible !== 0;
+  }
+
+  private filterFields(value: string): void {
+    const query = value.trim().toLowerCase();
+    let visible = 0;
+    for (const row of this.root.querySelectorAll<HTMLElement>('.field-row')) {
+      row.hidden = !(row.dataset.search ?? '').includes(query);
+      if (!row.hidden) visible += 1;
+    }
+    for (const group of this.root.querySelectorAll<HTMLDetailsElement>('.field-group')) {
+      const matches = [...group.querySelectorAll<HTMLElement>('.field-row')].some((row) => !row.hidden);
+      group.hidden = !matches;
+      if (query && matches) group.open = true;
+    }
+    const groups = this.root.querySelector<HTMLElement>('#field-groups');
+    let empty = this.root.querySelector<HTMLElement>('#field-empty');
+    if (!empty && groups) { empty = document.createElement('p'); empty.id = 'field-empty'; empty.className = 'muted'; groups.append(empty); }
+    if (empty) { empty.hidden = visible !== 0; empty.textContent = 'No fields match this search.'; }
+  }
+
+  private defaultTime(view: ViewDescriptor | null): string | undefined {
+    return view?.defaultTimeSelectionId ?? view?.timeSelections?.[0]?.id;
+  }
+
+  private setFixtureQuery(fixtureId: string): void {
+    const url = new URL(window.location.href);
+    url.searchParams.set('fixture', fixtureId);
+    window.history.replaceState({}, '', url);
+  }
+
+  private currentFixture(): FixtureOption | undefined { return this.fixtures.find(({ id }) => id === this.fixtureId); }
+
+  private element<T extends HTMLElement>(selector: string): T {
+    const result = this.root.querySelector<T>(selector);
+    if (!result) throw new Error(`Missing Inspector element: ${selector}`);
+    return result;
   }
 }
 
-function shellMarkup(): string {
-  return `
-    <main class="inspector-shell">
-      <div id="body-viewport" class="body-viewport" aria-label="Interactive body viewport"></div>
-      <div class="vignette" aria-hidden="true"></div>
-      <header class="topbar">
-        <div class="brand-lockup" aria-label="VEYRA Inspector">
-          <span class="brand-mark"><i></i><b></b></span>
-          <span class="brand-name">VEYRA<span class="brand-divider">/</span><small>INSPECTOR</small></span>
-        </div>
-        <span class="topbar-separator"></span>
-        <div class="body-picker-wrap">
-          <span id="body-marker" class="body-marker">◉</span>
-          <select id="body-selector" aria-label="Select body" data-testid="body-selector"></select>
-          <span class="select-chevron">⌄</span>
-        </div>
-        <div class="toolbar-actions">
-          <div class="debug-wrap">
-            <button id="debug-button" class="toolbar-button debug-button" type="button" aria-expanded="false" aria-haspopup="true" data-testid="debug-button">
-              <span class="cube-icon" aria-hidden="true"><i></i><b></b><em></em></span>
-              <span>Debug</span><span class="button-caret">⌄</span>
-            </button>
-            <div id="debug-menu" class="debug-menu" role="menu" data-testid="debug-menu"></div>
-          </div>
-          <button id="features-button" class="toolbar-button feature-button" type="button" aria-pressed="false" hidden>
-            <span class="feature-symbol" aria-hidden="true">⌁</span><span>Features</span>
-          </button>
-          <span class="toolbar-spacer"></span>
-          <button id="settings-button" class="icon-button" type="button" title="Auto rotation off" aria-label="Toggle auto rotation" aria-pressed="false">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.1a3.9 3.9 0 1 0 0 7.8 3.9 3.9 0 0 0 0-7.8Z"/><path d="m19.3 13.6 1.1.9-1.4 2.4-1.4-.5a7.3 7.3 0 0 1-1.4.8l-.2 1.5h-2.8l-.3-1.5a7.3 7.3 0 0 1-1.4-.8l-1.4.5-1.4-2.4 1.1-.9a7.2 7.2 0 0 1 0-1.6l-1.1-.9 1.4-2.4 1.4.5a7.3 7.3 0 0 1 1.4-.8l.3-1.5h2.8l.2 1.5a7.3 7.3 0 0 1 1.4.8l1.4-.5 1.4 2.4-1.1.9a7.2 7.2 0 0 1 0 1.6Z"/></svg>
-          </button>
-        </div>
-      </header>
-
-      <section class="body-heading" aria-live="polite">
-        <div class="eyebrow"><span class="live-dot"></span>BODY ARTIFACT <span class="heading-dot">/</span> <span id="domain-label">SURFACE DOMAIN</span></div>
-        <div id="body-name" class="body-heading-name">Veyra</div>
-        <div id="body-classification" class="body-heading-class">Terrestrial · habitable test body</div>
-        <p id="body-description" class="body-heading-description">A broad, quiet view of an ocean-bearing rocky world.</p>
-      </section>
-
-      <aside class="view-card glass-card" aria-live="polite">
-        <div class="card-kicker"><span class="kicker-line"></span>ACTIVE VIEW <span id="view-domain" class="view-domain">surface</span></div>
-        <h1 id="view-name">Surface form</h1>
-        <p id="view-description">A presentation map of the mock body surface.</p>
-        <div id="legend" class="legend"></div>
-        <div class="stats-heading"><span>VIEW STATISTICS</span><span id="stats-unit"></span></div>
-        <div class="stats-grid">
-          <div><span>MIN</span><strong id="stat-min">−0.8</strong></div>
-          <div><span>MEAN</span><strong id="stat-mean">0.18</strong></div>
-          <div><span>MAX</span><strong id="stat-max">1.0</strong></div>
-        </div>
-        <div id="sample-count" class="sample-count">12.4M samples</div>
-        <div id="radial-profile" class="radial-profile" hidden></div>
-      </aside>
-
-      <section id="selection-card" class="selection-card glass-card" hidden aria-live="polite" data-testid="selection-card">
-        <div class="selection-head">
-          <div><div class="card-kicker"><span class="kicker-line"></span>POINT INSPECTOR</div><h2 id="selection-position">Surface 0.00, 0.00, 1.00</h2></div>
-          <button class="close-selection" type="button" aria-label="Close point inspector" data-dismiss-selection>×</button>
-        </div>
-        <div id="selection-fields" class="selection-fields"></div>
-        <div class="selection-meta"><span id="selection-source">Mock provider</span><span id="selection-level">L09 · native</span></div>
-        <details class="explain-details"><summary>Value context</summary><ul id="selection-explanation"></ul></details>
-      </section>
-
-      <div id="error-message" class="error-card" role="alert" hidden></div>
-      <div class="viewport-hint"><span class="mouse-hint" aria-hidden="true">◌</span><span id="viewport-instruction">DRAG TO ORBIT  ·  SCROLL TO ZOOM</span></div>
-      <footer class="status-strip" aria-label="Body status">
-        <span class="status-item"><i class="status-led"></i><b id="status-body">Veyra</b></span>
-        <span class="status-divider"></span>
-        <span class="status-item status-muted">OBJECT <b id="status-object-id">obj:9f3c2a…</b></span>
-        <span class="status-divider"></span>
-        <span class="status-item status-muted">LOD <b id="status-lod">L09 · native</b></span>
-        <span class="status-divider"></span>
-        <span class="status-item status-muted status-source"><span class="source-mark"></span><b id="status-source">Mock provider</b></span>
-        <span class="status-right"><span id="diagnostics-state">Diagnostics unavailable</span><span class="status-divider"></span>DISPLAY ONLY</span>
-      </footer>
-    </main>`;
-}
-
-function radialChartMarkup(profile: Awaited<ReturnType<BodyProvider['radialProfile']>>): string {
-  const points = profile.map(({ radius, value }) => `${(radius * 230 + 8).toFixed(1)},${(43 - value * 33).toFixed(1)}`).join(' ');
-  return `
-    <div class="profile-heading"><span>RADIAL PROFILE</span><span>CORE → PHOTOSPHERE</span></div>
-    <svg class="profile-chart" viewBox="0 0 246 54" preserveAspectRatio="none" role="img" aria-label="Radial profile line chart">
-      <defs><linearGradient id="profile-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#e9a87f" stop-opacity=".22"/><stop offset="1" stop-color="#e9a87f" stop-opacity="0"/></linearGradient></defs>
-      <path class="profile-area" d="M 8,48 L ${points.replaceAll(' ', ' L ')} L 238,48 Z" />
-      <polyline points="${points}" />
-    </svg>
-    <div class="profile-axis"><span>0</span><span>0.5 R★</span><span>1.0 R★</span></div>`;
-}
-
-function requiredElement<T extends Element>(root: ParentNode, selector: string): T {
-  const element = root.querySelector<T>(selector);
-  if (!element) throw new Error(`Inspector interface is missing ${selector}`);
-  return element;
+function profileSvg(values: readonly number[]): string {
+  if (values.length < 2) return '<p class="muted">No profile values supplied.</p>';
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  const span = maximum - minimum || 1;
+  const points = values.map((value, index) => `${(index / (values.length - 1) * 100).toFixed(2)},${(38 - (value - minimum) / span * 32).toFixed(2)}`).join(' ');
+  return `<svg class="profile-svg" viewBox="0 0 100 42" role="img" aria-label="Provider supplied radial profile with ${values.length} samples" preserveAspectRatio="none"><polyline points="${points}" fill="none" stroke="#c4c9cd" stroke-width="1.3" vector-effect="non-scaling-stroke"/><line x1="0" y1="39" x2="100" y2="39" stroke="#555d63" stroke-width="0.5" vector-effect="non-scaling-stroke"/></svg><div class="profile-axis"><span>Center</span><span>Outer sample</span></div>`;
 }
 
 function formatNumber(value: number): string {
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value);
+  if (value !== 0 && (Math.abs(value) >= 1e7 || Math.abs(value) < 1e-4)) return value.toExponential(3);
+  return new Intl.NumberFormat('en-US', { maximumSignificantDigits: 5 }).format(value);
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character);
+function formatCount(value: number): string { return new Intl.NumberFormat('en-US', { maximumSignificantDigits: 6 }).format(value); }
+function formatPercent(value: number): string { return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 4 }).format(value)}%`; }
+function shorten(value: string): string { return value.length <= 12 ? value : `…${value.slice(-10)}`; }
+function errorTitle(failure: ProviderFailure): string {
+  if (failure.category === 'missing-content') return 'Required content missing';
+  if (failure.category === 'validation') return 'Provider validation failure';
+  if (failure.category === 'unsupported') return 'Unsupported required feature';
+  return failure.retryable ? 'Temporary load error' : 'Provider load error';
 }
-
-function escapeAttribute(value: string): string {
-  return escapeHtml(value);
-}
+function escape(value: string): string { return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character); }
+function attr(value: string): string { return escape(value); }

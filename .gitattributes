@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.zst binary
+*.idx binary
+*.bin binary
+DOC/VEYRA_WORLD_SYSTEM_ARCHITECTURE.md -text

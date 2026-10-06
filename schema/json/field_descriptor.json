@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veyra.invalid/schema/field-descriptor/1",
+  "title": "VEYRA field descriptor V1",
+  "type": "object",
+  "required": ["id", "name", "capability", "domain", "semantic", "persistence", "storage", "native_level", "temporal", "sampling", "downsample", "compat"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^0x[0-9a-f]{8}$"},
+    "name": {"type": "string", "minLength": 1},
+    "capability": {"type": "string"},
+    "domain": {"type": "string"},
+    "semantic": {"type": "string", "minLength": 1},
+    "persistence": {"enum": ["invariant", "periodic_mean", "initial_state", "dynamic"]},
+    "storage": {"type": "object", "required": ["dtype"], "properties": {"dtype": {"type": "string"}, "scale": {"type": "string"}, "offset": {"type": "string"}, "nodata": {"type": ["integer", "null"]}}, "additionalProperties": true},
+    "native_level": {"type": "integer", "minimum": 0, "maximum": 30},
+    "temporal": {"type": "object"},
+    "sampling": {"type": "object"},
+    "downsample": {"type": "string"},
+    "compat": {"enum": ["critical", "ancillary"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"compat": {"const": "critical"}}, "required": ["compat"]},
+      "then": {
+        "properties": {
+          "storage": {
+            "properties": {
+              "dtype": {"enum": ["u8", "i8", "u16", "i16", "u32", "i32", "f32"]}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

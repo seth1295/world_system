@@ -1,0 +1,14 @@
+# Numeric capability IDs are permanent and never reused.
+[capabilities]
+solid_surface = 0x0100
+topography = 0x0101
+tectonics = 0x0102
+ocean = 0x0103
+climate = 0x0104
+surface_material = 0x0105
+thermal_state = 0x0106
+stellar_structure = 0x0130
+
+# Test-only namespace used by conformance fixtures; not a V1 physical capability.
+[fixture_capabilities]
+conformance_probe = 0x7FFE

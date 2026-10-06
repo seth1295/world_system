@@ -1,0 +1,15 @@
+[package]
+name = "veyra-capi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+veyra-core = { version = "0.1.0", path = "../veyra-core" }
+
+[lints]
+workspace = true

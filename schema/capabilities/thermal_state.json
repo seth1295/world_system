@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "id": "veyra.cap.thermal_state/1", "version": 1, "compat": "critical", "requires": [],
+  "params_schema": {"type": "object", "properties": {"domain": {"type": "string"}}, "additionalProperties": true},
+  "field_templates": [{"local_id": 1, "name": "thermal_state.surface_temperature", "semantic": "scalar.temperature", "storage": {"dtype": "i16", "scale": "0.1", "offset": "0"}, "unit": "K", "domain_kind": "surface", "temporal": {"kind": "static"}, "sampling": {"interp": "bilinear"}, "downsample": "mean"}],
+  "feature_tables": [], "vocab": [], "derived_views": [], "explain_recipes": [], "required_reference_surface_kinds": [],
+  "display": {"group": "Thermal state", "label": "Thermal state", "order": 70}
+}

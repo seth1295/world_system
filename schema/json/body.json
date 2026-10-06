@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veyra.invalid/schema/body/1",
+  "title": "VEYRA body root V1",
+  "type": "object",
+  "required": ["schema", "format_version", "required_features", "identity", "classification", "physical", "figure", "frames", "reference_surfaces", "dynamics", "capabilities", "domains", "codec", "sections", "indexes"],
+  "properties": {
+    "schema": {"const": "veyra.body/1"},
+    "format_version": {"$ref": "#/$defs/version"},
+    "required_features": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "identity": {"type": "object", "required": ["object_id", "origin"], "properties": {"object_id": {"type": "string", "pattern": "^obj:[0-9a-f]{32}$"}, "origin": {"type": "object"}, "label": {"type": "string"}}, "additionalProperties": true},
+    "classification": {"type": "object"},
+    "physical": {"type": "object", "required": ["gm_m3_s2"], "properties": {"gm_m3_s2": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"}, "gravity_model": {"type": "string"}}, "additionalProperties": true},
+    "figure": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["sphere", "star_convex_radial", "radial_profile_sphere"]}}, "additionalProperties": true},
+    "frames": {"type": "object"},
+    "reference_surfaces": {"type": "array", "items": {"type": "object", "required": ["id", "kind"], "properties": {"id": {"type": "string"}, "kind": {"type": "string"}}, "additionalProperties": true}},
+    "dynamics": {"type": "object", "required": ["descriptor", "origin_keyframe"], "properties": {"descriptor": {"$ref": "#/$defs/sectionRef"}, "origin_keyframe": {"$ref": "#/$defs/sectionRef"}}, "additionalProperties": true},
+    "capabilities": {"type": "array", "items": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}, "params": {"type": "object"}, "compat": {"enum": ["critical", "ancillary"]}}, "additionalProperties": true}},
+    "domains": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "topology", "frame", "vertical", "tile_log2", "max_level"],
+        "properties": {
+          "id": {"type": "string"},
+          "topology": {"enum": ["veyra.topo.dir_cube/1", "veyra.topo.radial_1d/1"]},
+          "frame": {"type": "string"},
+          "vertical": {"type": "object"},
+          "tile_log2": {"type": "integer", "minimum": 0, "maximum": 30},
+          "max_level": {"type": "integer", "minimum": 0, "maximum": 30}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"topology": {"const": "veyra.topo.dir_cube/1"}}, "required": ["topology"]},
+            "then": {"properties": {"vertical": {"required": ["kind"], "properties": {"kind": {"const": "none"}}}}}
+          },
+          {
+            "if": {"properties": {"topology": {"const": "veyra.topo.radial_1d/1"}}, "required": ["topology"]},
+            "then": {"properties": {"vertical": {"required": ["kind", "extent_m"], "properties": {"kind": {"const": "radius"}, "extent_m": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?([e]-?(0|[1-9][0-9]*))?$"}}}}}
+          }
+        ],
+        "additionalProperties": true
+      }
+    },
+    "codec": {"const": "zstd+shuffle2"},
+    "sections": {"type": "object", "required": ["registry"], "properties": {"registry": {"$ref": "#/$defs/sectionRef"}, "vocab": {"type": "array", "items": {"$ref": "#/$defs/sectionRef"}}, "features": {"type": "array", "items": {"$ref": "#/$defs/sectionRef"}}, "provenance": {"type": "object"}}, "additionalProperties": true},
+    "indexes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}},
+    "extensions_ledger": {"oneOf": [{"$ref": "#/$defs/sectionRef"}, {"type": "null"}]}
+  },
+  "$defs": {
+    "version": {"type": "object", "required": ["major", "minor"], "properties": {"major": {"type": "integer", "minimum": 1}, "minor": {"type": "integer", "minimum": 0}}, "additionalProperties": false},
+    "sectionRef": {"type": "object", "required": ["path", "hash"], "properties": {"path": {"type": "string", "minLength": 1}, "hash": {"type": "string", "pattern": "^b3:[0-9a-f]{64}$"}}, "additionalProperties": false}
+  },
+  "additionalProperties": true
+}

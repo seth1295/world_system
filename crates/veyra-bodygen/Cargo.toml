@@ -1,0 +1,12 @@
+[package]
+name = "veyra-bodygen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+veyra-writer = { version = "0.1.0", path = "../veyra-writer" }
+
+[lints]
+workspace = true

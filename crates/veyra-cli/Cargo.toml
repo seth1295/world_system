@@ -1,0 +1,22 @@
+[package]
+name = "veyra-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "veyra"
+path = "src/main.rs"
+
+[dependencies]
+blake3.workspace = true
+serde_json.workspace = true
+veyra-bodygen = { version = "0.1.0", path = "../veyra-bodygen" }
+veyra-conformance = { version = "0.1.0", path = "../veyra-conformance" }
+veyra-core = { version = "0.1.0", path = "../veyra-core" }
+veyra-universe = { version = "0.1.0", path = "../veyra-universe" }
+veyra-writer = { version = "0.1.0", path = "../veyra-writer" }
+
+[lints]
+workspace = true

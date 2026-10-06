@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/veyra-core",
+    "crates/veyra-writer",
+    "crates/veyra-universe",
+    "crates/veyra-bodygen",
+    "crates/veyra-cli",
+    "crates/veyra-wasm",
+    "crates/veyra-capi",
+    "crates/veyra-conformance",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+
+[workspace.dependencies]
+blake3 = "1"
+libm = "0.2"
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zstd = "0.14"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+correctness = "deny"

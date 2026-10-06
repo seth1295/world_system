@@ -1,0 +1,145 @@
+# Direction-cube table in U-, U+, V-, V+ source-edge order.
+[[mapping]]
+face = 0
+edge = "U-"
+to_face = 4
+to_edge = "V+"
+flip = true
+[[mapping]]
+face = 0
+edge = "U+"
+to_face = 1
+to_edge = "U-"
+flip = false
+[[mapping]]
+face = 0
+edge = "V-"
+to_face = 5
+to_edge = "V+"
+flip = false
+[[mapping]]
+face = 0
+edge = "V+"
+to_face = 2
+to_edge = "U-"
+flip = true
+[[mapping]]
+face = 1
+edge = "U-"
+to_face = 0
+to_edge = "U+"
+flip = false
+[[mapping]]
+face = 1
+edge = "U+"
+to_face = 3
+to_edge = "V-"
+flip = true
+[[mapping]]
+face = 1
+edge = "V-"
+to_face = 5
+to_edge = "U+"
+flip = true
+[[mapping]]
+face = 1
+edge = "V+"
+to_face = 2
+to_edge = "V-"
+flip = false
+[[mapping]]
+face = 2
+edge = "U-"
+to_face = 0
+to_edge = "V+"
+flip = true
+[[mapping]]
+face = 2
+edge = "U+"
+to_face = 3
+to_edge = "U-"
+flip = false
+[[mapping]]
+face = 2
+edge = "V-"
+to_face = 1
+to_edge = "V+"
+flip = false
+[[mapping]]
+face = 2
+edge = "V+"
+to_face = 4
+to_edge = "U-"
+flip = true
+[[mapping]]
+face = 3
+edge = "U-"
+to_face = 2
+to_edge = "U+"
+flip = false
+[[mapping]]
+face = 3
+edge = "U+"
+to_face = 5
+to_edge = "V-"
+flip = true
+[[mapping]]
+face = 3
+edge = "V-"
+to_face = 1
+to_edge = "U+"
+flip = true
+[[mapping]]
+face = 3
+edge = "V+"
+to_face = 4
+to_edge = "V-"
+flip = false
+[[mapping]]
+face = 4
+edge = "U-"
+to_face = 2
+to_edge = "V+"
+flip = true
+[[mapping]]
+face = 4
+edge = "U+"
+to_face = 5
+to_edge = "U-"
+flip = false
+[[mapping]]
+face = 4
+edge = "V-"
+to_face = 3
+to_edge = "V+"
+flip = false
+[[mapping]]
+face = 4
+edge = "V+"
+to_face = 0
+to_edge = "U-"
+flip = true
+[[mapping]]
+face = 5
+edge = "U-"
+to_face = 4
+to_edge = "U+"
+flip = false
+[[mapping]]
+face = 5
+edge = "U+"
+to_face = 1
+to_edge = "V-"
+flip = true
+[[mapping]]
+face = 5
+edge = "V-"
+to_face = 3
+to_edge = "U+"
+flip = true
+[[mapping]]
+face = 5
+edge = "V+"
+to_face = 0
+to_edge = "V-"
+flip = false

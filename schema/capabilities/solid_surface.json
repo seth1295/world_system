@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "id": "veyra.cap.solid_surface/1", "version": 1, "compat": "critical", "requires": [],
+  "params_schema": {"type": "object", "required": ["figure_ref"], "properties": {"figure_ref": {"type": "string"}}, "additionalProperties": true},
+  "field_templates": [], "feature_tables": [], "vocab": [], "derived_views": [], "explain_recipes": [],
+  "required_reference_surface_kinds": ["figure_surface"],
+  "display": {"group": "Solid surface", "label": "Solid surface", "order": 10}
+}

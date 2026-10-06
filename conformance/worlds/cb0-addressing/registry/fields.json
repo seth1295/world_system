@@ -1,0 +1,27 @@
+{
+  "fields": [
+    {
+      "capability": "veyra.cap.conformance_probe/1",
+      "compat": "ancillary",
+      "domain": "surface",
+      "downsample": "mean",
+      "id": "0x7ffe0001",
+      "name": "conformance.cell_address",
+      "native_level": 2,
+      "persistence": "invariant",
+      "sampling": {
+        "interp": "nearest"
+      },
+      "semantic": "x-cell-address/1",
+      "storage": {
+        "dtype": "u32",
+        "offset": "0",
+        "scale": "1"
+      },
+      "temporal": {
+        "kind": "static"
+      }
+    }
+  ],
+  "schema": "veyra.field_registry/1"
+}

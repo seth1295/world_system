@@ -1,0 +1,14 @@
+target/
+/dist/
+/.idea/
+/.vscode/
+/.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.log
+node_modules/
+.pytest_cache/
+__pycache__/
+cache/
+testdata/

@@ -1,0 +1,13 @@
+[package]
+name = "veyra-universe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+veyra-core = { version = "0.1.0", path = "../veyra-core" }
+veyra-writer = { version = "0.1.0", path = "../veyra-writer" }
+
+[lints]
+workspace = true

@@ -1,0 +1,31 @@
+{
+  "fields": [
+    {
+      "capability": "veyra.cap.conformance_probe/1",
+      "compat": "ancillary",
+      "domain": "surface",
+      "downsample": "mean",
+      "id": "0x7ffe0001",
+      "name": "x-conformance.future_value",
+      "native_level": 0,
+      "persistence": "invariant",
+      "sampling": {
+        "interp": "nearest"
+      },
+      "semantic": "x-future-value/1",
+      "storage": {
+        "dtype": "opaque",
+        "offset": "0",
+        "scale": "1"
+      },
+      "temporal": {
+        "kind": "static"
+      },
+      "x-future-metadata": {
+        "preserved": true,
+        "version": "future"
+      }
+    }
+  ],
+  "schema": "veyra.field_registry/1"
+}

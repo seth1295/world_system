@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "id": "veyra.cap.stellar_structure/1", "version": 1, "compat": "critical", "requires": [],
+  "params_schema": {"type": "object", "properties": {"domain": {"type": "string"}}, "additionalProperties": true},
+  "field_templates": [
+    {"local_id": 1, "name": "stellar.density", "semantic": "scalar.density", "storage": {"dtype": "u32", "scale": "0.01", "offset": "0"}, "unit": "kg/m3", "domain_kind": "radial", "temporal": {"kind": "static"}, "sampling": {"interp": "linear"}, "downsample": "mean"},
+    {"local_id": 2, "name": "stellar.temperature", "semantic": "scalar.temperature", "storage": {"dtype": "u32", "scale": "0.01", "offset": "0"}, "unit": "K", "domain_kind": "radial", "temporal": {"kind": "static"}, "sampling": {"interp": "linear"}, "downsample": "mean"},
+    {"local_id": 3, "name": "stellar.pressure", "semantic": "scalar.pressure", "storage": {"dtype": "u32", "scale": "0.01", "offset": "0"}, "unit": "Pa", "domain_kind": "radial", "temporal": {"kind": "static"}, "sampling": {"interp": "linear"}, "downsample": "mean"},
+    {"local_id": 4, "name": "stellar.hydrogen_fraction", "semantic": "scalar.fraction", "storage": {"dtype": "u16", "scale": "0.0001", "offset": "0"}, "unit": "1", "domain_kind": "radial", "temporal": {"kind": "static"}, "sampling": {"interp": "linear"}, "downsample": "mean"}
+  ],
+  "feature_tables": [], "vocab": [], "derived_views": [], "explain_recipes": [{"id": "stellar.density/1", "subject": "stellar.density"}], "required_reference_surface_kinds": ["sphere"],
+  "display": {"group": "Stellar structure", "label": "Stellar structure", "order": 80}
+}

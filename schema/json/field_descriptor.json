@@ -3,34 +3,558 @@
   "$id": "https://veyra.invalid/schema/field-descriptor/1",
   "title": "VEYRA field descriptor V1",
   "type": "object",
-  "required": ["id", "name", "capability", "domain", "semantic", "persistence", "storage", "native_level", "temporal", "sampling", "downsample", "compat"],
+  "required": [
+    "id",
+    "name",
+    "capability",
+    "domain",
+    "semantic",
+    "persistence",
+    "storage"
+  ],
   "properties": {
-    "id": {"type": "string", "pattern": "^0x[0-9a-f]{8}$"},
-    "name": {"type": "string", "minLength": 1},
-    "capability": {"type": "string"},
-    "domain": {"type": "string"},
-    "semantic": {"type": "string", "minLength": 1},
-    "persistence": {"enum": ["invariant", "periodic_mean", "initial_state", "dynamic"]},
-    "storage": {"type": "object", "required": ["dtype"], "properties": {"dtype": {"type": "string"}, "scale": {"type": "string"}, "offset": {"type": "string"}, "nodata": {"type": ["integer", "null"]}}, "additionalProperties": true},
-    "native_level": {"type": "integer", "minimum": 0, "maximum": 30},
-    "temporal": {"type": "object"},
-    "sampling": {"type": "object"},
-    "downsample": {"type": "string"},
-    "compat": {"enum": ["critical", "ancillary"]}
+    "id": {
+      "type": "string",
+      "pattern": "^0x(?!0000)[0-9a-f]{4}(?!0000)[0-9a-f]{4}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 1
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1
+    },
+    "semantic": {
+      "type": "string",
+      "minLength": 1
+    },
+    "persistence": {
+      "type": "string"
+    },
+    "storage": {
+      "type": "object",
+      "required": [
+        "dtype"
+      ],
+      "properties": {
+        "dtype": {
+          "type": "string"
+        }
+      }
+    },
+    "native_level": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "temporal": {},
+    "sampling": {},
+    "downsample": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "compat": {
+      "enum": [
+        "critical",
+        "ancillary"
+      ]
+    }
   },
   "allOf": [
     {
-      "if": {"properties": {"compat": {"const": "critical"}}, "required": ["compat"]},
+      "if": {
+        "not": {
+          "properties": {
+            "compat": {
+              "const": "ancillary"
+            }
+          },
+          "required": [
+            "compat"
+          ]
+        }
+      },
       "then": {
+        "required": [
+          "sampling",
+          "temporal",
+          "downsample"
+        ],
         "properties": {
+          "persistence": {
+            "enum": [
+              "invariant",
+              "periodic_mean",
+              "initial_state"
+            ]
+          },
+          "native_level": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30
+          },
+          "sampling": {
+            "$ref": "#/$defs/criticalSampling"
+          },
+          "temporal": {
+            "$ref": "#/$defs/criticalTemporal"
+          },
+          "downsample": {
+            "$ref": "#/$defs/reduction"
+          },
           "storage": {
-            "properties": {
-              "dtype": {"enum": ["u8", "i8", "u16", "i16", "u32", "i32", "f32"]}
+            "$ref": "#/$defs/criticalStorage"
+          },
+          "semantic": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^scalar\\.[\\s\\S]+$"
+              },
+              {
+                "enum": [
+                  "category",
+                  "feature_ref",
+                  "flags"
+                ]
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "semantic": {
+                  "pattern": "^scalar\\."
+                }
+              },
+              "required": [
+                "semantic"
+              ]
+            },
+            "then": {
+              "required": [
+                "unit"
+              ],
+              "properties": {
+                "unit": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "semantic": {
+                  "enum": [
+                    "category",
+                    "feature_ref",
+                    "flags"
+                  ]
+                }
+              },
+              "required": [
+                "semantic"
+              ]
+            },
+            "then": {
+              "properties": {
+                "storage": {
+                  "properties": {
+                    "dtype": {
+                      "not": {
+                        "const": "f32"
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
-        }
+        ]
       }
     }
   ],
+  "$defs": {
+    "reduction": {
+      "enum": [
+        "mean",
+        "rms",
+        "min",
+        "max",
+        "sum",
+        "mode_lowest_tiebreak"
+      ]
+    },
+    "criticalSampling": {
+      "type": "object",
+      "required": [
+        "interp"
+      ],
+      "properties": {
+        "interp": {
+          "enum": [
+            "nearest",
+            "bilinear",
+            "linear"
+          ]
+        },
+        "below_native": {
+          "const": "pyramid"
+        },
+        "above_native": {
+          "enum": [
+            "refine",
+            "inherit",
+            "smooth_only",
+            "none"
+          ]
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "criticalTemporal": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "static",
+            "periodic_slices"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "period_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "origin_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reduce_default": {
+          "$ref": "#/$defs/reduction"
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "static"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "count"
+                  ]
+                },
+                {
+                  "required": [
+                    "period_ref"
+                  ]
+                },
+                {
+                  "required": [
+                    "origin_ref"
+                  ]
+                },
+                {
+                  "required": [
+                    "reduce_default"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "periodic_slices"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "count",
+              "period_ref",
+              "origin_ref"
+            ]
+          }
+        }
+      ]
+    },
+    "criticalStorage": {
+      "type": "object",
+      "required": [
+        "dtype"
+      ],
+      "properties": {
+        "dtype": {
+          "enum": [
+            "u8",
+            "i8",
+            "u16",
+            "i16",
+            "u32",
+            "i32",
+            "f32"
+          ]
+        },
+        "scale": {
+          "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/decimalString"
+        },
+        "offset": {
+          "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/decimalString"
+        },
+        "nodata": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "dtype": {
+                "const": "u8"
+              }
+            },
+            "required": [
+              "dtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "nodata": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 255
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dtype": {
+                "const": "i8"
+              }
+            },
+            "required": [
+              "dtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "nodata": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": -128,
+                "maximum": 127
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dtype": {
+                "const": "u16"
+              }
+            },
+            "required": [
+              "dtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "nodata": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 65535
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dtype": {
+                "const": "i16"
+              }
+            },
+            "required": [
+              "dtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "nodata": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": -32768,
+                "maximum": 32767
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dtype": {
+                "const": "u32"
+              }
+            },
+            "required": [
+              "dtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "nodata": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dtype": {
+                "const": "i32"
+              }
+            },
+            "required": [
+              "dtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "nodata": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dtype": {
+                "const": "f32"
+              }
+            },
+            "required": [
+              "dtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "nodata": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/criticalStorageValue"
+      }
+    },
+    "criticalStorageValue": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "scale": {
+              "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/decimalString"
+            },
+            "offset": {
+              "$ref": "https://veyra.invalid/schema/decimal/1#/$defs/decimalString"
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/criticalStorageValue"
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/criticalStorageValue"
+          }
+        },
+        {
+          "type": [
+            "string",
+            "integer",
+            "boolean",
+            "null"
+          ]
+        }
+      ]
+    }
+  },
   "additionalProperties": true
 }

@@ -49,7 +49,7 @@ pub struct DecimalString {
     negative: bool,
     zero: bool,
     coefficient: String,
-    exponent10: i32,
+    exponent10: i64,
 }
 
 impl DecimalString {
@@ -81,8 +81,12 @@ impl DecimalString {
             return Err(TimeError::InvalidDecimal);
         }
         let fraction = fraction.unwrap_or_default();
-        let fraction_len = i32::try_from(fraction.len()).map_err(|_| TimeError::InvalidDecimal)?;
-        let exponent10 = exponent.checked_sub(fraction_len).ok_or(TimeError::InvalidDecimal)?;
+        // The exponent token is canonical i32, but subtracting fractional precision can
+        // move the effective base-ten exponent just outside i32. Keep that derived value
+        // in i64 so every canonical i32 exponent remains representable.
+        let fraction_len = i64::try_from(fraction.len()).map_err(|_| TimeError::InvalidDecimal)?;
+        let exponent10 =
+            i64::from(exponent).checked_sub(fraction_len).ok_or(TimeError::InvalidDecimal)?;
         let digits = format!("{integer}{fraction}");
         let significant = digits.trim_start_matches('0');
         let zero = significant.is_empty();
@@ -119,7 +123,7 @@ impl DecimalString {
     }
 
     /// Returns the power of ten multiplied by the coefficient digits.
-    pub const fn exponent10(&self) -> i32 {
+    pub const fn exponent10(&self) -> i64 {
         self.exponent10
     }
 
@@ -194,5 +198,17 @@ mod tests {
         assert!(DecimalString::parse("1E3").is_err());
         assert!(DecimalString::parse("0e3").unwrap().is_zero());
         assert!(DecimalString::parse("-0.0").is_err());
+    }
+
+    #[test]
+    fn decimal_exponent_grammar_matches_canonical_i32_boundaries() {
+        for text in ["1e2147483647", "1e-2147483648", "1.0e2147483647", "1.0e-2147483648"] {
+            assert!(DecimalString::parse(text).is_ok(), "rejected boundary {text}");
+        }
+        assert_eq!(DecimalString::parse("1.0e-2147483648").unwrap().exponent10(), -2_147_483_649);
+
+        for text in ["1e2147483648", "1e-2147483649", "1e-0", "1e00", "1e+1", "1E3", "1e"] {
+            assert!(DecimalString::parse(text).is_err(), "accepted noncanonical exponent {text}");
+        }
     }
 }

@@ -181,6 +181,45 @@ fn writer_roundtrip_verifies_materialized_star_convex_radius_field() {
 }
 
 #[test]
+fn writer_refuses_critical_scalar_fields_without_units_before_root_commit() {
+    let path = temp_path("critical-scalar-unit-missing");
+    let mut writer = ArtifactWriter::new(&path).unwrap();
+    let registry = json!({
+        "schema":"veyra.field_registry/1",
+        "fields":[{
+            "id":"0x01010001","name":"topography.height_m","capability":"veyra.cap.topography/1",
+            "domain":"surface","semantic":"scalar.height","persistence":"invariant",
+            "storage":{"dtype":"i16","scale":"0.5","offset":"0"},"native_level":0,
+            "temporal":{"kind":"static"},"sampling":{"interp":"bilinear"},
+            "downsample":"mean","compat":"critical"
+        }]
+    });
+    let mut body = base_body(&mut writer, "critical-scalar-unit-missing", registry);
+    body["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.dir_cube/1"));
+    body["capabilities"] = json!([
+        {"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}},
+        {"id":"veyra.cap.topography/1","params":{"reference_surface":"datum.mean","domain":"surface"}}
+    ]);
+    body["reference_surfaces"] = json!([
+        {"id":"datum.mean","kind":"sphere","radius_m":"1"},
+        {"id":"figure.boundary","kind":"figure_surface"}
+    ]);
+    body["domains"] = json!([{
+        "id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed",
+        "vertical":{"kind":"none"},"tile_log2":0,"max_level":0
+    }]);
+
+    assert!(matches!(
+        writer.write_body_json(&serde_json::to_vec(&body).unwrap()),
+        Err(WriterError::Model(veyra_core::body::ModelError::InvalidField))
+    ));
+    assert!(!path.join("body.json").exists());
+    assert!(!path.join("body.id").exists());
+    drop(writer);
+    remove_artifact(&path);
+}
+
+#[test]
 fn writer_refuses_to_commit_star_convex_figures_without_a_registered_radius_field() {
     let path = temp_path("star-convex-missing-radius");
     let mut writer = ArtifactWriter::new(&path).unwrap();

@@ -760,7 +760,7 @@ mod tests {
             "fields":[{
                 "id":field_text,"name":field_name,"capability":field_capability,
                 "domain":domain_id,"semantic":field_semantic,"persistence":persistence,
-                "storage":{"dtype":storage_dtype,"scale":scale,"offset":"0"},"native_level":3,
+                "storage":{"dtype":storage_dtype,"scale":scale,"offset":"0"},"unit":"m","native_level":3,
                 "temporal":temporal,
                 "sampling":{"interp":interpolation,"below_native":"pyramid","above_native":"refine"},
                 "downsample":"mean","compat":"critical"

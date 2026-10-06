@@ -16,6 +16,7 @@ const BODY_FIXED_FRAME: &str = "body_fixed";
 const BODY_FIXED_AXES: &str =
     "+Z is the positive rotation pole; +X is the prime meridian; right-handed";
 const UNIVERSE_INERTIAL_FRAME: &str = "universe_inertial";
+const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// Canonical field identifier, composed from a capability ID and local ID.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -364,6 +365,7 @@ impl BodyRoot {
         self.validate_domains()?;
         self.validate_surfaces()?;
         self.validate_named_sections()?;
+        self.validate_indexes()?;
         self.validate_capabilities()?;
         if self.codec != "zstd+shuffle2" {
             return Err(ModelError::UnknownRequiredFeature(self.codec.clone()));
@@ -380,6 +382,17 @@ impl BodyRoot {
             .any(|reference| reference.name.is_empty())
         {
             return Err(ModelError::InvalidSection);
+        }
+        Ok(())
+    }
+
+    fn validate_indexes(&self) -> Result<(), ModelError> {
+        for (field_id, hash) in &self.indexes {
+            let parsed_id = FieldId::parse(field_id)?;
+            if parsed_id.capability_id() == 0 || parsed_id.local_id() == 0 {
+                return Err(ModelError::InvalidFieldId);
+            }
+            parse_hash(hash)?;
         }
         Ok(())
     }
@@ -411,7 +424,21 @@ impl BodyRoot {
             if !ids.insert(field.id) {
                 return Err(ModelError::InvalidField);
             }
-            if field.name.is_empty() || !capabilities.contains(field.capability.as_str()) {
+            if field.id.capability_id() == 0
+                || field.id.local_id() == 0
+                || field.name.is_empty()
+                || field.capability.is_empty()
+                || field.domain.is_empty()
+                || field.semantic.is_empty()
+                || !field.storage.is_object()
+                || field.storage.get("dtype").and_then(Value::as_str).is_none()
+            {
+                return Err(ModelError::InvalidField);
+            }
+            if field.persistence == "dynamic" {
+                return Err(ModelError::DynamicBaselineField);
+            }
+            if !capabilities.contains(field.capability.as_str()) {
                 if field.compat == Compatibility::Critical {
                     return Err(ModelError::InvalidField);
                 }
@@ -427,9 +454,6 @@ impl BodyRoot {
                 && field.compat == Compatibility::Critical
             {
                 return Err(ModelError::InvalidField);
-            }
-            if field.persistence == "dynamic" {
-                return Err(ModelError::DynamicBaselineField);
             }
             if field.compat == Compatibility::Ancillary {
                 continue;
@@ -590,7 +614,10 @@ impl BodyRoot {
 
         let mut seen = std::collections::BTreeSet::new();
         for capability in &self.capabilities {
-            if !seen.insert(capability.id.as_str()) {
+            if capability.id.is_empty()
+                || !capability.params.is_object()
+                || !seen.insert(capability.id.as_str())
+            {
                 return Err(ModelError::InvalidCapability);
             }
         }
@@ -850,9 +877,18 @@ fn parse_object_address(value: &Value) -> Result<ObjectAddress, ModelError> {
             }
             let region = RegionKey {
                 level: 0,
-                ix: region.get("ix").and_then(Value::as_i64).ok_or(ModelError::InvalidOrigin)?,
-                iy: region.get("iy").and_then(Value::as_i64).ok_or(ModelError::InvalidOrigin)?,
-                iz: region.get("iz").and_then(Value::as_i64).ok_or(ModelError::InvalidOrigin)?,
+                ix: region
+                    .get("ix")
+                    .and_then(parse_address_coordinate)
+                    .ok_or(ModelError::InvalidOrigin)?,
+                iy: region
+                    .get("iy")
+                    .and_then(parse_address_coordinate)
+                    .ok_or(ModelError::InvalidOrigin)?,
+                iz: region
+                    .get("iz")
+                    .and_then(parse_address_coordinate)
+                    .ok_or(ModelError::InvalidOrigin)?,
             };
             let slot = object
                 .get("slot")
@@ -890,6 +926,20 @@ fn parse_object_address(value: &Value) -> Result<ObjectAddress, ModelError> {
             Ok(ObjectAddress::Fixture { name: name.to_owned() })
         }
         other => Err(ModelError::UnsupportedOrigin(other.to_owned())),
+    }
+}
+
+fn parse_address_coordinate(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => {
+            let value = number.as_i64()?;
+            (value.unsigned_abs() <= MAX_SAFE_JSON_INTEGER).then_some(value)
+        }
+        Value::String(text) => {
+            let value = text.parse::<i64>().ok()?;
+            (value.to_string() == *text).then_some(value)
+        }
+        _ => None,
     }
 }
 
@@ -981,6 +1031,11 @@ fn validate_critical_field_metadata(
     field: &FieldDescriptor,
     domain: &Domain,
 ) -> Result<(), ModelError> {
+    if field.semantic.starts_with("scalar.")
+        && field.extra.get("unit").and_then(Value::as_str).is_none_or(str::is_empty)
+    {
+        return Err(ModelError::InvalidField);
+    }
     let sampling = field.sampling.as_object().ok_or(ModelError::InvalidField)?;
     for key in sampling.keys() {
         if !matches!(key.as_str(), "interp" | "below_native" | "above_native")
@@ -1301,7 +1356,7 @@ mod tests {
         json!({
             "id":"0x01010001","name":"topography.height_m","capability":"veyra.cap.topography/1",
             "domain":"surface","semantic":"scalar.height","persistence":"invariant",
-            "storage":{"dtype":"i16","scale":"0.5","offset":"0"},"native_level":3,
+            "storage":{"dtype":"i16","scale":"0.5","offset":"0"},"unit":"m","native_level":3,
             "temporal":{"kind":"static"},
             "sampling":{"interp":"bilinear","below_native":"pyramid","above_native":"refine"},
             "downsample":"mean","compat":"critical"
@@ -1456,6 +1511,19 @@ mod tests {
             );
         }
 
+        let mut reserved_local_id = field_descriptor_json();
+        reserved_local_id["id"] = json!("0x01010000");
+        assert_eq!(
+            root.validate_registry(&registry(vec![reserved_local_id])),
+            Err(super::ModelError::InvalidField)
+        );
+        let mut unallocated_capability_id = field_descriptor_json();
+        unallocated_capability_id["id"] = json!("0x00000001");
+        assert_eq!(
+            root.validate_registry(&registry(vec![unallocated_capability_id])),
+            Err(super::ModelError::InvalidField)
+        );
+
         let mut distinct_ancillary = ancillary.clone();
         distinct_ancillary["id"] = json!("0x01010002");
         let compatible_registry = registry(vec![ancillary, distinct_ancillary]);
@@ -1466,9 +1534,308 @@ mod tests {
     }
 
     #[test]
+    fn critical_scalar_fields_require_a_nonempty_string_unit() {
+        let root = field_root("scalar-unit", true);
+        assert!(root.validate_registry(&registry(vec![field_descriptor_json()])).is_ok());
+
+        for unit in [json!(""), json!(null), json!(7)] {
+            let mut field = field_descriptor_json();
+            field["unit"] = unit;
+            assert_eq!(
+                root.validate_registry(&registry(vec![field])),
+                Err(super::ModelError::InvalidField)
+            );
+        }
+        let mut missing = field_descriptor_json();
+        missing.as_object_mut().unwrap().remove("unit");
+        assert_eq!(
+            root.validate_registry(&registry(vec![missing])),
+            Err(super::ModelError::InvalidField)
+        );
+
+        let mut category = field_descriptor_json();
+        category["semantic"] = json!("category");
+        category["storage"]["dtype"] = json!("u8");
+        category.as_object_mut().unwrap().remove("unit");
+        assert!(root.validate_registry(&registry(vec![category])).is_ok());
+
+        let mut ancillary = field_descriptor_json();
+        ancillary["compat"] = json!("ancillary");
+        ancillary["semantic"] = json!("scalar.future_quantity");
+        ancillary["storage"]["dtype"] = json!("future_dtype");
+        ancillary["storage"]["scale"] = json!(7);
+        ancillary.as_object_mut().unwrap().remove("unit");
+        assert!(root.validate_registry(&registry(vec![ancillary])).is_ok());
+
+        for scale in ["1e2147483647", "1e-2147483648", "1.0e-2147483648"] {
+            let mut field = field_descriptor_json();
+            field["storage"]["scale"] = json!(scale);
+            assert!(root.validate_registry(&registry(vec![field])).is_ok(), "{scale}");
+        }
+        for scale in ["1e2147483648", "1e-2147483649", "1e-0", "1e00"] {
+            let mut field = field_descriptor_json();
+            field["storage"]["scale"] = json!(scale);
+            assert_eq!(
+                root.validate_registry(&registry(vec![field])),
+                Err(super::ModelError::InvalidDecimal),
+                "{scale}"
+            );
+        }
+
+        let mut dynamic_ancillary = field_descriptor_json();
+        dynamic_ancillary["compat"] = json!("ancillary");
+        dynamic_ancillary["persistence"] = json!("dynamic");
+        assert_eq!(
+            root.validate_registry(&registry(vec![dynamic_ancillary])),
+            Err(super::ModelError::DynamicBaselineField)
+        );
+    }
+
+    #[test]
+    fn figure_kind_parameters_are_required_and_positive() {
+        for figure in [
+            json!({"kind":"sphere","radius_m":"2"}),
+            json!({"kind":"star_convex_radial","radius_field":"figure.radius_m"}),
+            json!({"kind":"radial_profile_sphere","extent_m":"2"}),
+        ] {
+            let mut body = minimal_root("figure-parameter-valid");
+            body["figure"] = figure;
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert!(root.validate().is_ok());
+        }
+
+        let invalid_figures = [
+            json!({"kind":"sphere"}),
+            json!({"kind":"sphere","radius_m":2}),
+            json!({"kind":"sphere","radius_m":"0"}),
+            json!({"kind":"sphere","radius_m":"-1"}),
+            json!({"kind":"sphere","radius_m":"01"}),
+            json!({"kind":"star_convex_radial"}),
+            json!({"kind":"star_convex_radial","radius_field":""}),
+            json!({"kind":"star_convex_radial","radius_field":7}),
+            json!({"kind":"radial_profile_sphere"}),
+            json!({"kind":"radial_profile_sphere","extent_m":"0.0"}),
+            json!({"kind":"radial_profile_sphere","extent_m":2}),
+            json!({"kind":"ellipsoid","radius_m":"2"}),
+        ];
+        for figure in invalid_figures {
+            let mut body = minimal_root("figure-parameter-invalid");
+            body["figure"] = figure;
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert!(root.validate().is_err(), "accepted figure {:?}", root.figure.kind);
+        }
+    }
+
+    #[test]
+    fn radial_domain_extent_uses_the_same_positive_decimal_rule_as_gm() {
+        for extent in ["0.1", "2", "1.25e-3", "1e2147483647", "1e-2147483648"] {
+            let mut body = minimal_root("radial-domain-positive");
+            body["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.radial_1d/1"));
+            body["figure"] = json!({"kind":"radial_profile_sphere","extent_m":"2"});
+            body["reference_surfaces"] =
+                json!([{"id":"photosphere","kind":"sphere","radius_m":"2"}]);
+            body["domains"] = json!([{
+                "id":"interior","topology":"veyra.topo.radial_1d/1","frame":"body_fixed",
+                "vertical":{"kind":"radius","extent_m":extent},"tile_log2":2,"max_level":5
+            }]);
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert!(root.validate().is_ok(), "rejected extent {extent}");
+        }
+
+        for extent in ["0", "0.0", "0e3", "0.0e-3", "-1", "1e2147483648", "1e-2147483649", "01.0"] {
+            let mut body = minimal_root("radial-domain-nonpositive");
+            body["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.radial_1d/1"));
+            body["figure"] = json!({"kind":"radial_profile_sphere","extent_m":"2"});
+            body["reference_surfaces"] =
+                json!([{"id":"photosphere","kind":"sphere","radius_m":"2"}]);
+            body["domains"] = json!([{
+                "id":"interior","topology":"veyra.topo.radial_1d/1","frame":"body_fixed",
+                "vertical":{"kind":"radius","extent_m":extent},"tile_log2":2,"max_level":5
+            }]);
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert_eq!(root.validate(), Err(super::ModelError::InvalidDomain), "{extent}");
+        }
+    }
+
+    #[test]
+    fn index_keys_and_hashes_are_structurally_valid_before_loading() {
+        for (key, hash, expected) in [
+            (
+                "0X01010001",
+                "b3:0000000000000000000000000000000000000000000000000000000000000000",
+                super::ModelError::InvalidFieldId,
+            ),
+            (
+                "0x01010000",
+                "b3:0000000000000000000000000000000000000000000000000000000000000000",
+                super::ModelError::InvalidFieldId,
+            ),
+            (
+                "0x00000001",
+                "b3:0000000000000000000000000000000000000000000000000000000000000000",
+                super::ModelError::InvalidFieldId,
+            ),
+            ("0x01010001", "bad-hash", super::ModelError::InvalidHash),
+        ] {
+            let mut body = minimal_root("bad-index-reference");
+            body["indexes"] = json!({(key):hash});
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert_eq!(root.validate(), Err(expected));
+        }
+    }
+
+    #[test]
+    fn optional_null_values_match_the_root_schema() {
+        let mut body = minimal_root("optional-null-values");
+        body["identity"]["label"] = json!(null);
+        body["physical"]["gravity_model"] = json!(null);
+        body["sections"]["provenance"] = json!(null);
+        body["extensions_ledger"] = json!(null);
+        let root: BodyRoot = serde_json::from_value(body).unwrap();
+        assert!(root.validate().is_ok());
+    }
+
+    #[test]
+    fn capability_id_and_params_shapes_are_structural_even_for_ancillary_entries() {
+        for capability in [
+            json!({"id":"","params":{},"compat":"ancillary"}),
+            json!({"id":"x-future/1","params":7,"compat":"ancillary"}),
+            json!({"id":"x-future/1","params":{},"compat":"ancillary"}),
+        ] {
+            let mut body = minimal_root("capability-structure");
+            body["capabilities"] = json!([capability]);
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            let is_malformed =
+                root.capabilities[0].id.is_empty() || !root.capabilities[0].params.is_object();
+            if is_malformed {
+                assert_eq!(root.validate(), Err(super::ModelError::InvalidCapability));
+            } else {
+                assert!(root.validate().is_ok());
+            }
+        }
+
+        let mut duplicate = minimal_root("duplicate-ancillary-capability");
+        duplicate["capabilities"] = json!([
+            {"id":"x-future/1","params":{},"compat":"ancillary"},
+            {"id":"x-future/1","params":{},"compat":"ancillary","x-extra":true}
+        ]);
+        let root: BodyRoot = serde_json::from_value(duplicate).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidCapability));
+    }
+
+    #[test]
+    fn reference_surface_shapes_match_the_body_schema_and_rust_resolves_links() {
+        for surfaces in [
+            json!([{"id":"datum","kind":"sphere","radius_m":"2"}]),
+            json!([
+                {"id":"datum","kind":"sphere","radius_m":"2"},
+                {"id":"offset","kind":"offset_of","base":"datum","offset_m":"-1.5"}
+            ]),
+            json!([{"id":"figure.boundary","kind":"figure_surface"}]),
+        ] {
+            let mut body = minimal_root("surface-valid-shape");
+            body["reference_surfaces"] = surfaces;
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert!(root.validate().is_ok());
+        }
+
+        for surfaces in [
+            json!([{"id":"datum","kind":"sphere"}]),
+            json!([{"id":"datum","kind":"sphere","radius_m":"0"}]),
+            json!([{"id":"datum","kind":"sphere","radius_m":2}]),
+            json!([{"id":"offset","kind":"offset_of","offset_m":"0"}]),
+            json!([{"id":"offset","kind":"offset_of","base":"datum","offset_m":"1e2147483648"}]),
+            json!([{"id":"reserved","kind":"ellipsoid"}]),
+            json!([{"id":"","kind":"figure_surface"}]),
+            json!([
+                {"id":"same","kind":"sphere","radius_m":"1"},
+                {"id":"same","kind":"sphere","radius_m":"2"}
+            ]),
+        ] {
+            let mut body = minimal_root("surface-invalid-shape");
+            body["reference_surfaces"] = surfaces;
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert!(root.validate().is_err());
+        }
+
+        for surfaces in [
+            json!([{"id":"offset","kind":"offset_of","base":"missing","offset_m":"1"}]),
+            json!([
+                {"id":"a","kind":"offset_of","base":"b","offset_m":"1"},
+                {"id":"b","kind":"offset_of","base":"a","offset_m":"1"}
+            ]),
+        ] {
+            let mut body = minimal_root("surface-reference-rust-only");
+            body["reference_surfaces"] = surfaces;
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert!(matches!(
+                root.validate(),
+                Err(super::ModelError::InvalidSurface | super::ModelError::SurfaceCycle)
+            ));
+        }
+    }
+
+    #[test]
+    fn domain_schema_expressible_rules_and_rust_cross_checks_are_enforced() {
+        let valid_root = |name: &str| {
+            let mut body = minimal_root(name);
+            body["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.dir_cube/1"));
+            body["domains"] = json!([{
+                "id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed",
+                "vertical":{"kind":"none"},"tile_log2":2,"max_level":5
+            }]);
+            serde_json::from_value::<BodyRoot>(body).unwrap()
+        };
+        assert!(valid_root("domain-structural-valid").validate().is_ok());
+
+        for mutate in [
+            ("empty domain id", "id", json!("")),
+            ("unknown topology", "topology", json!("veyra.topo.future/1")),
+            ("unsupported frame", "frame", json!("universe_inertial")),
+            ("tile level above V1", "tile_log2", json!(31)),
+            ("max level above V1", "max_level", json!(31)),
+        ] {
+            let mut root = valid_root("domain-structural-invalid");
+            root.domains[0].extra.clear();
+            let mut json = serde_json::to_value(root).unwrap();
+            json["domains"][0][mutate.1] = mutate.2;
+            let root: BodyRoot = serde_json::from_value(json).unwrap();
+            assert_eq!(root.validate(), Err(super::ModelError::InvalidDomain), "{}", mutate.0);
+        }
+
+        let mut missing_feature = minimal_root("domain-feature-reference-rust-only");
+        missing_feature["domains"] = json!([{
+            "id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed",
+            "vertical":{"kind":"none"},"tile_log2":2,"max_level":5
+        }]);
+        let root: BodyRoot = serde_json::from_value(missing_feature).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidDomain));
+
+        let mut duplicate = minimal_root("domain-duplicate-id-rust-only");
+        duplicate["required_features"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("veyra.topo.dir_cube/1"), json!("veyra.topo.radial_1d/1")]);
+        duplicate["domains"] = json!([
+            {"id":"same","topology":"veyra.topo.dir_cube/1","frame":"body_fixed","vertical":{"kind":"none"},"tile_log2":2,"max_level":5},
+            {"id":"same","topology":"veyra.topo.radial_1d/1","frame":"body_fixed","vertical":{"kind":"radius","extent_m":"1"},"tile_log2":2,"max_level":5}
+        ]);
+        let root: BodyRoot = serde_json::from_value(duplicate).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidDomain));
+    }
+
+    #[test]
     fn body_fixed_frame_requires_a_complete_v1_uniform_rotation() {
         let valid: BodyRoot = serde_json::from_value(minimal_root("frame-valid")).unwrap();
         assert!(valid.validate().is_ok());
+        for epoch in
+            ["170141183460469231731687303715884105727", "-170141183460469231731687303715884105728"]
+        {
+            let mut body = minimal_root("frame-utime-boundary");
+            body["frames"]["body_fixed"]["rotation"]["epoch"] = json!(epoch);
+            let root: BodyRoot = serde_json::from_value(body).unwrap();
+            assert!(root.validate().is_ok(), "rejected UTime boundary {epoch}");
+        }
 
         let mut invalid_frames = Vec::new();
         for frame in [json!(null), json!(7), json!("body_fixed")] {
@@ -1520,6 +1887,10 @@ mod tests {
         let mut body = minimal_root("frame-nonnumeric-quaternion");
         body["frames"]["body_fixed"]["rotation"]["orientation_q_at_epoch"] =
             json!(["1", "0", 0, "0"]);
+        invalid_frames.push(body);
+        let mut body = minimal_root("frame-nonfinite-quaternion");
+        body["frames"]["body_fixed"]["rotation"]["orientation_q_at_epoch"] =
+            json!(["1e9999", "0", "0", "0"]);
         invalid_frames.push(body);
         let mut body = minimal_root("frame-nonunit-quaternion");
         body["frames"]["body_fixed"]["rotation"]["orientation_q_at_epoch"] =
@@ -1840,6 +2211,77 @@ mod tests {
             }
         });
         let root: BodyRoot = serde_json::from_value(malformed).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidOrigin));
+    }
+
+    #[test]
+    fn universe_region_coordinates_follow_canonical_json_safe_integer_rules() {
+        let universe = UniverseId([0x24; 32]);
+        let address = ObjectAddress::SystemSeed {
+            region: RegionKey {
+                level: 0,
+                ix: 9_007_199_254_740_992,
+                iy: -9_007_199_254_740_993,
+                iz: 0,
+            },
+            slot: 3,
+        };
+        let id = ObjectId::derive(universe, &address).unwrap();
+        let mut body = minimal_root("large-region-string");
+        body["identity"] = json!({
+            "object_id":id.to_string(),
+            "origin":{
+                "kind":"universe","universe_id":universe.to_string(),
+                "address":{"kind":"system_seed","region":{
+                    "level":0,"ix":"9007199254740992","iy":"-9007199254740993","iz":0
+                },"slot":3}
+            }
+        });
+        let root: BodyRoot = serde_json::from_value(body).unwrap();
+        assert!(root.validate().is_ok());
+
+        let boundary_address = ObjectAddress::SystemSeed {
+            region: RegionKey { level: 0, ix: i64::MAX, iy: i64::MIN, iz: 0 },
+            slot: 4,
+        };
+        let boundary_id = ObjectId::derive(universe, &boundary_address).unwrap();
+        let mut boundary = minimal_root("region-i64-boundaries");
+        boundary["identity"] = json!({
+            "object_id":boundary_id.to_string(),
+            "origin":{
+                "kind":"universe","universe_id":universe.to_string(),
+                "address":{"kind":"system_seed","region":{
+                    "ix":"9223372036854775807","iy":"-9223372036854775808","iz":0
+                },"slot":4}
+            }
+        });
+        let root: BodyRoot = serde_json::from_value(boundary).unwrap();
+        assert!(root.validate().is_ok());
+
+        let mut unsafe_number = minimal_root("large-region-number");
+        unsafe_number["identity"] = json!({
+            "object_id":id.to_string(),
+            "origin":{
+                "kind":"universe","universe_id":universe.to_string(),
+                "address":{"kind":"system_seed","region":{
+                    "level":0,"ix":9007199254740992_i64,"iy":0,"iz":0
+                },"slot":3}
+            }
+        });
+        let root: BodyRoot = serde_json::from_value(unsafe_number).unwrap();
+        assert_eq!(root.validate(), Err(super::ModelError::InvalidOrigin));
+
+        let mut out_of_i64 = minimal_root("region-out-of-i64-string");
+        out_of_i64["identity"] = json!({
+            "object_id":id.to_string(),
+            "origin":{
+                "kind":"universe","universe_id":universe.to_string(),
+                "address":{"kind":"system_seed","region":{
+                    "ix":"9223372036854775808","iy":0,"iz":0
+                },"slot":3}
+            }
+        });
+        let root: BodyRoot = serde_json::from_value(out_of_i64).unwrap();
         assert_eq!(root.validate(), Err(super::ModelError::InvalidOrigin));
     }
 

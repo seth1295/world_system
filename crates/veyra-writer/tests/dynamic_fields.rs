@@ -19,7 +19,7 @@ fn baseline_writer_refuses_dynamic_fields() {
             "id":"0x7ffe0001",
             "name":"x-dynamic-test",
             "capability":"x-veyra.conformance.foundation/1",
-            "domain":"",
+            "domain":"future_domain",
             "semantic":"x-test/1",
             "persistence":"dynamic",
             "storage":{"dtype":"u8"},

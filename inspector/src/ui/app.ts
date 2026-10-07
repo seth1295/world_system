@@ -20,6 +20,7 @@ import { asProviderFailure } from '../provider/contracts';
 import { normalizeCssColor, normalizePaletteStops } from '../render/css-color';
 import { Viewport } from '../render/viewport';
 import { orderedGroups } from './view-model';
+import { buildRadialProfilePlot } from './profile-plot';
 
 interface ExplainContext {
   provider: BodyProvider;
@@ -350,22 +351,25 @@ export class InspectorApp {
     this.viewport.clearData();
     this.loadState = 'metadata';
     this.renderAll();
+    let catalog: ViewCatalog;
+    let geometry: RenderGeometry;
     try {
-      const [catalog, geometry] = await Promise.all([provider.views(domain.id), provider.domainGeometry(domain.id)]);
-      if (version !== this.requestVersion) return;
-      this.catalog = catalog;
-      this.geometry = geometry;
-      this.activeView = catalog.views[0] ?? null;
-      this.activeTimeId = this.defaultTime(this.activeView);
-      this.loadState = 'ready';
-      this.renderAll();
-      if (this.activeView) await this.loadActiveView(version);
-      if (version !== this.requestVersion) return;
-      this.element<HTMLSelectElement>('#domain-selector').focus();
+      [catalog, geometry] = await Promise.all([provider.views(domain.id), provider.domainGeometry(domain.id)]);
     } catch (error) {
       if (version !== this.requestVersion) return;
       this.showFailure(error, { kind: 'domain-load', fixtureId: this.fixtureId, provider, domainId: domain.id });
+      return;
     }
+    if (version !== this.requestVersion) return;
+    this.catalog = catalog;
+    this.geometry = geometry;
+    this.activeView = catalog.views[0] ?? null;
+    this.activeTimeId = this.defaultTime(this.activeView);
+    this.loadState = 'ready';
+    this.renderAll();
+    if (this.activeView) await this.loadActiveView(version);
+    if (version !== this.requestVersion) return;
+    this.element<HTMLSelectElement>('#domain-selector').focus();
   }
 
   private async selectView(viewId: string): Promise<void> {
@@ -399,19 +403,15 @@ export class InspectorApp {
     this.loadState = 'view';
     this.renderStatus();
     this.renderLegend();
+    let geometry: RenderGeometry;
+    let tile: Awaited<ReturnType<BodyProvider['tile']>>;
+    let stats: ViewStats | undefined;
     try {
-      const [geometry, tile, stats] = await Promise.all([
+      [geometry, tile, stats] = await Promise.all([
         this.geometry ? Promise.resolve(this.geometry) : provider.domainGeometry(domain.id),
         provider.tile(view.id, timeId, stageId),
         provider.stats(view.id),
       ]);
-      if (version !== this.requestVersion) return;
-      this.geometry = geometry;
-      this.stats = stats;
-      this.loadState = 'ready';
-      this.viewport.setData(geometry, view, tile);
-      this.viewport.setOverlays(this.featureCatalog.tables.filter((table) => this.selectedOverlays.has(table.id)));
-      this.renderAll(tile.missingResources ?? []);
     } catch (error) {
       if (version !== this.requestVersion) return;
       this.viewport.clearData();
@@ -424,7 +424,15 @@ export class InspectorApp {
         timeId,
         stageId,
       });
+      return;
     }
+    if (version !== this.requestVersion) return;
+    this.geometry = geometry;
+    this.stats = stats;
+    this.loadState = 'ready';
+    this.viewport.setData(geometry, view, tile);
+    this.viewport.setOverlays(this.featureCatalog.tables.filter((table) => this.selectedOverlays.has(table.id)));
+    this.renderAll(tile.missingResources ?? []);
   }
 
   private async inspect(position: PickPosition): Promise<void> {
@@ -438,18 +446,20 @@ export class InspectorApp {
     this.selectedPosition = position;
     this.pointReport = null;
     this.renderInspection();
+    let report: PointReport;
     try {
-      const report = await provider.inspect(position);
-      if (!this.isCurrentInspection(version, provider, fixtureId, domainId, position)) return;
-      this.pointReport = report;
-      this.renderInspection();
-      const input = this.root.querySelector<HTMLInputElement>('#field-search');
-      if (input) input.focus();
+      report = await provider.inspect(position);
     } catch (error) {
       if (this.isCurrentInspection(version, provider, fixtureId, domainId, position)) {
         this.showFailure(error, { kind: 'inspection', fixtureId, provider, domainId: domainId ?? null, position });
       }
+      return;
     }
+    if (!this.isCurrentInspection(version, provider, fixtureId, domainId, position)) return;
+    this.pointReport = report;
+    this.renderInspection();
+    const input = this.root.querySelector<HTMLInputElement>('#field-search');
+    if (input) input.focus();
   }
 
   private isCurrentInspection(
@@ -483,15 +493,9 @@ export class InspectorApp {
     const version = ++this.requestVersion;
     this.renderDiagnostics();
     this.focusStage(stageId);
+    let snapshot: DiagnosticSnapshot;
     try {
-      const snapshot = await provider.diagnosticStage(stageId);
-      if (version !== this.requestVersion) return;
-      this.snapshot = snapshot;
-      this.renderDiagnostics();
-      this.focusStage(stageId);
-      if (this.activeView) await this.loadActiveView(version);
-      if (version !== this.requestVersion) return;
-      this.focusStage(stageId);
+      snapshot = await provider.diagnosticStage(stageId);
     } catch (error) {
       if (version === this.requestVersion) {
         this.showFailure(error, {
@@ -502,7 +506,15 @@ export class InspectorApp {
           stageId,
         });
       }
+      return;
     }
+    if (version !== this.requestVersion) return;
+    this.snapshot = snapshot;
+    this.renderDiagnostics();
+    this.focusStage(stageId);
+    if (this.activeView) await this.loadActiveView(version);
+    if (version !== this.requestVersion) return;
+    this.focusStage(stageId);
   }
 
   private async selectTime(timeId: string): Promise<void> {
@@ -769,7 +781,7 @@ export class InspectorApp {
     panel.innerHTML = `<div class="panel-heading"><div><p class="eyebrow">${escape(group?.label ?? 'View')}</p><h2 id="view-name" title="${attr(view.label)}">${escape(view.label)}</h2></div><span class="view-counter">${this.catalog.views.indexOf(view) + 1} / ${this.catalog.views.length}</span></div>
       <p id="view-description" class="view-description" title="${attr(view.description)}">${escape(view.description)}</p>
       <div class="legend-body">${this.renderLegendContent(view, this.stats)}</div>
-      ${this.activeDomain?.renderKind === 'radial-profile' && this.geometry?.profile ? `<div class="profile-chart"><p class="eyebrow">PROFILE · PROVIDER VALUES</p>${profileSvg(this.geometry.profile)}</div>` : ''}
+      ${this.activeDomain?.renderKind === 'radial-profile' && this.geometry?.profile ? profileSvg(this.geometry.profile) : ''}
       ${missingResources.length ? `<div class="incomplete-note" role="status"><b>Incomplete response</b><span>${missingResources.map((item) => `<span title="${attr(item)}">${escape(item)}</span>`).join(', ')}</span></div>` : ''}
       <p class="legend-source">All values are synthetic fixture responses.</p>`;
     panel.dataset.viewId = view.id;
@@ -865,20 +877,22 @@ export class InspectorApp {
     if (this.explainFailure && sameExplainContext(context, this.explainFailure.context)) return;
     const version = ++this.explainRequestVersion;
     this.pendingExplain = context;
+    let chain: readonly ExplainStep[];
     try {
-      const chain = await context.provider.explain(context.position, context.viewId);
-      if (!this.isCurrentExplain(version, context)) return;
-      this.pendingExplain = null;
-      this.explainFailure = null;
-      this.snapshotExplain = { context, chain };
-      const target = this.root.querySelector<HTMLElement>('.explain-tree');
-      if (target) target.innerHTML = this.renderExplain(chain);
+      chain = await context.provider.explain(context.position, context.viewId);
     } catch (error) {
       if (!this.isCurrentExplain(version, context)) return;
       this.pendingExplain = null;
       this.explainFailure = { context, failure: asProviderFailure(error) };
       this.showFailure(error, { kind: 'explanation', context });
+      return;
     }
+    if (!this.isCurrentExplain(version, context)) return;
+    this.pendingExplain = null;
+    this.explainFailure = null;
+    this.snapshotExplain = { context, chain };
+    const target = this.root.querySelector<HTMLElement>('.explain-tree');
+    if (target) target.innerHTML = this.renderExplain(chain);
   }
 
   private isCurrentExplain(version: number, context: ExplainContext): boolean {
@@ -1129,12 +1143,13 @@ export class InspectorApp {
 }
 
 function profileSvg(values: readonly number[]): string {
-  if (values.length < 2) return '<p class="muted">No profile values supplied.</p>';
-  const minimum = Math.min(...values);
-  const maximum = Math.max(...values);
-  const span = maximum - minimum || 1;
-  const points = values.map((value, index) => `${(index / (values.length - 1) * 100).toFixed(2)},${(38 - (value - minimum) / span * 32).toFixed(2)}`).join(' ');
-  return `<svg class="profile-svg" viewBox="0 0 100 42" role="img" aria-label="Provider supplied radial profile with ${values.length} samples" preserveAspectRatio="none"><polyline points="${points}" fill="none" stroke="#c4c9cd" stroke-width="1.3" vector-effect="non-scaling-stroke"/><line x1="0" y1="39" x2="100" y2="39" stroke="#555d63" stroke-width="0.5" vector-effect="non-scaling-stroke"/></svg><div class="profile-axis"><span>Center</span><span>Outer sample</span></div>`;
+  const plot = buildRadialProfilePlot(values);
+  const sourceCount = formatCount(values.length);
+  if (!plot) {
+    const message = values.length < 2 ? 'No profile values supplied.' : 'No usable profile values supplied.';
+    return `<div class="profile-chart"><p class="eyebrow">PROFILE · PROVIDER VALUES · ${sourceCount} samples</p><p class="muted">${message}</p></div>`;
+  }
+  return `<div class="profile-chart"><p class="eyebrow">PROFILE · PROVIDER VALUES · ${sourceCount} samples</p><svg class="profile-svg" viewBox="0 0 100 42" role="img" aria-label="Provider supplied radial profile with ${plot.sourceSampleCount} samples" data-source-sample-count="${plot.sourceSampleCount}" data-plotted-point-count="${plot.sampleIndices.length}" preserveAspectRatio="none"><polyline points="${plot.points}" fill="none" stroke="#c4c9cd" stroke-width="1.3" vector-effect="non-scaling-stroke"/><line x1="0" y1="39" x2="100" y2="39" stroke="#555d63" stroke-width="0.5" vector-effect="non-scaling-stroke"/></svg><div class="profile-axis"><span>Center</span><span>Outer sample</span></div></div>`;
 }
 
 function formatNumber(value: number): string {

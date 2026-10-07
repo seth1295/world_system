@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { buildFixture, SCENARIOS } from '../src/fixtures/scenarios';
+import { MAX_PROFILE_PLOT_POINTS } from '../src/ui/profile-plot';
 import { orderedGroups } from '../src/ui/view-model';
 
 const viewSizes = [
@@ -488,6 +489,31 @@ test('captures regular and irregular rendered surfaces after the winding correct
   }
 });
 
+test('large radial profiles render with bounded SVG output and original sample counts', async ({ page }, testInfo) => {
+  await page.goto('/?fixture=fixture%3Aradial');
+  await waitForReady(page);
+  await expect(page.locator('.profile-svg')).toBeVisible();
+  await expect(page.locator('.profile-svg')).toHaveAttribute('data-source-sample-count', '64');
+  await page.locator('#legend-panel').screenshot({ path: testInfo.outputPath('radial-profile-normal.png') });
+  await page.locator('#viewport canvas').screenshot({ path: testInfo.outputPath('radial-profile-normal-viewport.png') });
+
+  await startRegressionHarness(page, 'fixture:radial', 250_000);
+  await expect(page.locator('#provider-state')).toHaveAttribute('data-state', 'ready');
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#viewport canvas')).toBeVisible();
+  const chart = page.locator('.profile-svg');
+  await expect(chart).toBeVisible();
+  await expect(chart).toHaveAttribute('data-source-sample-count', '250000');
+  await expect(page.locator('.profile-chart .eyebrow')).toContainText('250,000 samples');
+  const plotted = await chart.locator('polyline').getAttribute('points');
+  expect(plotted).not.toBeNull();
+  expect(plotted!.split(' ')).toHaveLength(MAX_PROFILE_PLOT_POINTS);
+  expect(plotted!.length).toBeLessThan(MAX_PROFILE_PLOT_POINTS * 16);
+  expect(plotted).not.toMatch(/NaN|Infinity/);
+  await page.locator('#legend-panel').screenshot({ path: testInfo.outputPath('radial-profile-large.png') });
+  await page.locator('#viewport canvas').screenshot({ path: testInfo.outputPath('radial-profile-large-viewport.png') });
+});
+
 test('stale diagnostic stages cannot replace the selected snapshot or reappear after failure', async ({ page }) => {
   await startRegressionHarness(page, 'fixture:diagnostics');
   await page.evaluate(() => window.remediationControl.setDiagnosticStageDeferred(true));
@@ -817,10 +843,11 @@ test('stale explanation failures are ignored while current failures still surfac
   await expect(page.locator('.explain-error')).toHaveText('current explanation failure');
 });
 
-async function startRegressionHarness(page: Page, fixtureId: string): Promise<void> {
+async function startRegressionHarness(page: Page, fixtureId: string, profileSamples?: number): Promise<void> {
   await page.setViewportSize(viewSizes[1]!);
   await page.addInitScript(() => { window.hostileColorExecuted = false; });
-  await page.goto(`/tests/remediation-harness.html?fixture=${encodeURIComponent(fixtureId)}`);
+  const profileQuery = profileSamples === undefined ? '' : `&profileSamples=${profileSamples}`;
+  await page.goto(`/tests/remediation-harness.html?fixture=${encodeURIComponent(fixtureId)}${profileQuery}`);
   await waitForReady(page);
 }
 

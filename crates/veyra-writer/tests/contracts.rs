@@ -376,7 +376,20 @@ fn writer_matches_extension_ledger_path_and_head_and_rejects_conflicts() {
 fn writer_uses_the_shared_literal_artifact_path_grammar() {
     let path = temp_path("paths");
     let mut writer = ArtifactWriter::new(&path).unwrap();
-    for invalid in ["", "/x", "a/./b", "a//b", "../x", "a\\b", "C:/x"] {
+    for invalid in [
+        "",
+        "/x",
+        "a/./b",
+        "a//b",
+        "../x",
+        "a\\b",
+        "C:/x",
+        "NUL",
+        "registry/COM1.txt",
+        "bad<name",
+        "trailing.",
+        "dir /file",
+    ] {
         assert!(matches!(writer.write_json_section(invalid, b"{}"), Err(WriterError::InvalidPath)));
     }
     assert!(writer.write_json_section("nested/valid.json", b"{}").is_ok());

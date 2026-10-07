@@ -550,6 +550,14 @@
       ],
       "additionalProperties": true
     },
+    "artifactPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*:)(?!.*[\\\\<>\"|?*])(?!.*[\\x00-\\x1F])(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)[^/]*[ .](?:/|$))(?!.*(?:^|/)$)[^\\x00]+$",
+      "not": {
+        "pattern": "(?:^|/)(?:[cC][oO][nN]|[pP][rR][nN]|[aA][uU][xX]|[nN][uU][lL]|[cC][oO][mM][1-9¹²³]|[lL][pP][tT][1-9¹²³])(?:\\.[^/]*)?(?:/|$)"
+      }
+    },
     "sectionRef": {
       "type": "object",
       "required": [
@@ -558,9 +566,7 @@
       ],
       "properties": {
         "path": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)$)[^\\x00]+$"
+          "$ref": "#/$defs/artifactPath"
         },
         "hash": {
           "type": "string",
@@ -582,9 +588,7 @@
           "minLength": 1
         },
         "path": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)$)[^\\x00]+$"
+          "$ref": "#/$defs/artifactPath"
         },
         "hash": {
           "type": "string",

@@ -10,11 +10,11 @@ pub const BODY_FIXED_AXES: &str =
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Dir {
     /// X component.
-    pub x: f64,
+    x: f64,
     /// Y component.
-    pub y: f64,
+    y: f64,
     /// Z component.
-    pub z: f64,
+    z: f64,
 }
 
 impl Dir {
@@ -32,6 +32,33 @@ impl Dir {
         let scaled_z = z / scale;
         let length = libm::sqrt(scaled_x * scaled_x + scaled_y * scaled_y + scaled_z * scaled_z);
         Ok(Self { x: scaled_x / length, y: scaled_y / length, z: scaled_z / length })
+    }
+
+    /// Returns the unit direction's X component.
+    pub const fn x(self) -> f64 {
+        self.x
+    }
+
+    /// Returns the unit direction's Y component.
+    pub const fn y(self) -> f64 {
+        self.y
+    }
+
+    /// Returns the unit direction's Z component.
+    pub const fn z(self) -> f64 {
+        self.z
+    }
+
+    fn validate(self) -> Result<(), SpatialError> {
+        if !self.x.is_finite() || !self.y.is_finite() || !self.z.is_finite() {
+            return Err(SpatialError::InvalidDirection);
+        }
+        let norm_squared = self.x * self.x + self.y * self.y + self.z * self.z;
+        if !norm_squared.is_finite() || norm_squared == 0.0 || (norm_squared - 1.0).abs() > 1.0e-12
+        {
+            return Err(SpatialError::InvalidDirection);
+        }
+        Ok(())
     }
 
     /// Creates a direction from axial latitude and longitude in radians.
@@ -56,13 +83,13 @@ impl Dir {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Quaternion {
     /// Scalar component.
-    pub w: f64,
+    w: f64,
     /// X component.
-    pub x: f64,
+    x: f64,
     /// Y component.
-    pub y: f64,
+    y: f64,
     /// Z component.
-    pub z: f64,
+    z: f64,
 }
 
 impl Quaternion {
@@ -77,6 +104,26 @@ impl Quaternion {
             return Err(SpatialError::InvalidQuaternion);
         }
         Ok(Self { w, x, y, z })
+    }
+
+    /// Returns the quaternion's scalar component.
+    pub const fn w(self) -> f64 {
+        self.w
+    }
+
+    /// Returns the quaternion's X component.
+    pub const fn x(self) -> f64 {
+        self.x
+    }
+
+    /// Returns the quaternion's Y component.
+    pub const fn y(self) -> f64 {
+        self.y
+    }
+
+    /// Returns the quaternion's Z component.
+    pub const fn z(self) -> f64 {
+        self.z
     }
 }
 
@@ -240,6 +287,7 @@ impl DirCube {
         if level > 30 {
             return Err(SpatialError::InvalidLevel);
         }
+        direction.validate()?;
         let (face, u, v) = project_direction(direction);
         let s = warp_uv(u);
         let t = warp_uv(v);
@@ -869,11 +917,59 @@ mod tests {
     }
 
     #[test]
+    fn cube_location_rejects_invalid_directions_before_projection() {
+        let invalid = [
+            Dir { x: 0.0, y: 0.0, z: 0.0 },
+            Dir { x: f64::NAN, y: 0.0, z: 0.0 },
+            Dir { x: 0.0, y: f64::NAN, z: 0.0 },
+            Dir { x: 0.0, y: 0.0, z: f64::NAN },
+            Dir { x: f64::INFINITY, y: 0.0, z: 0.0 },
+            Dir { x: f64::NEG_INFINITY, y: 0.0, z: 0.0 },
+            Dir { x: 1.0, y: f64::INFINITY, z: -2.0 },
+        ];
+        for direction in invalid {
+            for level in [0, 30] {
+                assert_eq!(
+                    DirCube.locate(direction, level),
+                    Err(super::SpatialError::InvalidDirection),
+                    "direction {direction:?} at level {level}"
+                );
+            }
+        }
+
+        // The fields are private to external callers. This internal mutation simulates
+        // corrupted state and verifies locate still checks its trust boundary.
+        let mut corrupted = Dir::new(1.0, 0.0, 0.0).unwrap();
+        corrupted.y = f64::NAN;
+        assert_eq!(DirCube.locate(corrupted, 0), Err(super::SpatialError::InvalidDirection));
+
+        let mut non_unit = Dir::new(1.0, 0.0, 0.0).unwrap();
+        non_unit.x = 2.0;
+        assert_eq!(DirCube.locate(non_unit, 30), Err(super::SpatialError::InvalidDirection));
+    }
+
+    #[test]
+    fn direction_and_quaternion_constructors_keep_invariant_fields_readable() {
+        let direction = Dir::new(2.0, 0.0, 0.0).unwrap();
+        assert_eq!((direction.x(), direction.y(), direction.z()), (1.0, 0.0, 0.0));
+        assert!(Dir::new(0.0, 0.0, 0.0).is_err());
+        assert!(Dir::new(f64::NAN, 0.0, 0.0).is_err());
+
+        let orientation = super::Quaternion::new(1.0, 0.0, 0.0, 0.0).unwrap();
+        assert_eq!(
+            (orientation.w(), orientation.x(), orientation.y(), orientation.z()),
+            (1.0, 0.0, 0.0, 0.0)
+        );
+        assert!(super::Quaternion::new(0.0, 0.0, 0.0, 0.0).is_err());
+        assert!(super::Quaternion::new(f64::INFINITY, 0.0, 0.0, 0.0).is_err());
+    }
+
+    #[test]
     fn direction_normalization_handles_extreme_finite_scales() {
         let large = Dir::new(1.0e308, 1.0e308, 0.0).unwrap();
         let small = Dir::new(1.0e-300, 0.0, 0.0).unwrap();
-        assert!((large.x - large.y).abs() < 1.0e-15);
-        assert_eq!((small.x, small.y, small.z), (1.0, 0.0, 0.0));
+        assert!((large.x() - large.y()).abs() < 1.0e-15);
+        assert_eq!((small.x(), small.y(), small.z()), (1.0, 0.0, 0.0));
     }
 
     #[test]

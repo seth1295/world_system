@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { safeCssColor } from './css-color';
+import { DEFAULT_CATEGORICAL_COLOR, normalizeCssColor, normalizePaletteStops, sampleNormalizedPalette } from './css-color';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { DisplayTile, FeatureTable, PickPosition, RenderGeometry, ViewDescriptor } from '../provider/contracts';
 
@@ -98,7 +98,12 @@ export class Viewport {
       for (const path of table.geometry?.paths ?? []) {
         const points = path.map((point) => new THREE.Vector3(point[0], point[1], point[2]).multiplyScalar(1.26));
         const geometry = new THREE.BufferGeometry().setFromPoints(points);
-        const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: safeCssColor(table.geometry?.color) ?? '#dedede', transparent: true, opacity: 0.85 }));
+        const color = normalizeCssColor(table.geometry?.color);
+        const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({
+          color: color?.hex ?? '#dedede',
+          transparent: true,
+          opacity: 0.85 * ((color?.rgba[3] ?? 255) / 255),
+        }));
         this.root.add(line);
         this.overlayObjects.push(line);
       }
@@ -130,19 +135,21 @@ export class Viewport {
     const context = canvas.getContext('2d');
     if (!context) throw new Error('The browser could not create a presentation texture.');
     const pixels = context.createImageData(tile.width, tile.height);
-    const stops = descriptor.legend.kind === 'continuous'
-      ? descriptor.legend.stops
-      : descriptor.legend.categories.map((category, index, all) => ({ at: (index + 0.5) / Math.max(1, all.length), color: category.color }));
-    const palette = stops.length ? stops : [{ at: 0, color: '#697178' }, { at: 1, color: '#d2d5d6' }];
+    const continuousPalette = descriptor.legend.kind === 'continuous'
+      ? normalizePaletteStops(descriptor.legend.stops)
+      : null;
+    const categoryColors = descriptor.legend.kind === 'categorical'
+      ? descriptor.legend.categories.map(({ color }) => normalizeCssColor(color) ?? DEFAULT_CATEGORICAL_COLOR)
+      : null;
     for (let index = 0; index < tile.values.length; index += 1) {
       const value = tile.values[index] ?? 0;
       const color = descriptor.legend.kind === 'categorical'
-        ? parseColor(palette[Math.min(palette.length - 1, Math.floor(value * palette.length))]?.color ?? '#a0a0a0')
-        : sampleStops(palette, value);
-      pixels.data[index * 4] = color[0];
-      pixels.data[index * 4 + 1] = color[1];
-      pixels.data[index * 4 + 2] = color[2];
-      pixels.data[index * 4 + 3] = 255;
+        ? categoryColors?.[Math.min(categoryColors.length - 1, Math.floor(value * categoryColors.length))] ?? DEFAULT_CATEGORICAL_COLOR
+        : sampleNormalizedPalette(continuousPalette ?? [], value);
+      pixels.data[index * 4] = color.rgba[0];
+      pixels.data[index * 4 + 1] = color.rgba[1];
+      pixels.data[index * 4 + 2] = color.rgba[2];
+      pixels.data[index * 4 + 3] = color.rgba[3];
     }
     context.putImageData(pixels, 0, 0);
     const texture = new THREE.CanvasTexture(canvas);
@@ -231,39 +238,6 @@ export class Viewport {
     const direction = hit.point.clone().normalize();
     this.onPick({ kind: 'surface-direction', direction: [direction.x, direction.y, direction.z] });
   };
-}
-
-function sampleStops(stops: readonly { at: number; color: string }[], value: number): [number, number, number] {
-  const sorted = [...stops].sort((left, right) => left.at - right.at);
-  const low = [...sorted].reverse().find((stop) => stop.at <= value) ?? sorted[0] ?? { at: 0, color: '#697178' };
-  const high = sorted.find((stop) => stop.at >= value) ?? sorted.at(-1) ?? low;
-  const span = Math.max(0.0001, high.at - low.at);
-  const weight = Math.max(0, Math.min(1, (value - low.at) / span));
-  const a = parseColor(low.color);
-  const b = parseColor(high.color);
-  return [0, 1, 2].map((channel) => Math.round(a[channel]! + (b[channel]! - a[channel]!) * weight)) as [number, number, number];
-}
-
-function parseColor(color: string): [number, number, number] {
-  if (color.startsWith('hsl')) {
-    const match = color.match(/hsl\((\d+)\s+(\d+)%\s+(\d+)%\)/);
-    if (match) {
-      const hue = Number(match[1]) / 360;
-      const saturation = Number(match[2]) / 100;
-      const light = Number(match[3]) / 100;
-      const chroma = (1 - Math.abs(2 * light - 1)) * saturation;
-      const section = hue * 6;
-      const x = chroma * (1 - Math.abs(section % 2 - 1));
-      const rgb = section < 1 ? [chroma, x, 0] : section < 2 ? [x, chroma, 0] : section < 3 ? [0, chroma, x] : section < 4 ? [0, x, chroma] : section < 5 ? [x, 0, chroma] : [chroma, 0, x];
-      const matchValue = light - chroma / 2;
-      return rgb.map((value) => Math.round((value + matchValue) * 255)) as [number, number, number];
-    }
-  }
-  const normalized = color.startsWith('#') ? color.slice(1) : color;
-  const full = normalized.length === 3 ? normalized.split('').map((value) => value + value).join('') : normalized;
-  const number = Number.parseInt(full, 16);
-  if (!Number.isFinite(number)) return [150, 150, 150];
-  return [(number >> 16) & 255, (number >> 8) & 255, number & 255];
 }
 
 function disposeObject(object: THREE.Object3D): void {

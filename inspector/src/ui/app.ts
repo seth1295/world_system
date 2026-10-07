@@ -17,7 +17,7 @@ import type {
   ViewStats,
 } from '../provider/contracts';
 import { asProviderFailure } from '../provider/contracts';
-import { safeCssColor } from '../render/css-color';
+import { normalizeCssColor, normalizePaletteStops } from '../render/css-color';
 import { Viewport } from '../render/viewport';
 import { orderedGroups } from './view-model';
 
@@ -39,6 +39,28 @@ interface ExplainFailure {
   context: ExplainContext;
   failure: ProviderFailure;
 }
+
+interface FixtureLoadProgress {
+  fixtureId: string;
+  provider: BodyProvider | null;
+  summary: BodySummary | null;
+  domains: readonly DomainDescriptor[] | null;
+  diagnostics: DiagnosticsDescriptor | null;
+  featureCatalog: FeatureCatalog | null;
+  domainId: string | null;
+  catalog: ViewCatalog | null;
+  geometry: RenderGeometry | null;
+}
+
+type FixtureLoadOperation = 'open' | 'summary' | 'domains' | 'diagnostics' | 'features' | 'views' | 'geometry';
+
+type RetryIntent =
+  | { kind: 'fixture-load'; progress: FixtureLoadProgress; operation: FixtureLoadOperation }
+  | { kind: 'domain-load'; fixtureId: string; provider: BodyProvider; domainId: string }
+  | { kind: 'view-load'; fixtureId: string; provider: BodyProvider; domainId: string; viewId: string; timeId: string | undefined; stageId: string | undefined }
+  | { kind: 'diagnostic-stage'; fixtureId: string; provider: BodyProvider; domainId: string | null; stageId: string }
+  | { kind: 'inspection'; fixtureId: string; provider: BodyProvider; domainId: string | null; position: PickPosition }
+  | { kind: 'explanation'; context: ExplainContext };
 
 function sameExplainContext(left: ExplainContext, right: ExplainContext): boolean {
   return left.provider === right.provider
@@ -71,7 +93,9 @@ export class InspectorApp {
   private selectedPosition: PickPosition | null = null;
   private pointReport: PointReport | null = null;
   private failure: ProviderFailure | null = null;
+  private retryIntent: RetryIntent | null = null;
   private loadState: LoadState = 'opening';
+  private loadStateBeforeFailure: LoadState | null = null;
   private debugOpen = false;
   private diagnosticsOpen = false;
   private featuresOpen = false;
@@ -147,6 +171,7 @@ export class InspectorApp {
     const version = ++this.requestVersion;
     this.inspectionRequestVersion += 1;
     this.invalidateExplain();
+    this.clearFailure();
     this.fixtureId = fixtureId;
     this.provider = null;
     this.summary = null;
@@ -164,52 +189,158 @@ export class InspectorApp {
     this.selectedOverlays.clear();
     this.selectedPosition = null;
     this.pointReport = null;
-    this.failure = null;
     this.loadState = 'opening';
     this.setFixtureQuery(fixtureId);
     this.closePopovers(false);
     this.viewport.clearData();
     this.renderAll();
-    try {
-      const provider = await this.bodyCatalog.open(fixtureId);
-      if (version !== this.requestVersion) return;
-      this.provider = provider;
-      this.loadState = 'metadata';
-      this.renderStatus();
-      const [summary, domains, diagnostics, featureCatalog] = await Promise.all([
-        provider.summary(), provider.domains(), provider.diagnostics(), provider.features(),
-      ]);
-      if (version !== this.requestVersion) return;
-      this.summary = summary;
-      this.domains = domains;
-      this.diagnostics = diagnostics;
-      this.featureCatalog = featureCatalog;
-      this.activeDomain = domains[0] ?? null;
-      if (this.activeDomain) {
-        this.catalog = await provider.views(this.activeDomain.id);
-        if (version !== this.requestVersion) return;
-        this.activeView = this.catalog.views[0] ?? null;
-        this.activeTimeId = this.defaultTime(this.activeView);
-        this.geometry = await provider.domainGeometry(this.activeDomain.id);
-        if (version !== this.requestVersion) return;
+    const progress: FixtureLoadProgress = {
+      fixtureId,
+      provider: null,
+      summary: null,
+      domains: null,
+      diagnostics: null,
+      featureCatalog: null,
+      domainId: null,
+      catalog: null,
+      geometry: null,
+    };
+    await this.continueFixtureLoad(progress, version);
+  }
+
+  private async continueFixtureLoad(
+    progress: FixtureLoadProgress,
+    version: number,
+    retryOperation?: FixtureLoadOperation,
+  ): Promise<void> {
+    let provider = progress.provider;
+    if (!provider) {
+      try {
+        provider = await this.bodyCatalog.open(progress.fixtureId);
+      } catch (error) {
+        if (version === this.requestVersion) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'open' });
+        return;
       }
       if (version !== this.requestVersion) return;
-      this.loadState = 'ready';
-      this.renderAll();
-      if (this.activeView) await this.loadActiveView(version);
-    } catch (error) {
-      if (version !== this.requestVersion) return;
-      this.showFailure(error);
+      progress.provider = provider;
+      this.provider = provider;
     }
+
+    if (version !== this.requestVersion) return;
+    this.loadState = 'metadata';
+    this.renderStatus();
+
+    if (retryOperation && ['summary', 'domains', 'diagnostics', 'features'].includes(retryOperation)) {
+      try {
+        switch (retryOperation) {
+          case 'summary': {
+            const value = await provider.summary();
+            if (version !== this.requestVersion) return;
+            progress.summary = value;
+            break;
+          }
+          case 'domains': {
+            const value = await provider.domains();
+            if (version !== this.requestVersion) return;
+            progress.domains = value;
+            break;
+          }
+          case 'diagnostics': {
+            const value = await provider.diagnostics();
+            if (version !== this.requestVersion) return;
+            progress.diagnostics = value;
+            break;
+          }
+          case 'features': {
+            const value = await provider.features();
+            if (version !== this.requestVersion) return;
+            progress.featureCatalog = value;
+            break;
+          }
+        }
+      } catch (error) {
+        if (version === this.requestVersion) this.showFailure(error, { kind: 'fixture-load', progress, operation: retryOperation });
+        return;
+      }
+      return this.continueFixtureLoad(progress, version);
+    }
+
+    const [summaryResult, domainsResult, diagnosticsResult, featuresResult] = await Promise.all([
+      settle(progress.summary ? Promise.resolve(progress.summary) : provider.summary()),
+      settle(progress.domains ? Promise.resolve(progress.domains) : provider.domains()),
+      settle(progress.diagnostics ? Promise.resolve(progress.diagnostics) : provider.diagnostics()),
+      settle(progress.featureCatalog ? Promise.resolve(progress.featureCatalog) : provider.features()),
+    ]);
+    if (version !== this.requestVersion) return;
+    if (summaryResult.ok) progress.summary = summaryResult.value;
+    if (domainsResult.ok) progress.domains = domainsResult.value;
+    if (diagnosticsResult.ok) progress.diagnostics = diagnosticsResult.value;
+    if (featuresResult.ok) progress.featureCatalog = featuresResult.value;
+    const metadataFailure = !summaryResult.ok
+      ? { operation: 'summary' as const, error: summaryResult.error }
+      : !domainsResult.ok
+        ? { operation: 'domains' as const, error: domainsResult.error }
+        : !diagnosticsResult.ok
+          ? { operation: 'diagnostics' as const, error: diagnosticsResult.error }
+          : !featuresResult.ok
+            ? { operation: 'features' as const, error: featuresResult.error }
+            : null;
+    if (metadataFailure) {
+      this.showFailure(metadataFailure.error, { kind: 'fixture-load', progress, operation: metadataFailure.operation });
+      return;
+    }
+
+    this.summary = progress.summary;
+    this.domains = progress.domains!;
+    this.diagnostics = progress.diagnostics!;
+    this.featureCatalog = progress.featureCatalog!;
+    const domain = progress.domains![0] ?? null;
+    this.activeDomain = domain;
+    progress.domainId = domain?.id ?? null;
+    if (domain) {
+      if (!progress.catalog) {
+        try {
+          const catalog = await provider.views(domain.id);
+          if (version !== this.requestVersion) return;
+          progress.catalog = catalog;
+        } catch (error) {
+          if (version === this.requestVersion) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'views' });
+          return;
+        }
+      }
+      this.catalog = progress.catalog;
+      this.activeView = this.catalog.views[0] ?? null;
+      this.activeTimeId = this.defaultTime(this.activeView);
+      if (!progress.geometry) {
+        try {
+          const geometry = await provider.domainGeometry(domain.id);
+          if (version !== this.requestVersion) return;
+          progress.geometry = geometry;
+        } catch (error) {
+          if (version === this.requestVersion) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'geometry' });
+          return;
+        }
+      }
+      this.geometry = progress.geometry;
+    }
+    if (version !== this.requestVersion) return;
+    this.loadState = 'ready';
+    this.renderAll();
+    if (this.activeView) await this.loadActiveView(version);
   }
 
   private async changeDomain(domainId: string): Promise<void> {
     const domain = this.domains.find(({ id }) => id === domainId);
     if (!domain || !this.provider) return;
+    const provider = this.provider;
     const version = ++this.requestVersion;
     this.inspectionRequestVersion += 1;
     this.invalidateExplain();
+    this.clearFailure();
     this.activeDomain = domain;
+    this.catalog = { groups: [], views: [] };
+    this.activeView = null;
+    this.activeTimeId = undefined;
     this.activeStageId = undefined;
     this.snapshot = null;
     this.pointReport = null;
@@ -220,7 +351,7 @@ export class InspectorApp {
     this.loadState = 'metadata';
     this.renderAll();
     try {
-      const [catalog, geometry] = await Promise.all([this.provider.views(domain.id), this.provider.domainGeometry(domain.id)]);
+      const [catalog, geometry] = await Promise.all([provider.views(domain.id), provider.domainGeometry(domain.id)]);
       if (version !== this.requestVersion) return;
       this.catalog = catalog;
       this.geometry = geometry;
@@ -233,7 +364,7 @@ export class InspectorApp {
       this.element<HTMLSelectElement>('#domain-selector').focus();
     } catch (error) {
       if (version !== this.requestVersion) return;
-      this.showFailure(error);
+      this.showFailure(error, { kind: 'domain-load', fixtureId: this.fixtureId, provider, domainId: domain.id });
     }
   }
 
@@ -242,12 +373,12 @@ export class InspectorApp {
     if (!view || !this.provider) return;
     const version = ++this.requestVersion;
     this.invalidateExplain();
+    this.clearFailure();
     this.activeView = view;
     this.activeTimeId = this.defaultTime(view);
     this.stats = undefined;
     this.closePopovers(true);
     this.loadState = 'view';
-    this.failure = null;
     this.viewport.clearData();
     this.renderAll();
     await this.loadActiveView(version);
@@ -262,14 +393,16 @@ export class InspectorApp {
       this.renderAll();
       return;
     }
+    const timeId = this.activeTimeId;
+    const stageId = this.activeStageId;
+    this.clearFailure();
     this.loadState = 'view';
-    this.failure = null;
     this.renderStatus();
     this.renderLegend();
     try {
       const [geometry, tile, stats] = await Promise.all([
         this.geometry ? Promise.resolve(this.geometry) : provider.domainGeometry(domain.id),
-        provider.tile(view.id, this.activeTimeId, this.activeStageId),
+        provider.tile(view.id, timeId, stageId),
         provider.stats(view.id),
       ]);
       if (version !== this.requestVersion) return;
@@ -282,7 +415,15 @@ export class InspectorApp {
     } catch (error) {
       if (version !== this.requestVersion) return;
       this.viewport.clearData();
-      this.showFailure(error);
+      this.showFailure(error, {
+        kind: 'view-load',
+        fixtureId: this.fixtureId,
+        provider,
+        domainId: domain.id,
+        viewId: view.id,
+        timeId,
+        stageId,
+      });
     }
   }
 
@@ -293,6 +434,7 @@ export class InspectorApp {
     const domainId = this.activeDomain?.id;
     const version = ++this.inspectionRequestVersion;
     this.invalidateExplain();
+    this.clearFailure();
     this.selectedPosition = position;
     this.pointReport = null;
     this.renderInspection();
@@ -304,7 +446,9 @@ export class InspectorApp {
       const input = this.root.querySelector<HTMLInputElement>('#field-search');
       if (input) input.focus();
     } catch (error) {
-      if (this.isCurrentInspection(version, provider, fixtureId, domainId, position)) this.showFailure(error);
+      if (this.isCurrentInspection(version, provider, fixtureId, domainId, position)) {
+        this.showFailure(error, { kind: 'inspection', fixtureId, provider, domainId: domainId ?? null, position });
+      }
     }
   }
 
@@ -332,26 +476,38 @@ export class InspectorApp {
 
   private async selectStage(stageId: string): Promise<void> {
     if (!this.provider) return;
+    const provider = this.provider;
     this.activeStageId = stageId;
+    this.clearFailure();
     this.snapshot = null;
     const version = ++this.requestVersion;
     this.renderDiagnostics();
     this.focusStage(stageId);
     try {
-      this.snapshot = await this.provider.diagnosticStage(stageId);
+      const snapshot = await provider.diagnosticStage(stageId);
       if (version !== this.requestVersion) return;
+      this.snapshot = snapshot;
       this.renderDiagnostics();
       this.focusStage(stageId);
       if (this.activeView) await this.loadActiveView(version);
       if (version !== this.requestVersion) return;
       this.focusStage(stageId);
     } catch (error) {
-      if (version === this.requestVersion) this.showFailure(error);
+      if (version === this.requestVersion) {
+        this.showFailure(error, {
+          kind: 'diagnostic-stage',
+          fixtureId: this.fixtureId,
+          provider,
+          domainId: this.activeDomain?.id ?? null,
+          stageId,
+        });
+      }
     }
   }
 
   private async selectTime(timeId: string): Promise<void> {
     if (!this.activeView?.timeSelections?.some(({ id }) => id === timeId)) return;
+    this.clearFailure();
     this.activeTimeId = timeId;
     const version = ++this.requestVersion;
     this.loadState = 'view';
@@ -376,10 +532,115 @@ export class InspectorApp {
     if (output) output.textContent = message;
   }
 
-  private showFailure(error: unknown): void {
-    this.failure = asProviderFailure(error);
+  private clearFailure(): void {
+    this.failure = null;
+    this.retryIntent = null;
+    if (this.loadState === 'error') {
+      this.loadState = this.loadStateBeforeFailure ?? (this.activeView ? 'ready' : 'metadata');
+      this.loadStateBeforeFailure = null;
+    }
+    this.renderError();
+    this.renderStatus();
+  }
+
+  private showFailure(error: unknown, retryIntent?: RetryIntent): void {
+    const failure = asProviderFailure(error);
+    if (this.debugOpen || this.diagnosticsOpen || this.featuresOpen) this.closePopovers(false);
+    if (this.loadState !== 'error') this.loadStateBeforeFailure = this.loadState;
+    this.failure = failure;
+    this.retryIntent = failure.retryable && retryIntent && this.isRetryIntentCurrent(retryIntent) ? retryIntent : null;
     this.loadState = 'error';
     this.renderAll();
+  }
+
+  private isRetryIntentCurrent(intent: RetryIntent): boolean {
+    switch (intent.kind) {
+      case 'fixture-load':
+        return this.fixtureId === intent.progress.fixtureId
+          && this.provider === intent.progress.provider
+          && (!['views', 'geometry'].includes(intent.operation) || this.activeDomain?.id === intent.progress.domainId);
+      case 'domain-load':
+        return this.fixtureId === intent.fixtureId && this.provider === intent.provider && this.activeDomain?.id === intent.domainId;
+      case 'view-load':
+        return this.fixtureId === intent.fixtureId
+          && this.provider === intent.provider
+          && this.activeDomain?.id === intent.domainId
+          && this.activeView?.id === intent.viewId
+          && this.activeTimeId === intent.timeId
+          && this.activeStageId === intent.stageId;
+      case 'diagnostic-stage':
+        return this.fixtureId === intent.fixtureId
+          && this.provider === intent.provider
+          && (this.activeDomain?.id ?? null) === intent.domainId
+          && this.activeStageId === intent.stageId;
+      case 'inspection':
+        return this.fixtureId === intent.fixtureId
+          && this.provider === intent.provider
+          && (this.activeDomain?.id ?? null) === intent.domainId
+          && this.selectedPosition !== null
+          && positionKey(this.selectedPosition) === positionKey(intent.position);
+      case 'explanation': {
+        const current = this.currentExplainContext();
+        return current !== null && sameExplainContext(current, intent.context);
+      }
+    }
+  }
+
+  private retryFailure(): void {
+    const intent = this.retryIntent;
+    if (!this.failure?.retryable || !intent || !this.isRetryIntentCurrent(intent)) {
+      this.clearFailure();
+      return;
+    }
+    this.clearFailure();
+    switch (intent.kind) {
+      case 'fixture-load':
+        {
+          const version = ++this.requestVersion;
+          this.loadState = intent.progress.provider ? 'metadata' : 'opening';
+          void this.continueFixtureLoad(intent.progress, version, intent.operation);
+        }
+        return;
+      case 'domain-load':
+        void this.changeDomain(intent.domainId);
+        return;
+      case 'view-load':
+        this.retryViewLoad();
+        return;
+      case 'diagnostic-stage':
+        this.diagnosticsOpen = true;
+        this.debugOpen = false;
+        this.featuresOpen = false;
+        this.renderDebugMenu();
+        this.renderFeatures();
+        this.renderDiagnostics();
+        this.element<HTMLButtonElement>('#diagnostics-button').setAttribute('aria-expanded', 'true');
+        void this.selectStage(intent.stageId);
+        return;
+      case 'inspection':
+        void this.inspect(intent.position);
+        return;
+      case 'explanation':
+        this.retryExplain(intent.context);
+    }
+  }
+
+  private retryViewLoad(): void {
+    const version = ++this.requestVersion;
+    this.loadState = 'view';
+    this.viewport.clearData();
+    this.renderStatus();
+    void this.loadActiveView(version);
+  }
+
+  private retryExplain(context: ExplainContext): void {
+    const current = this.currentExplainContext();
+    if (!current || !sameExplainContext(current, context)) return;
+    this.explainRequestVersion += 1;
+    this.pendingExplain = null;
+    this.snapshotExplain = null;
+    this.explainFailure = null;
+    this.renderInspection();
   }
 
   private renderAll(missingResources: readonly string[] = []): void {
@@ -485,7 +746,7 @@ export class InspectorApp {
     panel.innerHTML = `<div class="error-heading"><span class="error-mark" aria-hidden="true">!</span><div><p class="eyebrow">PROVIDER RESPONSE</p><h2>${escape(errorTitle(failure))}</h2></div></div>
       <code class="error-code">${escape(failure.code)}</code><p class="error-message">${escape(failure.message)}</p>
       ${failure.offendingItem ? `<p class="error-item">Item · <code title="${attr(failure.offendingItem)}">${escape(failure.offendingItem)}</code></p>` : ''}
-      ${failure.retryable ? '<button id="retry-button" class="secondary-button">Retry</button>' : ''}`;
+      ${failure.retryable && this.retryIntent && this.isRetryIntentCurrent(this.retryIntent) ? '<button id="retry-button" class="secondary-button">Retry</button>' : ''}`;
   }
 
   private renderLegend(missingResources: readonly string[] = []): void {
@@ -532,17 +793,14 @@ export class InspectorApp {
   private applyLegendColors(panel: HTMLElement, view: ViewDescriptor): void {
     if (view.legend.kind === 'categorical') {
       view.legend.categories.forEach((category, index) => {
-        const color = safeCssColor(category.color);
+        const color = normalizeCssColor(category.color);
         const swatch = panel.querySelector<HTMLElement>(`[data-category-color-index="${index}"]`);
-        if (color && swatch) swatch.style.setProperty('--swatch', color);
+        if (color && swatch) swatch.style.setProperty('--swatch', color.css);
       });
       return;
     }
-    const stops = view.legend.stops.flatMap(({ at, color }) => {
-      const safeColor = safeCssColor(color);
-      if (!safeColor || typeof at !== 'number' || !Number.isFinite(at) || at < 0 || at > 1) return [];
-      return [`${safeColor} ${(at * 100).toFixed(0)}%`];
-    });
+    const stops = normalizePaletteStops(view.legend.stops)
+      .map(({ at, color }) => `${color.css} ${(at * 100).toFixed(0)}%`);
     const scale = panel.querySelector<HTMLElement>('.legend-scale');
     if (stops.length > 0 && scale) scale.style.setProperty('--scale', `linear-gradient(90deg, ${stops.join(', ')})`);
   }
@@ -619,7 +877,7 @@ export class InspectorApp {
       if (!this.isCurrentExplain(version, context)) return;
       this.pendingExplain = null;
       this.explainFailure = { context, failure: asProviderFailure(error) };
-      this.showFailure(error);
+      this.showFailure(error, { kind: 'explanation', context });
     }
   }
 
@@ -743,9 +1001,9 @@ export class InspectorApp {
     const stageButton = target.closest<HTMLElement>('[data-stage-id]');
     if (stageButton?.dataset.stageId) { void this.selectStage(stageButton.dataset.stageId); return; }
     if (target.closest('.close-popover')) { this.closePopovers(true); return; }
-    if (target.closest('.close-inspection')) { this.inspectionRequestVersion += 1; this.invalidateExplain(); this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
+    if (target.closest('.close-inspection')) { this.inspectionRequestVersion += 1; this.invalidateExplain(); this.clearFailure(); this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
     if (target.closest('#inspect-center')) { this.viewport.inspectCenter(); return; }
-    if (target.closest('#retry-button')) { void this.openFixture(this.fixtureId); return; }
+    if (target.closest('#retry-button')) { this.retryFailure(); return; }
     if (target.closest('.copy-position') && this.pointReport) { void this.copy(this.pointReport.positionValue); return; }
     const copyValue = target.closest<HTMLElement>('.copy-value');
     if (copyValue) { void this.copy(`${copyValue.dataset.fieldLabel ?? ''}: ${copyValue.dataset.value ?? ''}`); return; }
@@ -782,7 +1040,7 @@ export class InspectorApp {
       if (this.debugOpen || this.diagnosticsOpen || this.featuresOpen) {
         event.preventDefault(); this.closePopovers(true); return;
       }
-      if (this.selectedPosition) { this.inspectionRequestVersion += 1; this.invalidateExplain(); this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
+      if (this.selectedPosition) { this.inspectionRequestVersion += 1; this.invalidateExplain(); this.clearFailure(); this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
     }
     const isDebugSearch = target.id === 'debug-search';
     const isStageSearch = target.id === 'diagnostic-search';
@@ -896,3 +1154,7 @@ function errorTitle(failure: ProviderFailure): string {
 function escape(value: string): string { return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character); }
 function attr(value: string): string { return escape(value); }
 function positionKey(position: PickPosition): string { return JSON.stringify(position); }
+async function settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+  try { return { ok: true, value: await promise }; }
+  catch (error) { return { ok: false, error }; }
+}

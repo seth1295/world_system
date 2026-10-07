@@ -193,7 +193,7 @@ export function buildGeometry(kind: DomainDescriptor['renderKind'], seed: number
   for (let y = 0; y < latSteps; y += 1) for (let x = 0; x < lonSteps; x += 1) {
     const a = y * (lonSteps + 1) + x;
     const b = a + lonSteps + 1;
-    indices.push(a, b, a + 1, b, b + 1, a + 1);
+    indices.push(a, a + 1, b, b, a + 1, b + 1);
   }
   return { kind, positions: Float32Array.from(positions), normals: Float32Array.from(normals), uvs: Float32Array.from(uvs), indices: Uint32Array.from(indices) };
 }

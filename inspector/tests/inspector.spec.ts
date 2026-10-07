@@ -529,6 +529,63 @@ test('captures regular and irregular rendered surfaces after the winding correct
   }
 });
 
+test('Inspect point follows the visible surface center ray before and after orbiting', async ({ page }, testInfo) => {
+  await startRegressionHarness(page, 'fixture:normal-surface');
+  await page.getByRole('button', { name: 'Inspect point' }).click();
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+  const unrotatedKey = await page.evaluate(() => window.remediationControl.inspectionPositionKey(0));
+  if (!unrotatedKey) throw new Error('Unrotated center inspection did not record a position');
+  const unrotated = JSON.parse(unrotatedKey) as { kind: string; direction: number[] };
+  expect(unrotated.kind).toBe('surface-direction');
+  expect(unrotated.direction[0]).toBeCloseTo(0, 5);
+  expect(unrotated.direction[1]).toBeCloseTo(0, 5);
+  expect(unrotated.direction[2]).toBeGreaterThan(0.98);
+
+  const canvas = page.getByTestId('viewport-canvas');
+  const bounds = await canvas.boundingBox();
+  expect(bounds).not.toBeNull();
+  const centerX = bounds!.x + bounds!.width / 2;
+  const centerY = bounds!.y + bounds!.height / 2;
+  await page.mouse.move(centerX, centerY);
+  await page.mouse.down();
+  await page.mouse.move(centerX + 150, centerY + 25, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(1500);
+
+  await canvas.click({ position: { x: bounds!.width / 2, y: bounds!.height / 2 } });
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(2);
+  const clickedCenter = await page.evaluate(() => window.remediationControl.inspectionPositionKey(1));
+  if (!clickedCenter) throw new Error('Center canvas pick did not record a position');
+  const clicked = JSON.parse(clickedCenter) as { kind: string; direction: number[] };
+
+  await page.getByRole('button', { name: 'Inspect point' }).click();
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(3);
+  const buttonCenter = await page.evaluate(() => window.remediationControl.inspectionPositionKey(2));
+  if (!buttonCenter) throw new Error('Center button pick did not record a position');
+  const rotated = JSON.parse(buttonCenter) as { kind: string; direction: number[] };
+  expect(rotated.kind).toBe('surface-direction');
+  expect(Math.hypot(...rotated.direction.map((value, index) => value - clicked.direction[index]!))).toBeLessThan(0.05);
+  expect(rotated.direction[2]).toBeLessThan(unrotated.direction[2]! - 0.1);
+  await page.evaluate(() => window.remediationControl.resolveInspection(2, 'Visible center after orbit'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Visible center after orbit');
+  await page.screenshot({ path: testInfo.outputPath('rotated-center-inspection.png') });
+});
+
+test('radial Inspect point selects the profile center and a missing surface hit selects nothing', async ({ page }, testInfo) => {
+  await startRegressionHarness(page, 'fixture:radial');
+  await page.getByRole('button', { name: 'Inspect point' }).click();
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+  expect(await page.evaluate(() => window.remediationControl.inspectionPositionKey(0))).toBe('{"kind":"radial-distance","normalizedRadius":0}');
+  await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Radial center'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Radial center');
+  await page.screenshot({ path: testInfo.outputPath('radial-center-inspection.png') });
+
+  await startRegressionHarness(page, 'fixture:void');
+  await page.getByRole('button', { name: 'Inspect point' }).click();
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(0);
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+});
+
 test('large radial profiles render with bounded SVG output and original sample counts', async ({ page }, testInfo) => {
   await page.goto('/?fixture=fixture%3Aradial');
   await waitForReady(page);
@@ -713,6 +770,67 @@ test('inspection and explanation retry repeat their own point requests', async (
   await expect(page.locator('.explain-tree')).toContainText('Retried explanation');
 });
 
+test('non-retryable inspection rejection ends loading and closes as an inspection-owned failure', async ({ page }, testInfo) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 0, 1] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+  await page.evaluate(() => window.remediationControl.rejectInspection(0, 'Point details are unavailable.'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Point inspection failed');
+  await expect(page.locator('#inspection-panel')).toContainText('Point details are unavailable.');
+  await expect(page.locator('#inspection-panel')).not.toContainText('Loading response');
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_INSPECT_TEST');
+  await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath('inspection-failure.png') });
+  await page.locator('.close-inspection').click();
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await expect(page.locator('#provider-error')).toBeHidden();
+});
+
+test('retryable inspection rejection ends loading and a successful retry restores the report', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  await page.evaluate(() => window.remediationControl.failNext('inspect', '*'));
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 0, 1] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Point inspection failed');
+  await expect(page.locator('#inspection-panel')).not.toContainText('Loading response');
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(2);
+  await expect(page.locator('#inspection-panel')).toContainText('Loading response');
+  await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Recovered point'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Recovered point');
+  await expect(page.locator('#provider-error')).toBeHidden();
+});
+
+for (const closeMethod of ['button', 'escape'] as const) {
+  test(`closing inspection with ${closeMethod} preserves an unrelated view-load failure`, async ({ page }, testInfo) => {
+    await openRetryableViewFailureWithInspection(page);
+    await expect(page.locator('#inspection-panel')).toBeVisible();
+    await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath('view-failure-with-inspection-open.png') });
+
+    if (closeMethod === 'button') {
+      await page.locator('.close-inspection').click();
+    } else {
+      await page.locator('#debug-button').focus();
+      await page.keyboard.press('Escape');
+    }
+
+    await expect(page.locator('#inspection-panel')).toBeHidden();
+    await expect(page.locator('#provider-error')).toBeVisible();
+    await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+    await expect(page.locator('#provider-state')).toHaveAttribute('data-state', 'error');
+    await page.screenshot({ path: testInfo.outputPath('view-failure-after-inspection-close.png') });
+
+    await page.getByRole('button', { name: 'Retry' }).click();
+    await waitForReady(page);
+    await expect(page.locator('#provider-error')).toBeHidden();
+  });
+}
+
 test('late explanation from view A cannot replace pending view B', async ({ page }) => {
   await startRegressionHarness(page, 'fixture:category-heavy');
   const viewA = await page.locator('#legend-panel').getAttribute('data-view-id');
@@ -827,6 +945,7 @@ test('new point selection invalidates its old explanation and stale inspection r
   await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(failureRaceStart + 2);
   await page.evaluate(() => window.remediationControl.rejectInspection(0, 'stale inspection failure'));
   await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#inspection-panel')).toContainText('Loading response');
   await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Current inspection'));
   await expect(page.locator('#inspection-panel h2')).toHaveText('Current inspection');
 
@@ -921,6 +1040,20 @@ async function selectRegressionStage(page: Page, index: number): Promise<string>
   if (!stageId) throw new Error(`Diagnostic stage ${index} has no identifier`);
   await option.click();
   return stageId;
+}
+
+async function openRetryableViewFailureWithInspection(page: Page): Promise<void> {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Inspection before view failure');
+  const target = page.locator('#debug-menu [data-view-id]').nth(1);
+  await page.getByTestId('debug-button').click();
+  const targetViewId = await target.getAttribute('data-view-id');
+  if (!targetViewId) throw new Error('Target view identifier is missing');
+  await page.evaluate((id) => window.remediationControl.failNext('tile', id), targetViewId);
+  await target.click();
+  await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', targetViewId);
+  await expect(page.locator('#provider-error')).toBeVisible();
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Inspection before view failure');
 }
 
 async function waitForExplainCount(page: Page, viewId: string, fixtureId: string, count: number): Promise<void> {

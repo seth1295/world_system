@@ -112,8 +112,11 @@ export class Viewport {
   }
 
   inspectCenter(): void {
-    if (this.currentKind === 'radial-profile') this.onPick({ kind: 'radial-distance', normalizedRadius: 0.5 });
-    else this.onPick({ kind: 'surface-direction', direction: [0, 0, 1] });
+    if (this.currentKind === 'radial-profile') {
+      this.onPick({ kind: 'radial-distance', normalizedRadius: 0 });
+      return;
+    }
+    this.pickAt(new THREE.Vector2(0, 0));
   }
 
   destroy(): void {
@@ -228,16 +231,26 @@ export class Viewport {
     if (!start || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) return;
     const bounds = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.pickAt(this.pointer);
+  };
+
+  private pickAt(pointer: THREE.Vector2): void {
+    if (!this.currentKind) return;
+    this.scene.updateMatrixWorld(true);
+    this.camera.updateMatrixWorld();
+    this.raycaster.setFromCamera(pointer, this.camera);
     const hit = this.raycaster.intersectObjects(this.pickables, false)[0];
-    if (!hit || !this.currentKind) return;
+    if (!hit) return;
+    const bodyPoint = hit.object.worldToLocal(hit.point.clone());
     if (this.currentKind === 'radial-profile') {
-      this.onPick({ kind: 'radial-distance', normalizedRadius: Math.min(1, Math.hypot(hit.point.x, hit.point.y) / 1.25) });
+      const normalizedRadius = Math.min(1, Math.hypot(bodyPoint.x, bodyPoint.y));
+      if (Number.isFinite(normalizedRadius)) this.onPick({ kind: 'radial-distance', normalizedRadius });
       return;
     }
-    const direction = hit.point.clone().normalize();
+    if (bodyPoint.lengthSq() === 0 || !Number.isFinite(bodyPoint.lengthSq())) return;
+    const direction = bodyPoint.normalize();
     this.onPick({ kind: 'surface-direction', direction: [direction.x, direction.y, direction.z] });
-  };
+  }
 }
 
 function disposeObject(object: THREE.Object3D): void {

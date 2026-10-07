@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+const RADIAL_MAX_LEVEL: u8 = 30;
+
 /// V1 right-handed body-fixed axis convention.
 pub const BODY_FIXED_AXES: &str =
     "+Z is the positive rotation pole; +X is the prime meridian; right-handed";
@@ -540,12 +542,17 @@ impl Topology for DirCube {
 }
 
 impl Radial1d {
-    /// Creates a radial topology with the domain's physical extent in metres.
+    /// Creates a radial topology with an extent that yields finite positive V1 shell measures.
     pub fn with_extent(extent_m: f64) -> Result<Self, SpatialError> {
         if !extent_m.is_finite() || extent_m <= 0.0 {
             return Err(SpatialError::InvalidExtent);
         }
-        Ok(Self { extent_m })
+        let topology = Self { extent_m };
+        // The shell fraction is bounded by 1 at L0 and 2^-90 at the
+        // innermost L30 shell. Check both bounds using the actual f64 measure path.
+        topology.cell_measure(Self::key(0, 0)?)?;
+        topology.cell_measure(Self::key(RADIAL_MAX_LEVEL, 0)?)?;
+        Ok(topology)
     }
 
     /// Returns the physical domain extent in metres.
@@ -555,7 +562,7 @@ impl Radial1d {
 
     /// Creates a radial shell key from level and shell index.
     pub fn key(level: u8, index: u64) -> Result<CellKey, SpatialError> {
-        if level > 30 || index >= (1_u64 << level) {
+        if level > RADIAL_MAX_LEVEL || index >= (1_u64 << level) {
             return Err(SpatialError::InvalidCellKey);
         }
         Ok(CellKey((1_u64 << level) | index))
@@ -563,11 +570,11 @@ impl Radial1d {
 
     /// Decodes a radial shell key.
     pub fn decode(key: CellKey) -> Result<(u8, u64), SpatialError> {
-        if key.0 == 0 || key.0 >= (1_u64 << 31) {
+        if key.0 == 0 || key.0 >= (1_u64 << (RADIAL_MAX_LEVEL + 1)) {
             return Err(SpatialError::InvalidCellKey);
         }
         let level = (63 - key.0.leading_zeros()) as u8;
-        if level > 30 {
+        if level > RADIAL_MAX_LEVEL {
             return Err(SpatialError::InvalidCellKey);
         }
         Ok((level, key.0 - (1_u64 << level)))
@@ -604,14 +611,14 @@ impl Topology for Radial1d {
 
     fn children(&self, key: CellKey) -> Result<Vec<CellKey>, SpatialError> {
         let (level, index) = Self::decode(key)?;
-        if level == 30 {
+        if level == RADIAL_MAX_LEVEL {
             return Err(SpatialError::InvalidLevel);
         }
         Ok(vec![Self::key(level + 1, index * 2)?, Self::key(level + 1, index * 2 + 1)?])
     }
 
     fn tile_key(&self, key: CellKey, tile_log2: u8) -> Result<TileKey, SpatialError> {
-        if tile_log2 > 30 {
+        if tile_log2 > RADIAL_MAX_LEVEL {
             return Err(SpatialError::InvalidTileLog2);
         }
         let (level, index) = Self::decode(key)?;
@@ -619,10 +626,10 @@ impl Topology for Radial1d {
     }
 
     fn validate_tile_key(&self, tile: TileKey, tile_log2: u8) -> Result<(), SpatialError> {
-        if tile_log2 > 30 {
+        if tile_log2 > RADIAL_MAX_LEVEL {
             return Err(SpatialError::InvalidTileLog2);
         }
-        if tile.level > 30 {
+        if tile.level > RADIAL_MAX_LEVEL {
             return Err(SpatialError::InvalidLevel);
         }
         let (address_level, tile_index) = Self::decode(tile.address)?;
@@ -635,20 +642,29 @@ impl Topology for Radial1d {
 
     fn cell_measure(&self, key: CellKey) -> Result<f64, SpatialError> {
         let (level, index) = Self::decode(key)?;
-        let count = (1_u64 << level) as f64;
-        let inner = index as f64 / count;
-        let outer = (index + 1) as f64 / count;
-        let cubic = |value: f64| value * value * value;
-        let extent_cubed = self.extent_m * self.extent_m * self.extent_m;
-        if !extent_cubed.is_finite() {
-            return Err(SpatialError::InvalidExtent);
-        }
-        Ok(4.0 * core::f64::consts::PI / 3.0 * extent_cubed * (cubic(outer) - cubic(inner)))
+        radial_shell_measure(self.extent_m, level, index)
     }
 
     fn neighbors(&self, key: CellKey) -> Result<Vec<CellKey>, SpatialError> {
         Ok(vec![Self::halo_neighbor(key, -1)?, Self::halo_neighbor(key, 1)?])
     }
+}
+
+fn radial_shell_measure(extent_m: f64, level: u8, index: u64) -> Result<f64, SpatialError> {
+    let count = (1_u64 << level) as f64;
+    let inner = index as f64 / count;
+    let outer = (index + 1) as f64 / count;
+    // Factor outer^3 - inner^3 to avoid cancellation for thin outer shells.
+    let shell_fraction = (outer - inner) * (outer * outer + outer * inner + inner * inner);
+    let extent_cubed = extent_m * extent_m * extent_m;
+    if !extent_cubed.is_finite() {
+        return Err(SpatialError::InvalidExtent);
+    }
+    let measure = 4.0 * core::f64::consts::PI / 3.0 * extent_cubed * shell_fraction;
+    if !measure.is_finite() || measure <= 0.0 {
+        return Err(SpatialError::InvalidExtent);
+    }
+    Ok(measure)
 }
 
 fn project_direction(direction: Dir) -> (u8, f64, f64) {
@@ -734,7 +750,7 @@ pub enum SpatialError {
     InvalidTileLog2,
     /// Tile address is not the canonical tile ancestor for its level.
     InvalidTileKey,
-    /// Radial extent is negative or nonfinite.
+    /// Radial extent is nonpositive, nonfinite, or yields unrepresentable V1 shell measures.
     InvalidExtent,
 }
 
@@ -748,7 +764,9 @@ impl fmt::Display for SpatialError {
             Self::InvalidFace => "face number is outside the V1 range",
             Self::InvalidTileLog2 => "tile_log2 is outside the V1 range",
             Self::InvalidTileKey => "tile key is not canonical for its topology",
-            Self::InvalidExtent => "radial extent must be finite and nonnegative",
+            Self::InvalidExtent => {
+                "radial extent must yield finite positive measures for all V1 shells"
+            }
         })
     }
 }
@@ -757,7 +775,10 @@ impl std::error::Error for SpatialError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{CellKey, Dir, DirCube, FACE_ADJACENCY, FaceEdge, Radial1d, Topology};
+    use super::{
+        CellKey, Dir, DirCube, FACE_ADJACENCY, FaceEdge, RADIAL_MAX_LEVEL, Radial1d, SpatialError,
+        Topology,
+    };
 
     #[test]
     fn dir_cube_key_parent_children_and_tiles_round_trip() {
@@ -896,7 +917,79 @@ mod tests {
         let doubled = Radial1d::with_extent(2.0).unwrap();
         let whole_shell = doubled.cell_measure(Radial1d::key(0, 0).unwrap()).unwrap();
         assert!((whole_shell - 8.0 * 4.0 * core::f64::consts::PI / 3.0).abs() < 1.0e-12);
-        assert!(Radial1d::with_extent(0.0).is_err());
+        assert!(Radial1d::with_extent(1.0).is_ok());
+    }
+
+    #[test]
+    fn radial_extent_rejects_nonrepresentable_whole_sphere_or_finest_shell() {
+        let overflowing_extent: f64 = 4.0e102;
+        let overflowing_cube = overflowing_extent * overflowing_extent * overflowing_extent;
+        assert!(overflowing_cube.is_finite());
+        assert!((4.0 * core::f64::consts::PI / 3.0 * overflowing_cube).is_infinite());
+        assert!(matches!(
+            Radial1d::with_extent(overflowing_extent),
+            Err(SpatialError::InvalidExtent)
+        ));
+
+        let underflowing_extent: f64 = 1.0e-105;
+        let underflowing_cube = underflowing_extent * underflowing_extent * underflowing_extent;
+        let finest_shell_count = (1_u64 << RADIAL_MAX_LEVEL) as f64;
+        let minimum_shell_fraction =
+            1.0 / (finest_shell_count * finest_shell_count * finest_shell_count);
+        assert_eq!(
+            4.0 * core::f64::consts::PI / 3.0 * underflowing_cube * minimum_shell_fraction,
+            0.0
+        );
+        assert!(matches!(
+            Radial1d::with_extent(underflowing_extent),
+            Err(SpatialError::InvalidExtent)
+        ));
+
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(Radial1d::with_extent(invalid), Err(SpatialError::InvalidExtent)));
+        }
+
+        let invalid_internal = Radial1d { extent_m: overflowing_extent };
+        assert!(matches!(
+            invalid_internal.cell_measure(Radial1d::key(0, 0).unwrap()),
+            Err(SpatialError::InvalidExtent)
+        ));
+    }
+
+    #[test]
+    fn accepted_radial_extents_have_finite_positive_measures_across_v1_levels() {
+        for extent in [1.0e-80, 1.0, 2.0, 1.0e100] {
+            let topology = Radial1d::with_extent(extent).unwrap();
+            let whole = topology.cell_measure(Radial1d::key(0, 0).unwrap()).unwrap();
+            assert!(whole.is_finite() && whole > 0.0, "extent {extent}");
+
+            for level in [0, 1, 15, 29, RADIAL_MAX_LEVEL] {
+                let count = 1_u64 << level;
+                let mut indices = vec![0, count / 2, count - 1];
+                if count > 1 {
+                    indices.push(1);
+                }
+                if count > 2 {
+                    indices.push(count - 2);
+                }
+                indices.sort_unstable();
+                indices.dedup();
+                for index in indices {
+                    let key = Radial1d::key(level, index).unwrap();
+                    let measure = topology.cell_measure(key).unwrap();
+                    assert!(
+                        measure.is_finite() && measure > 0.0,
+                        "extent {extent}, level {level}, index {index}"
+                    );
+                }
+            }
+
+            let deepest_inner = Radial1d::key(RADIAL_MAX_LEVEL, 0).unwrap();
+            let smallest_shell = topology.cell_measure(deepest_inner).unwrap();
+            assert!(smallest_shell.is_finite() && smallest_shell > 0.0);
+            let center = topology.center_radius(deepest_inner).unwrap();
+            assert!(center.is_finite() && center > 0.0);
+        }
     }
 
     #[test]

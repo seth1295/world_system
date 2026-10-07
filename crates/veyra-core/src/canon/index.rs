@@ -109,7 +109,13 @@ impl IndexBlob {
     /// Decodes and validates a canonical VYB1 index blob.
     pub fn decode(bytes: &[u8]) -> Result<Self, IndexError> {
         let blob = CanonicalBlob::decode(bytes).map_err(|_| IndexError::InvalidIndex)?;
-        if blob.kind != BlobKind::Index || blob.dtype != DType::Raw || blob.payload.len() < 12 {
+        if blob.kind != BlobKind::Index
+            || blob.dtype != DType::Raw
+            || blob.dim_i != 0
+            || blob.dim_j != 0
+            || blob.slices != 0
+            || blob.payload.len() < 12
+        {
             return Err(IndexError::InvalidIndex);
         }
         let payload = &blob.payload;
@@ -162,7 +168,11 @@ impl IndexBlob {
     }
 
     fn validate(&self) -> Result<(), IndexError> {
-        if self.tile_log2 > 30
+        let capability_id = (self.field_id >> 16) as u16;
+        let local_id = self.field_id as u16;
+        if capability_id == 0
+            || local_id == 0
+            || self.tile_log2 > 30
             || self.entries.iter().any(|entry| entry.level > 30)
             || self
                 .entries
@@ -210,8 +220,22 @@ impl std::error::Error for IndexError {}
 #[cfg(test)]
 mod tests {
     use super::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
+    use crate::canon::blob::{BlobKind, CanonicalBlob, DType};
     use crate::ids::Hash32;
     use crate::spatial::{DirCube, Radial1d, Topology};
+
+    fn valid_index(field_id: u32) -> IndexBlob {
+        IndexBlob {
+            field_id,
+            topology: TopologyTag::DirCube,
+            tile_log2: 0,
+            entries: vec![IndexEntry {
+                level: 0,
+                key: DirCube::key(0, 0, 0, 0).unwrap().0,
+                value: IndexValue::Const(0),
+            }],
+        }
+    }
 
     #[test]
     fn blob_and_const_entries_round_trip() {
@@ -233,13 +257,59 @@ mod tests {
             ],
         };
         let encoded = index.encode().unwrap();
+        assert_eq!(encoded[8..14], [0; 6]);
         assert_eq!(IndexBlob::decode(&encoded).unwrap(), index);
+    }
+
+    #[test]
+    fn index_headers_require_zero_dimensions_on_the_decode_path() {
+        let encoded = valid_index(0x0101_0001).encode().unwrap();
+        assert_eq!(IndexBlob::decode(&encoded).unwrap(), valid_index(0x0101_0001));
+
+        for dimension_offset in [8, 10, 12] {
+            let mut malformed = encoded.clone();
+            malformed[dimension_offset] = 1;
+            assert_eq!(
+                IndexBlob::decode(&malformed),
+                Err(super::IndexError::InvalidIndex),
+                "accepted nonzero dimension at header offset {dimension_offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_dimension_rule_does_not_restrict_reserved_columnar_blobs() {
+        let columnar =
+            CanonicalBlob::new(BlobKind::Columnar, DType::Raw, 1, 2, 3, vec![4, 5, 6]).unwrap();
+        assert_eq!(CanonicalBlob::decode(&columnar.encode()).unwrap(), columnar);
+    }
+
+    #[test]
+    fn index_field_ids_require_nonzero_capability_and_local_halves() {
+        for field_id in [0x0000_0000, 0x0000_0001, 0x0001_0000] {
+            assert_eq!(
+                valid_index(field_id).encode(),
+                Err(super::IndexError::InvalidIndex),
+                "encoded reserved field ID {field_id:#010x}"
+            );
+
+            let mut external = valid_index(0x0101_0001).encode().unwrap();
+            external[16..20].copy_from_slice(&field_id.to_le_bytes());
+            assert_eq!(
+                IndexBlob::decode(&external),
+                Err(super::IndexError::InvalidIndex),
+                "decoded reserved field ID {field_id:#010x}"
+            );
+        }
+
+        let valid = valid_index(0x0101_0001);
+        assert_eq!(IndexBlob::decode(&valid.encode().unwrap()).unwrap(), valid);
     }
 
     #[test]
     fn unsorted_entries_are_rejected() {
         let index = IndexBlob {
-            field_id: 1,
+            field_id: 0x0101_0001,
             topology: TopologyTag::Radial1d,
             tile_log2: 0,
             entries: vec![
@@ -257,7 +327,7 @@ mod tests {
             let cell = DirCube::key(4, 0, 1_u64.min((1_u64 << level) - 1), level).unwrap();
             let tile = topology.tile_key(cell, tile_log2).unwrap();
             let index = IndexBlob {
-                field_id: 1,
+                field_id: 0x0101_0001,
                 topology: TopologyTag::DirCube,
                 tile_log2,
                 entries: vec![IndexEntry {
@@ -273,7 +343,7 @@ mod tests {
     #[test]
     fn dir_cube_indexes_reject_a_cell_key_instead_of_its_tile_ancestor() {
         let invalid = IndexBlob {
-            field_id: 1,
+            field_id: 0x0101_0001,
             topology: TopologyTag::DirCube,
             tile_log2: 2,
             entries: vec![IndexEntry {
@@ -292,7 +362,7 @@ mod tests {
             let cell = Radial1d::key(level, cell_index).unwrap();
             let tile = topology.tile_key(cell, tile_log2).unwrap();
             let index = IndexBlob {
-                field_id: 1,
+                field_id: 0x0130_0001,
                 topology: TopologyTag::Radial1d,
                 tile_log2,
                 entries: vec![IndexEntry {
@@ -305,7 +375,7 @@ mod tests {
         }
 
         let invalid = IndexBlob {
-            field_id: 1,
+            field_id: 0x0130_0001,
             topology: TopologyTag::Radial1d,
             tile_log2: 2,
             entries: vec![IndexEntry {

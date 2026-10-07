@@ -627,15 +627,26 @@ def main() -> int:
 
     compiled_contracts = {
         document["id"]: {
+            "field_template_ids": [
+                template["local_id"] for template in document["field_templates"]
+            ],
             "requires": document["requires"],
             "params_schema": document["params_schema"],
             "required_reference_surface_kinds": document["required_reference_surface_kinds"],
         }
         for document in capability_documents
     }
+    compiled_numeric_ids = {
+        f"veyra.cap.{name}/1": numeric_id
+        for name, numeric_id in {
+            **allocated,
+            **fixture_allocated,
+        }.items()
+    }
     compiled_contract_file = read_json(ROOT / "schema" / "capability_contracts.v1.json")
     if compiled_contract_file != {
         "schema": "veyra.capability_contracts/1",
+        "numeric_ids": compiled_numeric_ids,
         "capabilities": compiled_contracts,
     }:
         raise SystemExit(

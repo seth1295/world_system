@@ -11,7 +11,6 @@ use crate::ids::{Hash32, ObjectAddress, ObjectId, RegionKey, UniverseId};
 use crate::spatial::SpatialError;
 use crate::time::{DecimalString, UTime};
 
-const CAPABILITY_IDS: &str = include_str!("../../../schema/capability_ids.toml");
 const BODY_FIXED_FRAME: &str = "body_fixed";
 const BODY_FIXED_AXES: &str =
     "+Z is the positive rotation pole; +X is the prime meridian; right-handed";
@@ -413,6 +412,8 @@ impl BodyRoot {
         if registry.schema != "veyra.field_registry/1" {
             return Err(ModelError::InvalidSection);
         }
+        let definitions =
+            crate::capability::definitions().map_err(|_| ModelError::InvalidCapabilityContract)?;
         let capabilities: std::collections::BTreeSet<&str> =
             self.capabilities.iter().map(|item| item.id.as_str()).collect();
         let domains: std::collections::BTreeSet<&str> =
@@ -444,8 +445,8 @@ impl BodyRoot {
                 }
                 continue;
             }
-            if let Some(capability_id) = capability_numeric_id(&field.capability)
-                && field.id.capability_id() != capability_id
+            if let Some(capability_id) = definitions.numeric_ids.get(&field.capability)
+                && field.id.capability_id() != *capability_id
             {
                 return Err(ModelError::InvalidField);
             }
@@ -456,7 +457,20 @@ impl BodyRoot {
                 return Err(ModelError::InvalidField);
             }
             if field.compat == Compatibility::Ancillary {
+                // Ancillary fields may use local IDs added by a future capability revision.
                 continue;
+            }
+            if let Some(contract) = definitions.contracts.get(&field.capability) {
+                let template_ids = contract
+                    .get("field_template_ids")
+                    .and_then(Value::as_array)
+                    .ok_or(ModelError::InvalidCapabilityContract)?;
+                if !template_ids.iter().any(|template_id| {
+                    template_id.as_u64().and_then(|id| u16::try_from(id).ok())
+                        == Some(field.id.local_id())
+                }) {
+                    return Err(ModelError::InvalidField);
+                }
             }
             let domain = self
                 .domains
@@ -561,8 +575,9 @@ impl BodyRoot {
     }
 
     fn validate_features(&self) -> Result<(), ModelError> {
-        let capability_contracts =
-            crate::capability::contracts().map_err(|_| ModelError::InvalidCapabilityContract)?;
+        let capability_contracts = crate::capability::definitions()
+            .map_err(|_| ModelError::InvalidCapabilityContract)?
+            .contracts;
         let mut seen = std::collections::BTreeSet::new();
         for feature in &self.required_features {
             if !seen.insert(feature.as_str()) {
@@ -589,8 +604,9 @@ impl BodyRoot {
     }
 
     fn validate_capabilities(&self) -> Result<(), ModelError> {
-        let contracts =
-            crate::capability::contracts().map_err(|_| ModelError::InvalidCapabilityContract)?;
+        let contracts = crate::capability::definitions()
+            .map_err(|_| ModelError::InvalidCapabilityContract)?
+            .contracts;
         let requirements = contracts
             .iter()
             .map(|(id, contract)| {
@@ -823,20 +839,9 @@ impl BodyRoot {
     }
 }
 
-/// Looks up the permanent numeric capability ID from the allocation file embedded at build time.
+/// Looks up the permanent numeric capability ID from the embedded capability definitions.
 pub fn capability_numeric_id(id: &str) -> Option<u16> {
-    let name = id.strip_prefix("veyra.cap.")?.strip_suffix("/1")?;
-    for line in CAPABILITY_IDS.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || !line.contains('=') {
-            continue;
-        }
-        let (key, value) = line.split_once('=')?;
-        if key.trim() == name {
-            return u16::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok();
-        }
-    }
-    None
+    crate::capability::definitions().ok()?.numeric_ids.get(id).copied()
 }
 
 fn parse_identity_origin(origin: &Value) -> Result<(UniverseId, ObjectAddress), ModelError> {
@@ -1534,6 +1539,78 @@ mod tests {
     }
 
     #[test]
+    fn critical_field_ids_must_be_allocated_by_known_capability_templates() {
+        let mut root = field_root("template-field-ids", true);
+        let mut declared_first = field_descriptor_json();
+        assert!(root.validate_registry(&registry(vec![declared_first.clone()])).is_ok());
+
+        declared_first["id"] = json!(FieldId::new(0x0101, 2).to_string());
+        assert!(root.validate_registry(&registry(vec![declared_first])).is_ok());
+
+        let mut undeclared = field_descriptor_json();
+        undeclared["id"] = json!(FieldId::new(0x0101, 3).to_string());
+        assert_eq!(
+            root.validate_registry(&registry(vec![undeclared])),
+            Err(super::ModelError::InvalidField)
+        );
+
+        let mut wrong_capability = field_descriptor_json();
+        wrong_capability["id"] = json!(FieldId::new(0x0102, 1).to_string());
+        assert_eq!(
+            root.validate_registry(&registry(vec![wrong_capability])),
+            Err(super::ModelError::InvalidField)
+        );
+
+        let mut zero_local = field_descriptor_json();
+        zero_local["id"] = json!(FieldId::new(0x0101, 0).to_string());
+        assert_eq!(
+            root.validate_registry(&registry(vec![zero_local])),
+            Err(super::ModelError::InvalidField)
+        );
+
+        let mut ancillary_future_local = field_descriptor_json();
+        ancillary_future_local["id"] = json!(FieldId::new(0x0101, 99).to_string());
+        ancillary_future_local["compat"] = json!("ancillary");
+        ancillary_future_local["semantic"] = json!("x-future.semantic/1");
+        ancillary_future_local["storage"]["dtype"] = json!("future_dtype");
+        ancillary_future_local["sampling"]["interp"] = json!("future_interpolation");
+        assert!(
+            root.validate_registry(&registry(vec![ancillary_future_local])).is_ok(),
+            "ancillary fields with future local IDs must remain preservable"
+        );
+        let mut ancillary_with_wrong_capability = field_descriptor_json();
+        ancillary_with_wrong_capability["id"] = json!(FieldId::new(0x0102, 99).to_string());
+        ancillary_with_wrong_capability["compat"] = json!("ancillary");
+        assert_eq!(
+            root.validate_registry(&registry(vec![ancillary_with_wrong_capability])),
+            Err(super::ModelError::InvalidField),
+            "known capability allocations remain enforced for ancillary fields"
+        );
+
+        let definitions = crate::capability::definitions().unwrap();
+        for (capability, contract) in &definitions.contracts {
+            let capability_number = definitions.numeric_ids[capability];
+            for template_id in contract["field_template_ids"].as_array().unwrap() {
+                let local_id = u16::try_from(template_id.as_u64().unwrap()).unwrap();
+                let mut root_value = serde_json::to_value(field_root(
+                    &format!("template-{}-{local_id}", capability.replace('/', "-")),
+                    true,
+                ))
+                .unwrap();
+                root_value["capabilities"] = json!([{"id":capability,"params":{}}]);
+                root = serde_json::from_value(root_value).unwrap();
+                let mut field = field_descriptor_json();
+                field["id"] = json!(FieldId::new(capability_number, local_id).to_string());
+                field["capability"] = json!(capability);
+                assert!(
+                    root.validate_registry(&registry(vec![field])).is_ok(),
+                    "declared template ID {capability}:{local_id} was rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn critical_scalar_fields_require_a_nonempty_string_unit() {
         let root = field_root("scalar-unit", true);
         assert!(root.validate_registry(&registry(vec![field_descriptor_json()])).is_ok());
@@ -1965,6 +2042,9 @@ mod tests {
             serde_json::from_value(star_convex_root("duplicate-radius-name", true)).unwrap();
         let mut second = radius_field_descriptor();
         second["id"] = json!("0x01000002");
+        second["compat"] = json!("ancillary");
+        second["semantic"] = json!("x-future.radius_field/1");
+        second["storage"]["dtype"] = json!("future_dtype");
         assert_eq!(
             root.validate_registry(&registry(vec![radius_field_descriptor(), second])),
             Err(super::ModelError::InvalidFigureField)

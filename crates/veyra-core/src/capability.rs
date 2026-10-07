@@ -6,13 +6,36 @@ use serde_json::Value;
 
 const CONTRACTS: &str = include_str!("../../../schema/capability_contracts.v1.json");
 
-pub(crate) fn contracts() -> Result<BTreeMap<String, Value>, ()> {
+pub(crate) struct Definitions {
+    pub(crate) contracts: BTreeMap<String, Value>,
+    pub(crate) numeric_ids: BTreeMap<String, u16>,
+}
+
+pub(crate) fn definitions() -> Result<Definitions, ()> {
     let document: Value = serde_json::from_str(CONTRACTS).map_err(|_| ())?;
     if document.get("schema").and_then(Value::as_str) != Some("veyra.capability_contracts/1") {
         return Err(());
     }
     let contracts = document.get("capabilities").and_then(Value::as_object).ok_or(())?;
-    Ok(contracts.iter().map(|(id, contract)| (id.clone(), contract.clone())).collect())
+    let contracts: BTreeMap<String, Value> =
+        contracts.iter().map(|(id, contract)| (id.clone(), contract.clone())).collect();
+    let numeric_ids = document
+        .get("numeric_ids")
+        .and_then(Value::as_object)
+        .ok_or(())?
+        .iter()
+        .map(|(id, value)| {
+            let numeric_id = value.as_u64().ok_or(())?.try_into().map_err(|_| ())?;
+            if numeric_id == 0 {
+                return Err(());
+            }
+            Ok((id.clone(), numeric_id))
+        })
+        .collect::<Result<BTreeMap<String, u16>, ()>>()?;
+    if contracts.keys().any(|id| !numeric_ids.contains_key(id)) {
+        return Err(());
+    }
+    Ok(Definitions { contracts, numeric_ids })
 }
 
 pub(crate) fn validate_dependency_graph(
@@ -154,7 +177,7 @@ pub(crate) fn reference_annotations(schema: &Value) -> Result<BTreeMap<String, S
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{validate_dependency_graph, validate_instance};
+    use super::{definitions, validate_dependency_graph, validate_instance};
     use serde_json::json;
 
     #[test]
@@ -192,5 +215,25 @@ mod tests {
         assert!(validate_instance(&json!({"domain":"surface"}), &schema).is_ok());
         assert!(validate_instance(&json!({}), &schema).is_err());
         assert!(validate_instance(&json!({"domain":7}), &schema).is_err());
+    }
+
+    #[test]
+    fn embedded_definitions_keep_allocations_and_field_templates_together() {
+        let definitions = definitions().unwrap();
+        assert_eq!(definitions.numeric_ids["veyra.cap.conformance_probe/1"], 0x7ffe);
+        for (id, contract) in &definitions.contracts {
+            assert!(definitions.numeric_ids.contains_key(id), "missing allocation for {id}");
+            let template_ids = contract["field_template_ids"].as_array().unwrap();
+            let numeric_ids: Vec<_> =
+                template_ids.iter().map(|value| value.as_u64().unwrap()).collect();
+            let mut unique_ids = numeric_ids.clone();
+            unique_ids.sort_unstable();
+            unique_ids.dedup();
+            assert_eq!(numeric_ids.len(), unique_ids.len(), "duplicate local ID in {id}");
+        }
+        assert_eq!(
+            definitions.contracts["veyra.cap.solid_surface/1"]["field_template_ids"],
+            json!([1])
+        );
     }
 }

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { safeCssColor } from './css-color';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { DisplayTile, FeatureTable, PickPosition, RenderGeometry, ViewDescriptor } from '../provider/contracts';
 
@@ -97,7 +98,7 @@ export class Viewport {
       for (const path of table.geometry?.paths ?? []) {
         const points = path.map((point) => new THREE.Vector3(point[0], point[1], point[2]).multiplyScalar(1.26));
         const geometry = new THREE.BufferGeometry().setFromPoints(points);
-        const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: table.geometry?.color ?? '#dedede', transparent: true, opacity: 0.85 }));
+        const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: safeCssColor(table.geometry?.color) ?? '#dedede', transparent: true, opacity: 0.85 }));
         this.root.add(line);
         this.overlayObjects.push(line);
       }

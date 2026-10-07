@@ -110,7 +110,7 @@ export class InspectorApp {
   constructor(private readonly root: HTMLDivElement, private readonly bodyCatalog: BodyCatalog) {
     this.fixtures = bodyCatalog.fixtures();
     const requested = new URL(window.location.href).searchParams.get('fixture');
-    this.fixtureId = this.fixtures.some(({ id }) => id === requested) ? requested! : 'fixture:normal-surface';
+    this.fixtureId = this.fixtures.find(({ id }) => id === requested)?.id ?? this.fixtures[0]?.id ?? '';
     this.root.innerHTML = this.shell();
     this.viewport = new Viewport(this.element<HTMLDivElement>('#viewport'), (position) => void this.inspect(position));
     this.root.addEventListener('click', this.handleClick);
@@ -120,6 +120,11 @@ export class InspectorApp {
   }
 
   async start(): Promise<void> {
+    if (this.fixtures.length === 0) {
+      this.loadState = 'ready';
+      this.renderAll();
+      return;
+    }
     this.renderAll();
     await this.openFixture(this.fixtureId);
   }
@@ -658,6 +663,7 @@ export class InspectorApp {
   private renderAll(missingResources: readonly string[] = []): void {
     this.renderFixtureSelector();
     this.renderIdentity();
+    if (this.fixtures.length === 0) this.element<HTMLElement>('#body-name').textContent = 'No fixtures available';
     this.renderDomainSelector();
     this.renderDebugButton();
     this.renderTemporalControl();
@@ -675,6 +681,7 @@ export class InspectorApp {
   private renderFixtureSelector(): void {
     const selector = this.element<HTMLSelectElement>('#fixture-selector');
     selector.innerHTML = this.fixtures.map((fixture) => `<option value="${attr(fixture.id)}" title="${attr(fixture.description)}">${escape(fixture.label)}</option>`).join('');
+    selector.disabled = this.fixtures.length === 0;
     selector.value = this.fixtureId;
   }
 
@@ -764,6 +771,10 @@ export class InspectorApp {
   private renderLegend(missingResources: readonly string[] = []): void {
     const panel = this.element<HTMLElement>('#legend-panel');
     const view = this.activeView;
+    if (this.fixtures.length === 0) {
+      panel.innerHTML = '<div class="panel-heading"><p class="eyebrow">CURRENT VIEW</p><h2 id="view-name">No fixtures available</h2></div><p class="muted">The catalog does not declare any fixtures to open.</p>';
+      return;
+    }
     if (!view) {
       const pending = this.loadState === 'opening' || this.loadState === 'metadata';
       const title = pending ? 'Waiting for metadata' : this.failure ? 'No view available' : 'No view declared';

@@ -9,6 +9,46 @@ const viewSizes = [
   { width: 820, height: 1100 },
 ];
 
+test('alternate catalog without a fixture query opens its first option and canonicalizes the URL', async ({ page }) => {
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/tests/catalog-harness.html');
+  await waitForReady(page);
+  await expect(page.locator('#fixture-selector')).toHaveValue('body:alpha');
+  await expect(page.locator('#fixture-selector option')).toHaveCount(2);
+  expect(await page.evaluate(() => window.catalogHarness.opened)).toEqual(['body:alpha']);
+  expect(new URL(page.url()).searchParams.get('fixture')).toBe('body:alpha');
+});
+
+test('alternate catalog with an invalid fixture query falls back to its first option', async ({ page }) => {
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/tests/catalog-harness.html?fixture=stale%3Aentry');
+  await waitForReady(page);
+  await expect(page.locator('#fixture-selector')).toHaveValue('body:alpha');
+  expect(await page.evaluate(() => window.catalogHarness.opened)).toEqual(['body:alpha']);
+  expect(new URL(page.url()).searchParams.get('fixture')).toBe('body:alpha');
+});
+
+test('alternate catalog preserves a valid query for a non-first fixture', async ({ page }) => {
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/tests/catalog-harness.html?fixture=body%3Abeta');
+  await waitForReady(page);
+  await expect(page.locator('#fixture-selector')).toHaveValue('body:beta');
+  expect(await page.evaluate(() => window.catalogHarness.opened)).toEqual(['body:beta']);
+  expect(new URL(page.url()).searchParams.get('fixture')).toBe('body:beta');
+});
+
+test('empty catalog presents an unavailable state without opening or advertising a fixture', async ({ page }) => {
+  await page.setViewportSize(viewSizes[1]!);
+  await page.goto('/tests/catalog-harness.html?empty=1&fixture=stale%3Aentry');
+  await expect(page.locator('#provider-state')).toHaveAttribute('data-state', 'ready');
+  await expect(page.locator('#body-name')).toHaveText('No fixtures available');
+  await expect(page.locator('#view-name')).toHaveText('No fixtures available');
+  await expect(page.locator('#fixture-selector')).toBeDisabled();
+  await expect(page.locator('#fixture-selector option')).toHaveCount(0);
+  expect(await page.evaluate(() => window.catalogHarness.opened)).toEqual([]);
+  expect(new URL(page.url()).searchParams.get('fixture')).toBe('stale:entry');
+});
+
 test('void fixture is stable, empty, and produces no browser errors', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));

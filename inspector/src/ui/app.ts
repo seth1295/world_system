@@ -17,8 +17,36 @@ import type {
   ViewStats,
 } from '../provider/contracts';
 import { asProviderFailure } from '../provider/contracts';
+import { safeCssColor } from '../render/css-color';
 import { Viewport } from '../render/viewport';
 import { orderedGroups } from './view-model';
+
+interface ExplainContext {
+  provider: BodyProvider;
+  fixtureId: string;
+  domainId: string;
+  positionKey: string;
+  position: PickPosition;
+  viewId: string;
+}
+
+interface ExplainSnapshot {
+  context: ExplainContext;
+  chain: readonly ExplainStep[];
+}
+
+interface ExplainFailure {
+  context: ExplainContext;
+  failure: ProviderFailure;
+}
+
+function sameExplainContext(left: ExplainContext, right: ExplainContext): boolean {
+  return left.provider === right.provider
+    && left.fixtureId === right.fixtureId
+    && left.domainId === right.domainId
+    && left.positionKey === right.positionKey
+    && left.viewId === right.viewId;
+}
 
 type LoadState = 'opening' | 'metadata' | 'view' | 'ready' | 'error';
 
@@ -48,6 +76,11 @@ export class InspectorApp {
   private diagnosticsOpen = false;
   private featuresOpen = false;
   private requestVersion = 0;
+  private inspectionRequestVersion = 0;
+  private explainRequestVersion = 0;
+  private snapshotExplain: ExplainSnapshot | null = null;
+  private pendingExplain: ExplainContext | null = null;
+  private explainFailure: ExplainFailure | null = null;
 
   constructor(private readonly root: HTMLDivElement, private readonly bodyCatalog: BodyCatalog) {
     this.fixtures = bodyCatalog.fixtures();
@@ -112,6 +145,8 @@ export class InspectorApp {
 
   private async openFixture(fixtureId: string): Promise<void> {
     const version = ++this.requestVersion;
+    this.inspectionRequestVersion += 1;
+    this.invalidateExplain();
     this.fixtureId = fixtureId;
     this.provider = null;
     this.summary = null;
@@ -152,10 +187,13 @@ export class InspectorApp {
       this.activeDomain = domains[0] ?? null;
       if (this.activeDomain) {
         this.catalog = await provider.views(this.activeDomain.id);
+        if (version !== this.requestVersion) return;
         this.activeView = this.catalog.views[0] ?? null;
         this.activeTimeId = this.defaultTime(this.activeView);
         this.geometry = await provider.domainGeometry(this.activeDomain.id);
+        if (version !== this.requestVersion) return;
       }
+      if (version !== this.requestVersion) return;
       this.loadState = 'ready';
       this.renderAll();
       if (this.activeView) await this.loadActiveView(version);
@@ -169,6 +207,8 @@ export class InspectorApp {
     const domain = this.domains.find(({ id }) => id === domainId);
     if (!domain || !this.provider) return;
     const version = ++this.requestVersion;
+    this.inspectionRequestVersion += 1;
+    this.invalidateExplain();
     this.activeDomain = domain;
     this.activeStageId = undefined;
     this.snapshot = null;
@@ -189,6 +229,7 @@ export class InspectorApp {
       this.loadState = 'ready';
       this.renderAll();
       if (this.activeView) await this.loadActiveView(version);
+      if (version !== this.requestVersion) return;
       this.element<HTMLSelectElement>('#domain-selector').focus();
     } catch (error) {
       if (version !== this.requestVersion) return;
@@ -200,6 +241,7 @@ export class InspectorApp {
     const view = this.catalog.views.find(({ id }) => id === viewId);
     if (!view || !this.provider) return;
     const version = ++this.requestVersion;
+    this.invalidateExplain();
     this.activeView = view;
     this.activeTimeId = this.defaultTime(view);
     this.stats = undefined;
@@ -246,19 +288,46 @@ export class InspectorApp {
 
   private async inspect(position: PickPosition): Promise<void> {
     if (!this.provider) return;
+    const provider = this.provider;
+    const fixtureId = this.fixtureId;
+    const domainId = this.activeDomain?.id;
+    const version = ++this.inspectionRequestVersion;
+    this.invalidateExplain();
     this.selectedPosition = position;
     this.pointReport = null;
     this.renderInspection();
     try {
-      const report = await this.provider.inspect(position);
-      if (this.selectedPosition !== position) return;
+      const report = await provider.inspect(position);
+      if (!this.isCurrentInspection(version, provider, fixtureId, domainId, position)) return;
       this.pointReport = report;
       this.renderInspection();
       const input = this.root.querySelector<HTMLInputElement>('#field-search');
       if (input) input.focus();
     } catch (error) {
-      this.showFailure(error);
+      if (this.isCurrentInspection(version, provider, fixtureId, domainId, position)) this.showFailure(error);
     }
+  }
+
+  private isCurrentInspection(
+    version: number,
+    provider: BodyProvider,
+    fixtureId: string,
+    domainId: string | undefined,
+    position: PickPosition,
+  ): boolean {
+    return version === this.inspectionRequestVersion
+      && this.provider === provider
+      && this.fixtureId === fixtureId
+      && this.activeDomain?.id === domainId
+      && this.selectedPosition !== null
+      && positionKey(this.selectedPosition) === positionKey(position);
+  }
+
+  private invalidateExplain(): void {
+    this.explainRequestVersion += 1;
+    this.snapshotExplain = null;
+    this.pendingExplain = null;
+    this.explainFailure = null;
   }
 
   private async selectStage(stageId: string): Promise<void> {
@@ -274,6 +343,7 @@ export class InspectorApp {
       this.renderDiagnostics();
       this.focusStage(stageId);
       if (this.activeView) await this.loadActiveView(version);
+      if (version !== this.requestVersion) return;
       this.focusStage(stageId);
     } catch (error) {
       if (version === this.requestVersion) this.showFailure(error);
@@ -288,6 +358,7 @@ export class InspectorApp {
     this.viewport.clearData();
     this.renderStatus();
     await this.loadActiveView(version);
+    if (version !== this.requestVersion) return;
     this.element<HTMLSelectElement>('#time-selector').focus();
   }
 
@@ -441,21 +512,39 @@ export class InspectorApp {
       ${missingResources.length ? `<div class="incomplete-note" role="status"><b>Incomplete response</b><span>${missingResources.map((item) => `<span title="${attr(item)}">${escape(item)}</span>`).join(', ')}</span></div>` : ''}
       <p class="legend-source">All values are synthetic fixture responses.</p>`;
     panel.dataset.viewId = view.id;
+    this.applyLegendColors(panel, view);
   }
 
   private renderLegendContent(view: ViewDescriptor, stats: ViewStats | undefined): string {
     const legend = view.legend;
     if (legend.kind === 'categorical') {
       return `<div class="legend-unit-row">${legend.unit ? `<span class="unit-tag">${escape(legend.unit)}</span>` : '<span class="muted">No unit provided</span>'}<span class="muted">${legend.categories.length} categories</span></div>
-        <div class="category-list" role="list" aria-label="Legend categories">${legend.categories.map((category) => `<div class="category-row" role="listitem" tabindex="0" title="${attr(category.label)}"><span class="category-swatch" style="--swatch:${attr(category.color)}"></span><span class="category-name" title="${attr(category.label)}">${escape(category.label)}</span><span class="category-metrics">${category.count === undefined ? '—' : formatCount(category.count)}${category.weightedPercent === undefined ? '' : `<small>${formatPercent(category.weightedPercent)}</small>`}</span></div>`).join('')}</div>`;
+        <div class="category-list" role="list" aria-label="Legend categories">${legend.categories.map((category, index) => `<div class="category-row" role="listitem" tabindex="0" title="${attr(category.label)}"><span class="category-swatch" data-category-color-index="${index}"></span><span class="category-name" title="${attr(category.label)}">${escape(category.label)}</span><span class="category-metrics">${category.count === undefined ? '—' : formatCount(category.count)}${category.weightedPercent === undefined ? '' : `<small>${formatPercent(category.weightedPercent)}</small>`}</span></div>`).join('')}</div>`;
     }
-    const gradient = legend.stops.map(({ at, color }) => `${color} ${(at * 100).toFixed(0)}%`).join(', ');
     const statText = legend.statsAvailable && stats
       ? `<div class="stats-grid"><div><span>MIN</span><b title="${attr(String(stats.min))}">${formatNumber(stats.min)}</b></div><div><span>MAX</span><b title="${attr(String(stats.max))}">${formatNumber(stats.max)}</b></div><div><span>MEAN</span><b title="${attr(String(stats.mean))}">${formatNumber(stats.mean)}</b></div></div>${stats.count === undefined ? '' : `<p class="sample-count">${formatCount(stats.count)} provider records</p>`}`
       : '<p class="no-stats">No statistics available</p>';
     return `<div class="legend-unit-row">${legend.unit ? `<span class="unit-tag">${escape(legend.unit)}</span>` : '<span class="muted">No unit provided</span>'}${legend.range ? `<span class="muted range-value" title="${attr(`${legend.range.min} – ${legend.range.max}`)}">${formatNumber(legend.range.min)} – ${formatNumber(legend.range.max)}</span>` : ''}</div>
-      <div class="legend-scale" role="img" aria-label="Continuous colour scale${legend.unit ? ` in ${attr(legend.unit)}` : ''}" style="--scale:linear-gradient(90deg, ${gradient})"></div>
+      <div class="legend-scale" role="img" aria-label="Continuous colour scale${legend.unit ? ` in ${attr(legend.unit)}` : ''}"></div>
       <div class="scale-ends"><span>${legend.range ? formatNumber(legend.range.min) : 'Low'}</span><span>${legend.range ? formatNumber(legend.range.max) : 'High'}</span></div>${statText}`;
+  }
+
+  private applyLegendColors(panel: HTMLElement, view: ViewDescriptor): void {
+    if (view.legend.kind === 'categorical') {
+      view.legend.categories.forEach((category, index) => {
+        const color = safeCssColor(category.color);
+        const swatch = panel.querySelector<HTMLElement>(`[data-category-color-index="${index}"]`);
+        if (color && swatch) swatch.style.setProperty('--swatch', color);
+      });
+      return;
+    }
+    const stops = view.legend.stops.flatMap(({ at, color }) => {
+      const safeColor = safeCssColor(color);
+      if (!safeColor || typeof at !== 'number' || !Number.isFinite(at) || at < 0 || at > 1) return [];
+      return [`${safeColor} ${(at * 100).toFixed(0)}%`];
+    });
+    const scale = panel.querySelector<HTMLElement>('.legend-scale');
+    if (stops.length > 0 && scale) scale.style.setProperty('--scale', `linear-gradient(90deg, ${stops.join(', ')})`);
   }
 
   private renderInspection(): void {
@@ -478,30 +567,65 @@ export class InspectorApp {
       <summary><span title="${attr(group.label)}">${escape(group.label)}</span><small>${group.fields.length}</small></summary>
       <div class="field-list">${group.fields.map((field) => this.renderField(field, group.label)).join('')}</div>
     </details>`).join('');
-    const explain = this.activeView && this.provider && this.selectedPosition
-      ? `<details class="explain-block"><summary>Provider explanation</summary><div class="explain-tree">${this.renderExplain(this.snapshotExplain)}</div></details>`
+    const context = this.currentExplainContext();
+    const explainSnapshot = context && this.snapshotExplain && sameExplainContext(context, this.snapshotExplain.context)
+      ? this.snapshotExplain.chain
+      : null;
+    const explainFailure = context && this.explainFailure && sameExplainContext(context, this.explainFailure.context)
+      ? this.explainFailure.failure
+      : null;
+    const explainContent = explainSnapshot
+      ? this.renderExplain(explainSnapshot)
+      : explainFailure
+        ? `<p class="explain-error" role="alert">${escape(explainFailure.message)}</p>`
+        : '<p class="explain-loading">Loading explanation…</p>';
+    const explain = context
+      ? `<details class="explain-block"><summary>Provider explanation</summary><div class="explain-tree">${explainContent}</div></details>`
       : '';
     panel.innerHTML = `<header class="inspection-header"><div><p class="eyebrow">SELECTED POSITION · ${count} FIELDS</p><h2 title="${attr(report.positionLabel)}">${escape(report.positionLabel)}</h2><code title="${attr(report.positionValue)}">${escape(report.positionValue)}</code></div><button class="icon-button close-inspection" aria-label="Close point inspection">×</button></header>
       ${count > 8 ? '<label class="search-wrap field-search-wrap"><span aria-hidden="true">⌕</span><input id="field-search" type="search" placeholder="Filter fields and groups" aria-label="Filter point fields"></label>' : ''}
       <div class="report-scroll"><div class="field-groups" id="field-groups">${groups || '<p class="muted">No fields supplied for this position.</p>'}</div>
       ${explain}<div class="copy-row"><button class="secondary-button copy-position">Copy position</button><span id="copy-status" class="sr-only" aria-live="polite"></span></div></div>`;
-    void this.loadExplain();
+    if (context && !explainSnapshot && !explainFailure) void this.loadExplain(context);
   }
 
-  private snapshotExplain: readonly ExplainStep[] = [];
+  private currentExplainContext(): ExplainContext | null {
+    if (!this.provider || !this.activeDomain || !this.activeView || !this.selectedPosition) return null;
+    return {
+      provider: this.provider,
+      fixtureId: this.fixtureId,
+      domainId: this.activeDomain.id,
+      position: this.selectedPosition,
+      positionKey: positionKey(this.selectedPosition),
+      viewId: this.activeView.id,
+    };
+  }
 
-  private async loadExplain(): Promise<void> {
-    if (!this.provider || !this.activeView || !this.selectedPosition) return;
-    const position = this.selectedPosition;
+  private async loadExplain(context: ExplainContext): Promise<void> {
+    if (this.pendingExplain && sameExplainContext(context, this.pendingExplain)) return;
+    if (this.snapshotExplain && sameExplainContext(context, this.snapshotExplain.context)) return;
+    if (this.explainFailure && sameExplainContext(context, this.explainFailure.context)) return;
+    const version = ++this.explainRequestVersion;
+    this.pendingExplain = context;
     try {
-      const chain = await this.provider.explain(position, this.activeView.id);
-      if (this.selectedPosition !== position) return;
-      this.snapshotExplain = chain;
+      const chain = await context.provider.explain(context.position, context.viewId);
+      if (!this.isCurrentExplain(version, context)) return;
+      this.pendingExplain = null;
+      this.explainFailure = null;
+      this.snapshotExplain = { context, chain };
       const target = this.root.querySelector<HTMLElement>('.explain-tree');
       if (target) target.innerHTML = this.renderExplain(chain);
     } catch (error) {
+      if (!this.isCurrentExplain(version, context)) return;
+      this.pendingExplain = null;
+      this.explainFailure = { context, failure: asProviderFailure(error) };
       this.showFailure(error);
     }
+  }
+
+  private isCurrentExplain(version: number, context: ExplainContext): boolean {
+    const current = this.currentExplainContext();
+    return version === this.explainRequestVersion && current !== null && sameExplainContext(context, current);
   }
 
   private renderField(field: PointReport['groups'][number]['fields'][number], groupLabel: string): string {
@@ -619,7 +743,7 @@ export class InspectorApp {
     const stageButton = target.closest<HTMLElement>('[data-stage-id]');
     if (stageButton?.dataset.stageId) { void this.selectStage(stageButton.dataset.stageId); return; }
     if (target.closest('.close-popover')) { this.closePopovers(true); return; }
-    if (target.closest('.close-inspection')) { this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
+    if (target.closest('.close-inspection')) { this.inspectionRequestVersion += 1; this.invalidateExplain(); this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
     if (target.closest('#inspect-center')) { this.viewport.inspectCenter(); return; }
     if (target.closest('#retry-button')) { void this.openFixture(this.fixtureId); return; }
     if (target.closest('.copy-position') && this.pointReport) { void this.copy(this.pointReport.positionValue); return; }
@@ -658,7 +782,7 @@ export class InspectorApp {
       if (this.debugOpen || this.diagnosticsOpen || this.featuresOpen) {
         event.preventDefault(); this.closePopovers(true); return;
       }
-      if (this.selectedPosition) { this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
+      if (this.selectedPosition) { this.inspectionRequestVersion += 1; this.invalidateExplain(); this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
     }
     const isDebugSearch = target.id === 'debug-search';
     const isStageSearch = target.id === 'diagnostic-search';
@@ -771,3 +895,4 @@ function errorTitle(failure: ProviderFailure): string {
 }
 function escape(value: string): string { return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character); }
 function attr(value: string): string { return escape(value); }
+function positionKey(position: PickPosition): string { return JSON.stringify(position); }

@@ -396,6 +396,254 @@ test('compact layout keeps a large inspection report and menu panels distinct', 
   await assertOverlayWithinViewport(page, '#debug-menu');
 });
 
+test('provider colors are validated before use in continuous and categorical legends', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const browserErrors: string[] = [];
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  page.on('console', (message) => { if (message.type() === 'error') browserErrors.push(message.text()); });
+  const categoryStyles = await page.locator('#legend-panel .category-swatch').evaluateAll((elements) => elements.map((element) => (element as HTMLElement).style.getPropertyValue('--swatch')));
+  expect(categoryStyles.slice(0, 7)).toEqual(['', '', '', '', '', '', '']);
+  expect(categoryStyles[7]).toMatch(/^hsl\(/);
+
+  const categoryAudit = await page.locator('#legend-panel').evaluate((panel) => ({
+    eventAttributes: [...panel.querySelectorAll('*')].flatMap((element) => [...element.attributes].filter(({ name }) => name.toLowerCase().startsWith('on')).map(({ name }) => name)),
+    scripts: panel.querySelectorAll('script').length,
+    injected: panel.querySelectorAll('#injected, img, iframe, svg script').length,
+  }));
+  expect(categoryAudit).toEqual({ eventAttributes: [], scripts: 0, injected: 0 });
+  await page.locator('#legend-panel .category-swatch').evaluateAll((elements) => elements.forEach((element) => element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))));
+  expect(await page.evaluate(() => window.hostileColorExecuted)).toBe(false);
+
+  await selectRegressionView(page, 1);
+  const continuous = await page.locator('#legend-panel .legend-scale').evaluate((element) => ({
+    style: (element as HTMLElement).style.getPropertyValue('--scale'),
+    computed: getComputedStyle(element).backgroundImage,
+  }));
+  expect(continuous.style).toContain('#55606a');
+  expect(continuous.style).toContain('#a9b0b5');
+  expect(continuous.style).toContain('#eef0ec');
+  expect(continuous.computed).toContain('linear-gradient');
+  for (const hostile of ['onmouseover', 'javascript:', '</div>', '<script>', 'calc(', 'red; background', 'var(']) {
+    expect(continuous.style).not.toContain(hostile);
+  }
+  await page.locator('#legend-panel .legend-scale').dispatchEvent('mouseover');
+  expect(await page.evaluate(() => window.hostileColorExecuted)).toBe(false);
+  const continuousAudit = await page.locator('#legend-panel').evaluate((panel) => ({
+    eventAttributes: [...panel.querySelectorAll('*')].flatMap((element) => [...element.attributes].filter(({ name }) => name.toLowerCase().startsWith('on')).map(({ name }) => name)),
+    scripts: panel.querySelectorAll('script').length,
+  }));
+  expect(continuousAudit).toEqual({ eventAttributes: [], scripts: 0 });
+  await page.getByRole('button', { name: /Features/ }).click();
+  const overlay = page.locator('#features-menu input[data-feature-id]').first();
+  await overlay.check();
+  await expect(overlay).toBeChecked();
+  expect(browserErrors).toEqual([]);
+});
+
+test('late explanation from view A cannot replace pending view B', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const viewA = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!viewA) throw new Error('Initial view id is missing');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Point A');
+  await waitForExplainCount(page, viewA, 'fixture:category-heavy', 1);
+
+  const viewB = await selectRegressionView(page, 1);
+  await waitForExplainCount(page, viewB, 'fixture:category-heavy', 1);
+  await expect(page.locator('.explain-tree')).toContainText('Loading explanation');
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'A result'), { viewId: viewA });
+  await expect(page.locator('.explain-tree')).not.toContainText('A result');
+  await expect(page.locator('#provider-error')).toBeHidden();
+
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'B result'), { viewId: viewB });
+  await expect(page.locator('.explain-tree')).toContainText('B result');
+});
+
+test('view B remains current when it resolves before stale view A', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const viewA = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!viewA) throw new Error('Initial view id is missing');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Point A');
+  await waitForExplainCount(page, viewA, 'fixture:category-heavy', 1);
+  const viewB = await selectRegressionView(page, 1);
+  await waitForExplainCount(page, viewB, 'fixture:category-heavy', 1);
+
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'B result'), { viewId: viewB });
+  await expect(page.locator('.explain-tree')).toContainText('B result');
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'A result'), { viewId: viewA });
+  await expect(page.locator('.explain-tree')).toContainText('B result');
+  await expect(page.locator('.explain-tree')).not.toContainText('A result');
+});
+
+test('explanation snapshots clear immediately when the active view changes', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const viewA = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!viewA) throw new Error('Initial view id is missing');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Point A');
+  await waitForExplainCount(page, viewA, 'fixture:category-heavy', 1);
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'A snapshot'), { viewId: viewA });
+  await expect(page.locator('.explain-tree')).toContainText('A snapshot');
+
+  const viewB = await selectRegressionView(page, 1);
+  await waitForExplainCount(page, viewB, 'fixture:category-heavy', 1);
+  await expect(page.locator('.explain-tree')).toContainText('Loading explanation');
+  await expect(page.locator('.explain-tree')).not.toContainText('A snapshot');
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'B current'), { viewId: viewB });
+  await expect(page.locator('.explain-tree')).toContainText('B current');
+});
+
+test('rapid view A to B to C ignores both older successful explanations', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const viewA = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!viewA) throw new Error('Initial view id is missing');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Point A');
+  await waitForExplainCount(page, viewA, 'fixture:category-heavy', 1);
+  const viewB = await selectRegressionView(page, 1);
+  await waitForExplainCount(page, viewB, 'fixture:category-heavy', 1);
+  const viewC = await selectRegressionView(page, 2);
+  await waitForExplainCount(page, viewC, 'fixture:category-heavy', 1);
+
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'A stale'), { viewId: viewA });
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'B stale'), { viewId: viewB });
+  await expect(page.locator('.explain-tree')).not.toContainText('A stale');
+  await expect(page.locator('.explain-tree')).not.toContainText('B stale');
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'C current'), { viewId: viewC });
+  await expect(page.locator('.explain-tree')).toContainText('C current');
+});
+
+test('new point selection invalidates its old explanation and stale inspection reports', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const viewId = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!viewId) throw new Error('Initial view id is missing');
+  const pointA: { kind: 'surface-direction'; direction: readonly [number, number, number] } = { kind: 'surface-direction', direction: [0, 0, 1] };
+  const pointB: { kind: 'surface-direction'; direction: readonly [number, number, number] } = { kind: 'surface-direction', direction: [1, 0, 0] };
+  await pickRegressionPoint(page, pointA, 'Point A');
+  await waitForExplainCount(page, viewId, 'fixture:category-heavy', 1);
+
+  const priorInspectionCount = await page.evaluate(() => window.remediationControl.inspectionCount());
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), pointB);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(priorInspectionCount + 1);
+  await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Point B'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Point B');
+  await waitForExplainCount(page, viewId, 'fixture:category-heavy', 2);
+  expect(await page.evaluate(() => window.remediationControl.inspectionPositionKey(1))).not.toBe(await page.evaluate(() => window.remediationControl.inspectionPositionKey(0)));
+
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'A stale'), { viewId });
+  await expect(page.locator('.explain-tree')).not.toContainText('A stale');
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'B current'), { viewId });
+  await expect(page.locator('.explain-tree')).toContainText('B current');
+
+  const priorCount = await page.evaluate(() => window.remediationControl.inspectionCount());
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 1, 0] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(priorCount + 1);
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [-1, 0, 0] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(priorCount + 2);
+  await page.evaluate(() => window.remediationControl.resolveInspection(1, 'Newest point'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Newest point');
+  await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Stale point'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Newest point');
+  const newestPositionKey = await page.evaluate(() => window.remediationControl.inspectionPositionKey(3));
+  await waitForExplainCount(page, viewId, 'fixture:category-heavy', 3);
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'Newest explanation'), { viewId });
+  await expect(page.locator('.explain-tree')).toContainText('Newest explanation');
+  expect(newestPositionKey).toContain('[-1,0,0]');
+
+  const failureRaceStart = await page.evaluate(() => window.remediationControl.inspectionCount());
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, -1, 0] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(failureRaceStart + 1);
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 0, -1] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(failureRaceStart + 2);
+  await page.evaluate(() => window.remediationControl.rejectInspection(0, 'stale inspection failure'));
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Current inspection'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Current inspection');
+
+  const currentCount = await page.evaluate(() => window.remediationControl.inspectionCount());
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, -1, 0] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(currentCount + 1);
+  await page.evaluate(() => window.remediationControl.rejectInspection(0, 'current inspection failure'));
+  await expect(page.locator('#provider-error')).toBeVisible();
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_INSPECT_TEST');
+});
+
+test('domain and fixture changes invalidate explanation context and stale failures', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:multi-domain');
+  const firstView = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!firstView) throw new Error('Initial view id is missing');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Domain point');
+  await waitForExplainCount(page, firstView, 'fixture:multi-domain', 1);
+  await page.locator('#domain-selector').selectOption('domain-profile');
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await page.evaluate(({ viewId }) => window.remediationControl.rejectExplain(viewId, 'stale domain failure', 'fixture:multi-domain'), { viewId: firstView });
+  await expect(page.locator('#provider-error')).toBeHidden();
+
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const oldView = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!oldView) throw new Error('Initial view id is missing');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Fixture point');
+  await waitForExplainCount(page, oldView, 'fixture:category-heavy', 1);
+  await page.locator('#fixture-selector').selectOption('fixture:multi-domain');
+  await waitForReady(page);
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'stale fixture result', 'fixture:category-heavy'), { viewId: oldView });
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+});
+
+test('stale explanation failures are ignored while current failures still surface', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const viewA = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!viewA) throw new Error('Initial view id is missing');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Point A');
+  await waitForExplainCount(page, viewA, 'fixture:category-heavy', 1);
+  const viewB = await selectRegressionView(page, 1);
+  await waitForExplainCount(page, viewB, 'fixture:category-heavy', 1);
+  await page.evaluate(({ viewId }) => window.remediationControl.rejectExplain(viewId, 'stale explanation failure'), { viewId: viewA });
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await page.evaluate(({ viewId }) => window.remediationControl.resolveExplain(viewId, 'B result'), { viewId: viewB });
+  await expect(page.locator('.explain-tree')).toContainText('B result');
+
+  const viewC = await selectRegressionView(page, 2);
+  await waitForExplainCount(page, viewC, 'fixture:category-heavy', 1);
+  await page.evaluate(({ viewId }) => window.remediationControl.rejectExplain(viewId, 'current explanation failure'), { viewId: viewC });
+  await expect(page.locator('#provider-error')).toBeVisible();
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_EXPLAIN_TEST');
+  await expect(page.locator('.explain-error')).toHaveText('current explanation failure');
+});
+
+async function startRegressionHarness(page: Page, fixtureId: string): Promise<void> {
+  await page.setViewportSize(viewSizes[1]!);
+  await page.addInitScript(() => { window.hostileColorExecuted = false; });
+  await page.goto(`/tests/remediation-harness.html?fixture=${encodeURIComponent(fixtureId)}`);
+  await waitForReady(page);
+}
+
+async function pickRegressionPoint(
+  page: Page,
+  position: { kind: 'surface-direction'; direction: readonly [number, number, number] },
+  label: string,
+): Promise<void> {
+  const previousCount = await page.evaluate(() => window.remediationControl.inspectionCount());
+  await page.evaluate((point) => window.remediationControl.pickPoint(point), position);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(previousCount + 1);
+  await page.evaluate(({ pointLabel }) => window.remediationControl.resolveInspection(0, pointLabel), { pointLabel: label });
+  await expect(page.locator('#inspection-panel h2')).toHaveText(label);
+}
+
+async function selectRegressionView(page: Page, index: number): Promise<string> {
+  await page.getByTestId('debug-button').click();
+  const option = page.locator('#debug-menu [data-view-id]').nth(index);
+  const viewId = await option.getAttribute('data-view-id');
+  if (!viewId) throw new Error(`View option ${index} has no identifier`);
+  await option.click();
+  await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', viewId);
+  await waitForReady(page);
+  return viewId;
+}
+
+async function waitForExplainCount(page: Page, viewId: string, fixtureId: string, count: number): Promise<void> {
+  await expect.poll(() => page.evaluate(({ id, fixture }) => window.remediationControl.explanationCount(id, fixture), { id: viewId, fixture: fixtureId })).toBe(count);
+}
+
 async function waitForReady(page: Page): Promise<void> {
   await expect.poll(async () => await page.locator('#provider-state').getAttribute('data-state'), { timeout: 15_000 }).toBe('ready');
 }

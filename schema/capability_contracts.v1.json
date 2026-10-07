@@ -1,7 +1,22 @@
 {
   "schema": "veyra.capability_contracts/1",
+  "numeric_ids": {
+    "veyra.cap.solid_surface/1": 256,
+    "veyra.cap.topography/1": 257,
+    "veyra.cap.tectonics/1": 258,
+    "veyra.cap.ocean/1": 259,
+    "veyra.cap.climate/1": 260,
+    "veyra.cap.surface_material/1": 261,
+    "veyra.cap.thermal_state/1": 262,
+    "veyra.cap.stellar_structure/1": 304,
+    "veyra.cap.conformance_probe/1": 32766
+  },
   "capabilities": {
     "veyra.cap.climate/1": {
+      "field_template_ids": [
+        1,
+        2
+      ],
       "requires": [],
       "params_schema": {
         "type": "object",
@@ -19,6 +34,7 @@
       "required_reference_surface_kinds": []
     },
     "veyra.cap.ocean/1": {
+      "field_template_ids": [],
       "requires": [
         "veyra.cap.solid_surface/1",
         "veyra.cap.topography/1"
@@ -44,6 +60,9 @@
       "required_reference_surface_kinds": []
     },
     "veyra.cap.solid_surface/1": {
+      "field_template_ids": [
+        1
+      ],
       "requires": [],
       "params_schema": {
         "type": "object",
@@ -63,6 +82,12 @@
       ]
     },
     "veyra.cap.stellar_structure/1": {
+      "field_template_ids": [
+        1,
+        2,
+        3,
+        4
+      ],
       "requires": [],
       "params_schema": {
         "type": "object",
@@ -79,6 +104,9 @@
       ]
     },
     "veyra.cap.surface_material/1": {
+      "field_template_ids": [
+        1
+      ],
       "requires": [
         "veyra.cap.solid_surface/1"
       ],
@@ -95,6 +123,9 @@
       "required_reference_surface_kinds": []
     },
     "veyra.cap.tectonics/1": {
+      "field_template_ids": [
+        1
+      ],
       "requires": [
         "veyra.cap.solid_surface/1"
       ],
@@ -111,6 +142,9 @@
       "required_reference_surface_kinds": []
     },
     "veyra.cap.thermal_state/1": {
+      "field_template_ids": [
+        1
+      ],
       "requires": [],
       "params_schema": {
         "type": "object",
@@ -125,6 +159,10 @@
       "required_reference_surface_kinds": []
     },
     "veyra.cap.topography/1": {
+      "field_template_ids": [
+        1,
+        2
+      ],
       "requires": [
         "veyra.cap.solid_surface/1"
       ],

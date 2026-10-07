@@ -250,10 +250,14 @@ pub fn decode_zstd_shuffle2_bounded(
         if shuffled.len().checked_add(length).is_none_or(|size| size > limit) {
             return Err(BlobError::OutputLimitExceeded);
         }
-        shuffled.try_reserve_exact(length).map_err(|_| BlobError::AllocationFailed)?;
+        try_reserve_output(&mut shuffled, length)?;
         shuffled.extend_from_slice(&chunk[..length]);
     }
     unshuffle2_bounded(&shuffled)
+}
+
+fn try_reserve_output(output: &mut Vec<u8>, additional: usize) -> Result<(), BlobError> {
+    output.try_reserve(additional).map_err(|_| BlobError::AllocationFailed)
 }
 
 fn unshuffle2_bounded(shuffled: &[u8]) -> Result<Vec<u8>, BlobError> {
@@ -351,6 +355,13 @@ mod tests {
     }
 
     #[test]
+    fn large_streamed_output_decodes_exactly() {
+        let canonical = vec![0x5a; 16 * 1024 * 1024];
+        let compressed = zstd::stream::encode_all(shuffle2(&canonical).as_slice(), 3).unwrap();
+        assert_eq!(decode_zstd_shuffle2_bounded(&compressed, canonical.len()).unwrap(), canonical);
+    }
+
+    #[test]
     fn bounded_decoder_accepts_its_limit_and_rejects_one_byte_over() {
         let canonical = vec![0x5a; 64 * 1024];
         let compressed = zstd::stream::encode_all(canonical.as_slice(), 3).unwrap();
@@ -382,6 +393,15 @@ mod tests {
     #[test]
     fn malformed_zstd_is_distinct_from_a_size_limit_failure() {
         assert_eq!(decode_zstd_shuffle2(&[1, 2, 3]), Err(BlobError::Codec));
+    }
+
+    #[test]
+    fn decompression_reservation_failures_map_to_allocation_error() {
+        let mut output = Vec::new();
+        assert_eq!(
+            super::try_reserve_output(&mut output, usize::MAX),
+            Err(BlobError::AllocationFailed)
+        );
     }
 
     #[test]

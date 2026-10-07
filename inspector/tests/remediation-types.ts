@@ -12,6 +12,7 @@ export interface RegressionControlHandle {
   resolveInspection(index: number, label: string): void;
   rejectInspection(index: number, message: string): void;
   setDiagnosticStageDeferred(value: boolean): void;
+  setLargeProfileSamples(count: number): void;
   diagnosticStageCount(stageId: string): number;
   resolveStage(stageId: string, label: string): void;
   rejectStage(stageId: string, message: string): void;

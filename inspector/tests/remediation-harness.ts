@@ -16,7 +16,7 @@ const hostileColors = [
   'var(--injected, url(javascript:alert(1)))',
   '#fff" onmouseover="window.hostileColorExecuted=true',
 ] as const;
-const fixtureIds = ['fixture:category-heavy', 'fixture:multi-domain', 'fixture:diagnostics'] as const;
+const fixtureIds = ['fixture:category-heavy', 'fixture:multi-domain', 'fixture:diagnostics', 'fixture:radial'] as const;
 const fixtureModels = new Map<string, FixtureModel>(fixtureIds.map((id) => {
   const spec = SCENARIOS.find((candidate) => candidate.id === id);
   if (!spec) throw new Error(`Missing fixture ${id}`);
@@ -94,7 +94,15 @@ class ControlledProvider extends MockBodyProvider {
   override async domainGeometry(domainId: string) {
     this.control.recordOperation('geometry', domainId);
     if (this.control.shouldFail('geometry', domainId) || this.control.shouldFail('geometry', '*')) throw retryableFailure('domain geometry');
-    return super.domainGeometry(domainId);
+    const geometry = await super.domainGeometry(domainId);
+    const sampleCount = this.fixtureId === 'fixture:radial' ? this.control.largeProfileSamples : 0;
+    if (!sampleCount || !geometry.profile) return geometry;
+    const profile = Array.from({ length: sampleCount }, (_, index) => 0.5 + Math.sin(index * 0.0001) * 0.4);
+    profile[0] = 0.1;
+    profile[sampleCount - 1] = 0.9;
+    profile[Math.floor(sampleCount * 0.2)] = -1;
+    profile[Math.floor(sampleCount * 0.8)] = 1;
+    return { ...geometry, profile };
   }
 
   override async diagnosticStage(stageId: string): Promise<DiagnosticSnapshot> {
@@ -132,6 +140,7 @@ interface RegressionControl extends RegressionControlHandle {
   explanationCounts: Map<string, number>;
   operationCounts: Map<string, number>;
   deferDiagnosticStages: boolean;
+  largeProfileSamples: number;
   failNext(operation: string, key: string): void;
   shouldFail(operation: string, key: string): boolean;
   recordExplanation(fixtureId: string, viewId: string): void;
@@ -150,6 +159,7 @@ const control: RegressionControl = {
   inspections: [],
   stages: [],
   deferDiagnosticStages: false,
+  largeProfileSamples: Number(new URL(window.location.href).searchParams.get('profileSamples')) || 0,
   failures: new Map<string, number>(),
   explanationCounts: new Map<string, number>(),
   operationCounts: new Map<string, number>(),
@@ -171,6 +181,7 @@ const control: RegressionControl = {
   },
   operationCount(operation, key) { return this.operationCounts.get(`${operation}:${key}`) ?? 0; },
   setDiagnosticStageDeferred(value) { this.deferDiagnosticStages = value; },
+  setLargeProfileSamples(count) { this.largeProfileSamples = count; },
   diagnosticStageCount(stageId) { return this.stages.filter((request) => request.stageId === stageId).length; },
   normalizeColor(value) { return normalizeCssColor(value); },
   samplePalette(stops, value) { return sampleNormalizedPalette(normalizePaletteStops(stops), value); },

@@ -500,6 +500,7 @@ def main() -> int:
     section_cases = []
     for path, valid in [
         ("registry/fields.json", True), ("", False), ("/x", False), ("/absolute", False),
+        ("body.json", False), ("body.id", False),
         ("a/./b", False), ("a//b", False), ("../x", False), ("a/../x", False),
         ("a\\b", False), ("C:/x", False), ("a:b", False), ("a/", False),
         ("C:relative", False), ("a/C:/x", False),

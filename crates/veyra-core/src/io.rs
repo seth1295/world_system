@@ -53,6 +53,13 @@ pub enum Need {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArtifactPathOwner {
+    Exclusive,
+    Section(Hash32),
+    Blob(Hash32),
+}
+
 /// An abstract source for caller-owned storage.
 pub trait BlobSource {
     /// Loads bytes for one previously requested item.
@@ -78,6 +85,7 @@ pub struct BodyLoader {
     root_value: Value,
     baseline_id: Hash32,
     pending: std::collections::BTreeSet<Need>,
+    artifact_paths: std::collections::BTreeMap<String, ArtifactPathOwner>,
     sections: std::collections::BTreeMap<String, Value>,
     section_bytes: std::collections::BTreeMap<String, Vec<u8>>,
     indexes: std::collections::BTreeMap<FieldId, IndexBlob>,
@@ -98,22 +106,27 @@ impl BodyLoader {
         root.validate().map_err(LoaderError::Model)?;
         let baseline_id = hash::hash(&canonical);
         let mut pending = std::collections::BTreeSet::new();
+        let mut artifact_paths = std::collections::BTreeMap::from([
+            ("body.json".to_owned(), ArtifactPathOwner::Exclusive),
+            ("body.id".to_owned(), ArtifactPathOwner::Exclusive),
+        ]);
 
-        add_section_need(&mut pending, &root.sections.registry)?;
+        add_section_need(&mut pending, &mut artifact_paths, &root.sections.registry)?;
         for section in root.sections.vocab.iter().chain(root.sections.features.iter()) {
-            add_named_section_need(&mut pending, section)?;
+            add_named_section_need(&mut pending, &mut artifact_paths, section)?;
         }
         if let Some(provenance) = &root.sections.provenance {
-            add_section_need(&mut pending, &provenance.dag)?;
-            add_section_need(&mut pending, &provenance.explain)?;
+            add_section_need(&mut pending, &mut artifact_paths, &provenance.dag)?;
+            add_section_need(&mut pending, &mut artifact_paths, &provenance.explain)?;
         }
         for value in root.sections.extra.values() {
-            collect_extension_section_needs(value, &mut pending)?;
+            collect_extension_section_needs(value, &mut pending, &mut artifact_paths)?;
         }
-        add_section_need(&mut pending, &root.dynamics.descriptor)?;
-        add_section_need(&mut pending, &root.dynamics.origin_keyframe)?;
+        add_section_need(&mut pending, &mut artifact_paths, &root.dynamics.descriptor)?;
+        add_section_need(&mut pending, &mut artifact_paths, &root.dynamics.origin_keyframe)?;
         if let Some(extension_ledger) = &root.extensions_ledger {
             validate_artifact_path(&extension_ledger.path).map_err(|_| LoaderError::InvalidPath)?;
+            register_exclusive_path(&mut artifact_paths, &extension_ledger.path)?;
             pending.insert(Need::Ledger {
                 name: "extensions".to_owned(),
                 path: extension_ledger.path.clone(),
@@ -123,11 +136,9 @@ impl BodyLoader {
         for (field_text, hash_text) in &root.indexes {
             let field_id = FieldId::parse(field_text).map_err(LoaderError::Model)?;
             let expected = parse_hash(hash_text).map_err(LoaderError::Model)?;
-            pending.insert(Need::Index {
-                field_id,
-                path: format!("index/{field_id}.idx"),
-                hash: expected,
-            });
+            let path = format!("index/{field_id}.idx");
+            register_exclusive_path(&mut artifact_paths, &path)?;
+            pending.insert(Need::Index { field_id, path, hash: expected });
         }
 
         let loader = Self {
@@ -135,6 +146,7 @@ impl BodyLoader {
             root_value,
             baseline_id,
             pending,
+            artifact_paths,
             sections: std::collections::BTreeMap::new(),
             section_bytes: std::collections::BTreeMap::new(),
             indexes: std::collections::BTreeMap::new(),
@@ -172,7 +184,7 @@ impl BodyLoader {
                 self.section_bytes.insert(path.clone(), bytes);
                 if let Some(registry) = registry {
                     self.registry = Some(registry);
-                    self.refresh_blob_needs();
+                    self.refresh_blob_needs()?;
                 }
             }
             Need::Index { field_id, hash: expected, .. } => {
@@ -186,7 +198,7 @@ impl BodyLoader {
                     return Err(LoaderError::IndexFieldMismatch);
                 }
                 self.indexes.insert(*field_id, index);
-                self.refresh_blob_needs();
+                self.refresh_blob_needs()?;
             }
             Need::Blob { hash: expected } => {
                 let limit =
@@ -211,7 +223,7 @@ impl BodyLoader {
         Ok(self.needs())
     }
 
-    fn refresh_blob_needs(&mut self) {
+    fn refresh_blob_needs(&mut self) -> Result<(), LoaderError> {
         self.blob_limits.clear();
         let indexes: Vec<IndexBlob> = self.indexes.values().cloned().collect();
         for index in indexes {
@@ -219,6 +231,11 @@ impl BodyLoader {
                 let crate::canon::index::IndexValue::Blob(blob_hash) = entry.value else {
                     continue;
                 };
+                register_blob_path(
+                    &mut self.artifact_paths,
+                    &blob_artifact_path(blob_hash),
+                    blob_hash,
+                )?;
                 let limit = self.blob_limit(&index, entry.level);
                 self.blob_limits
                     .entry(blob_hash)
@@ -229,6 +246,7 @@ impl BodyLoader {
                 }
             }
         }
+        Ok(())
     }
 
     fn blob_limit(&self, index: &IndexBlob, level: u8) -> usize {
@@ -446,31 +464,77 @@ impl Body {
 
 fn add_section_need(
     pending: &mut std::collections::BTreeSet<Need>,
+    artifact_paths: &mut std::collections::BTreeMap<String, ArtifactPathOwner>,
     section: &SectionRef,
 ) -> Result<(), LoaderError> {
-    validate_artifact_path(&section.path).map_err(|_| LoaderError::InvalidPath)?;
-    pending.insert(Need::Section {
-        path: section.path.clone(),
-        hash: parse_hash(&section.hash).map_err(LoaderError::Model)?,
-    });
-    Ok(())
+    add_section_reference(pending, artifact_paths, &section.path, &section.hash)
 }
 
 fn add_named_section_need(
     pending: &mut std::collections::BTreeSet<Need>,
+    artifact_paths: &mut std::collections::BTreeMap<String, ArtifactPathOwner>,
     section: &NamedSectionRef,
 ) -> Result<(), LoaderError> {
-    validate_artifact_path(&section.path).map_err(|_| LoaderError::InvalidPath)?;
-    pending.insert(Need::Section {
-        path: section.path.clone(),
-        hash: parse_hash(&section.hash).map_err(LoaderError::Model)?,
-    });
+    add_section_reference(pending, artifact_paths, &section.path, &section.hash)
+}
+
+fn add_section_reference(
+    pending: &mut std::collections::BTreeSet<Need>,
+    artifact_paths: &mut std::collections::BTreeMap<String, ArtifactPathOwner>,
+    path: &str,
+    hash: &str,
+) -> Result<(), LoaderError> {
+    validate_artifact_path(path).map_err(|_| LoaderError::InvalidPath)?;
+    let hash = parse_hash(hash).map_err(LoaderError::Model)?;
+    match artifact_paths.get(path) {
+        Some(ArtifactPathOwner::Section(existing)) if *existing == hash => {}
+        Some(ArtifactPathOwner::Section(_)) => {
+            return Err(LoaderError::ConflictingSectionReference);
+        }
+        Some(_) => return Err(LoaderError::ArtifactPathConflict),
+        None => {
+            artifact_paths.insert(path.to_owned(), ArtifactPathOwner::Section(hash));
+        }
+    }
+    pending.insert(Need::Section { path: path.to_owned(), hash });
     Ok(())
+}
+
+fn register_exclusive_path(
+    artifact_paths: &mut std::collections::BTreeMap<String, ArtifactPathOwner>,
+    path: &str,
+) -> Result<(), LoaderError> {
+    if artifact_paths.contains_key(path) {
+        return Err(LoaderError::ArtifactPathConflict);
+    }
+    artifact_paths.insert(path.to_owned(), ArtifactPathOwner::Exclusive);
+    Ok(())
+}
+
+fn register_blob_path(
+    artifact_paths: &mut std::collections::BTreeMap<String, ArtifactPathOwner>,
+    path: &str,
+    hash: Hash32,
+) -> Result<(), LoaderError> {
+    match artifact_paths.get(path) {
+        Some(ArtifactPathOwner::Blob(existing)) if *existing == hash => Ok(()),
+        Some(_) => Err(LoaderError::ArtifactPathConflict),
+        None => {
+            artifact_paths.insert(path.to_owned(), ArtifactPathOwner::Blob(hash));
+            Ok(())
+        }
+    }
+}
+
+fn blob_artifact_path(hash: Hash32) -> String {
+    let hex = hash.text().trim_start_matches("b3:").to_owned();
+    format!("blobs/{}/{hex}.zst", &hex[..2])
 }
 
 fn collect_extension_section_needs(
     value: &Value,
     pending: &mut std::collections::BTreeSet<Need>,
+    artifact_paths: &mut std::collections::BTreeMap<String, ArtifactPathOwner>,
 ) -> Result<(), LoaderError> {
     match value {
         Value::Object(object) => {
@@ -478,19 +542,15 @@ fn collect_extension_section_needs(
                 object.get("path").and_then(Value::as_str),
                 object.get("hash").and_then(Value::as_str),
             ) {
-                validate_artifact_path(path).map_err(|_| LoaderError::InvalidPath)?;
-                pending.insert(Need::Section {
-                    path: path.to_owned(),
-                    hash: parse_hash(expected).map_err(LoaderError::Model)?,
-                });
+                add_section_reference(pending, artifact_paths, path, expected)?;
             }
             for nested in object.values() {
-                collect_extension_section_needs(nested, pending)?;
+                collect_extension_section_needs(nested, pending, artifact_paths)?;
             }
         }
         Value::Array(items) => {
             for item in items {
-                collect_extension_section_needs(item, pending)?;
+                collect_extension_section_needs(item, pending, artifact_paths)?;
             }
         }
         _ => {}
@@ -525,6 +585,10 @@ pub enum LoaderError {
     InvalidSection,
     /// A referenced artifact path is not a safe relative path.
     InvalidPath,
+    /// A section path is referenced with different expected content hashes.
+    ConflictingSectionReference,
+    /// A path is assigned to multiple artifact objects or content kinds.
+    ArtifactPathConflict,
     /// The caller supplied a need not requested by the loader.
     UnexpectedNeed,
     /// Required sections or content have not all been supplied.
@@ -567,6 +631,12 @@ impl fmt::Display for LoaderError {
             Self::InvalidBodyJson => formatter.write_str("invalid body.json"),
             Self::InvalidSection => formatter.write_str("invalid body section"),
             Self::InvalidPath => formatter.write_str("artifact path must be safe and relative"),
+            Self::ConflictingSectionReference => {
+                formatter.write_str("section path has conflicting content hashes")
+            }
+            Self::ArtifactPathConflict => {
+                formatter.write_str("artifact path is assigned to multiple content objects")
+            }
             Self::UnexpectedNeed => {
                 formatter.write_str("content was provided without a matching need")
             }
@@ -614,16 +684,32 @@ impl std::error::Error for LoaderError {}
 mod tests {
     use serde_json::json;
 
-    use super::{BodyLoader, LoaderError, Need};
+    use super::{BlobSource, BodyLoader, LoaderError, Need, SourceError};
     use crate::canon::blob::{BlobKind, CanonicalBlob, DType, shuffle2};
     use crate::canon::hash;
     use crate::canon::index::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
     use crate::canon::jcs;
-    use crate::ids::{ObjectAddress, ObjectId, UniverseId};
+    use crate::ids::{Hash32, ObjectAddress, ObjectId, UniverseId};
     use crate::spatial::{DirCube, Radial1d, Topology};
 
     fn compressed(canonical: &[u8]) -> Vec<u8> {
         zstd::stream::encode_all(shuffle2(canonical).as_slice(), 0).unwrap()
+    }
+
+    #[derive(Default)]
+    struct NeedAwareSource {
+        responses: std::collections::BTreeMap<Need, Vec<u8>>,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl BlobSource for NeedAwareSource {
+        fn load(&self, need: &Need) -> Result<Vec<u8>, SourceError> {
+            self.calls.set(self.calls.get() + 1);
+            self.responses
+                .get(need)
+                .cloned()
+                .ok_or_else(|| SourceError("test content missing".to_owned()))
+        }
     }
 
     fn verify_raster_blob(
@@ -887,6 +973,7 @@ mod tests {
         }
         let body = loader.finish().unwrap();
         assert_eq!(body.fields().len(), 0);
+        assert_eq!(body.section("registry/fields.json").unwrap()["fields"], json!([]));
         assert_eq!(
             body.object_id().unwrap().to_string(),
             ObjectId::derive(
@@ -896,6 +983,236 @@ mod tests {
             .unwrap()
             .to_string()
         );
+    }
+
+    #[test]
+    fn loader_deduplicates_identical_section_path_references() {
+        let (root, sections) = fixture_root();
+        let mut value: Value = serde_json::from_slice(&root).unwrap();
+        let registry_ref = value["sections"]["registry"].clone();
+        let path = registry_ref["path"].as_str().unwrap().to_owned();
+        value["dynamics"]["descriptor"] = registry_ref;
+
+        let (mut loader, needs) = BodyLoader::begin(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let matching_sections: Vec<_> = needs
+            .iter()
+            .filter(
+                |need| matches!(need, Need::Section { path: need_path, .. } if need_path == &path),
+            )
+            .collect();
+        assert_eq!(matching_sections.len(), 1);
+        for need in needs {
+            let bytes =
+                sections.iter().find(|(candidate, _)| candidate == &need).unwrap().1.clone();
+            loader.provide(&need, bytes).unwrap();
+        }
+        let body = loader.finish().unwrap();
+        assert_eq!(body.section(&path).unwrap()["fields"], json!([]));
+    }
+
+    #[test]
+    fn loader_rejects_conflicting_section_path_hashes_during_begin() {
+        let (root, _) = fixture_root();
+        let mut value: Value = serde_json::from_slice(&root).unwrap();
+        let registry_ref = value["sections"]["registry"].clone();
+        let path = registry_ref["path"].as_str().unwrap().to_owned();
+        value["dynamics"]["descriptor"] = json!({
+            "path":path,
+            "hash":format!("b3:{}", "1".repeat(64))
+        });
+
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+            LoaderError::ConflictingSectionReference
+        );
+    }
+
+    #[test]
+    fn conflicting_needs_with_valid_per_need_content_fail_before_source_access() {
+        let (fixture, sections) = fixture_root();
+        let mut root: Value = serde_json::from_slice(&fixture).unwrap();
+        let descriptor_path = root["dynamics"]["descriptor"]["path"].clone();
+        root["dynamics"]["origin_keyframe"]["path"] = descriptor_path;
+        let root = serde_json::to_vec(&root).unwrap();
+
+        let need_for = |path: &str| {
+            sections
+                .iter()
+                .find(|(need, _)| matches!(need, Need::Section { path: candidate, .. } if candidate == path))
+                .unwrap()
+        };
+        let registry = need_for("registry/fields.json");
+        let descriptor = need_for("dynamics/descriptor.json");
+        let origin = need_for("dynamics/origin.json");
+        let origin_hash = match &origin.0 {
+            Need::Section { hash, .. } => *hash,
+            _ => unreachable!(),
+        };
+        let mut source = NeedAwareSource::default();
+        source.responses.insert(registry.0.clone(), registry.1.clone());
+        source.responses.insert(descriptor.0.clone(), descriptor.1.clone());
+        source.responses.insert(
+            Need::Section { path: "dynamics/descriptor.json".to_owned(), hash: origin_hash },
+            origin.1.clone(),
+        );
+
+        let result = (|| -> Result<(), LoaderError> {
+            let (mut loader, mut needs) = BodyLoader::begin(&root)?;
+            while let Some(need) = needs.first().cloned() {
+                let bytes = source.load(&need).map_err(|_| LoaderError::UnexpectedNeed)?;
+                needs = loader.provide(&need, bytes)?;
+            }
+            loader.finish().map(|_| ())
+        })();
+        assert_eq!(result, Err(LoaderError::ConflictingSectionReference));
+        assert_eq!(source.calls.get(), 0);
+    }
+
+    #[test]
+    fn loader_rejects_ordinary_and_nested_extension_section_conflicts() {
+        let (root, _) = fixture_root();
+        let mut value: Value = serde_json::from_slice(&root).unwrap();
+        let registry_ref = value["sections"]["registry"].clone();
+        let path = registry_ref["path"].as_str().unwrap().to_owned();
+        value["sections"]["x-refs"] = json!([
+            {"outer":{"path":path,"hash":format!("b3:{}", "2".repeat(64))}}
+        ]);
+
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+            LoaderError::ConflictingSectionReference
+        );
+    }
+
+    #[test]
+    fn loader_deduplicates_identical_nested_extension_section_references() {
+        let (root, _) = fixture_root();
+        let mut value: Value = serde_json::from_slice(&root).unwrap();
+        let shared = json!({
+            "path":"extensions/shared.json",
+            "hash":format!("b3:{}", "a".repeat(64))
+        });
+        value["sections"]["x-refs"] = json!([
+            {"first":shared.clone()},
+            {"nested":[{"second":shared}]}
+        ]);
+
+        let (_, needs) = BodyLoader::begin(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let matching_sections: Vec<_> = needs
+            .iter()
+            .filter(|need| matches!(need, Need::Section { path, .. } if path == "extensions/shared.json"))
+            .collect();
+        assert_eq!(matching_sections.len(), 1);
+    }
+
+    #[test]
+    fn loader_rejects_conflicting_nested_extension_section_references() {
+        let (root, _) = fixture_root();
+        let mut value: Value = serde_json::from_slice(&root).unwrap();
+        value["sections"]["x-refs"] = json!([
+            {"first":{"path":"extensions/shared.json","hash":format!("b3:{}", "a".repeat(64))}},
+            {"nested":[{"second":{"path":"extensions/shared.json","hash":format!("b3:{}", "b".repeat(64))}}]}
+        ]);
+
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+            LoaderError::ConflictingSectionReference
+        );
+    }
+
+    #[test]
+    fn loader_rejects_path_reuse_across_sections_ledgers_indexes_and_root_files() {
+        let (root, _) = fixture_root();
+        let mut section_and_ledger: Value = serde_json::from_slice(&root).unwrap();
+        let registry_ref = section_and_ledger["sections"]["registry"].clone();
+        section_and_ledger["extensions_ledger"] = json!({
+            "path":registry_ref["path"],
+            "hash":registry_ref["hash"]
+        });
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&section_and_ledger).unwrap()).unwrap_err(),
+            LoaderError::ArtifactPathConflict
+        );
+
+        let mut section_and_index: Value = serde_json::from_slice(&root).unwrap();
+        let index_path = "index/0x01010001.idx";
+        section_and_index["sections"]["registry"]["path"] = json!(index_path);
+        section_and_index["indexes"] = json!({"0x01010001":format!("b3:{}", "c".repeat(64))});
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&section_and_index).unwrap()).unwrap_err(),
+            LoaderError::ArtifactPathConflict
+        );
+
+        let mut ledger_and_index: Value = serde_json::from_slice(&root).unwrap();
+        let index_path = "index/0x01010001.idx";
+        ledger_and_index["extensions_ledger"] = json!({
+            "path":index_path,
+            "hash":format!("b3:{}", "e".repeat(64))
+        });
+        ledger_and_index["indexes"] = json!({"0x01010001":format!("b3:{}", "f".repeat(64))});
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&ledger_and_index).unwrap()).unwrap_err(),
+            LoaderError::ArtifactPathConflict
+        );
+
+        for reserved_path in ["body.json", "body.id"] {
+            let mut root_path_conflict: Value = serde_json::from_slice(&root).unwrap();
+            root_path_conflict["sections"]["registry"]["path"] = json!(reserved_path);
+            assert_eq!(
+                BodyLoader::begin(&serde_json::to_vec(&root_path_conflict).unwrap()).unwrap_err(),
+                LoaderError::ArtifactPathConflict
+            );
+        }
+    }
+
+    #[test]
+    fn loader_rejects_blob_paths_that_collide_with_sections_before_requesting_the_blob() {
+        let (root, _) = fixture_root();
+        let blob_hash = Hash32::parse(&format!("b3:{}", "d".repeat(64))).unwrap();
+        let blob_path = super::blob_artifact_path(blob_hash);
+        let mut value: Value = serde_json::from_slice(&root).unwrap();
+        value["dynamics"]["descriptor"]["path"] = json!(blob_path);
+        value["indexes"] = json!({"0x01010001":""});
+
+        let tile = DirCube.tile_key(DirCube::key(2, 6, 3, 3).unwrap(), 2).unwrap();
+        let index = IndexBlob {
+            field_id: 0x01010001,
+            topology: TopologyTag::DirCube,
+            tile_log2: 2,
+            entries: vec![IndexEntry {
+                level: 3,
+                key: tile.address.0,
+                value: IndexValue::Blob(blob_hash),
+            }],
+        }
+        .encode()
+        .unwrap();
+        value["indexes"]["0x01010001"] = json!(hash::hash(&index).to_string());
+
+        let (mut loader, needs) = BodyLoader::begin(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let index_need =
+            needs.iter().find(|need| matches!(need, Need::Index { .. })).unwrap().clone();
+        assert_eq!(
+            loader.provide(&index_need, compressed(&index)),
+            Err(LoaderError::ArtifactPathConflict)
+        );
+        assert!(
+            loader
+                .needs()
+                .iter()
+                .all(|need| !matches!(need, Need::Blob { hash } if *hash == blob_hash)),
+            "a conflicting blob path must fail before the blob becomes a need"
+        );
+    }
+
+    #[test]
+    fn identical_content_addressed_blobs_keep_one_path_owner() {
+        let blob_hash = Hash32::parse(&format!("b3:{}", "9".repeat(64))).unwrap();
+        let path = super::blob_artifact_path(blob_hash);
+        let mut paths = std::collections::BTreeMap::new();
+        super::register_blob_path(&mut paths, &path, blob_hash).unwrap();
+        super::register_blob_path(&mut paths, &path, blob_hash).unwrap();
+        assert_eq!(paths.len(), 1);
     }
 
     #[test]

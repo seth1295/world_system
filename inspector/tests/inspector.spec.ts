@@ -403,7 +403,7 @@ test('provider colors are validated before use in continuous and categorical leg
   page.on('console', (message) => { if (message.type() === 'error') browserErrors.push(message.text()); });
   const categoryStyles = await page.locator('#legend-panel .category-swatch').evaluateAll((elements) => elements.map((element) => (element as HTMLElement).style.getPropertyValue('--swatch')));
   expect(categoryStyles.slice(0, 7)).toEqual(['', '', '', '', '', '', '']);
-  expect(categoryStyles[7]).toMatch(/^hsl\(/);
+  expect(categoryStyles[7]).toMatch(/^rgb\(/);
 
   const categoryAudit = await page.locator('#legend-panel').evaluate((panel) => ({
     eventAttributes: [...panel.querySelectorAll('*')].flatMap((element) => [...element.attributes].filter(({ name }) => name.toLowerCase().startsWith('on')).map(({ name }) => name)),
@@ -419,9 +419,9 @@ test('provider colors are validated before use in continuous and categorical leg
     style: (element as HTMLElement).style.getPropertyValue('--scale'),
     computed: getComputedStyle(element).backgroundImage,
   }));
-  expect(continuous.style).toContain('#55606a');
-  expect(continuous.style).toContain('#a9b0b5');
-  expect(continuous.style).toContain('#eef0ec');
+  expect(continuous.style).toContain('rgb(85, 96, 106)');
+  expect(continuous.style).toContain('rgb(169, 176, 181)');
+  expect(continuous.style).toContain('rgb(238, 240, 236)');
   expect(continuous.computed).toContain('linear-gradient');
   for (const hostile of ['onmouseover', 'javascript:', '</div>', '<script>', 'calc(', 'red; background', 'var(']) {
     expect(continuous.style).not.toContain(hostile);
@@ -438,6 +438,213 @@ test('provider colors are validated before use in continuous and categorical leg
   await overlay.check();
   await expect(overlay).toBeChecked();
   expect(browserErrors).toEqual([]);
+});
+
+test('normalizes CSS color syntaxes once for legend and viewport rendering', async ({ page }, testInfo) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const validColors = ['#ff0000', '#f00', 'hsl(0 100% 50%)', 'rgb(255 0 0)', 'red'];
+  const normalized = await page.evaluate((colors) => colors.map((color) => window.remediationControl.normalizeColor(color)), validColors);
+  expect(normalized.map((color) => color?.rgba)).toEqual(validColors.map(() => [255, 0, 0, 255]));
+  expect(normalized.map((color) => color?.hex)).toEqual(validColors.map(() => '#ff0000'));
+  const rendererSamples = await page.evaluate(() => [
+    window.remediationControl.samplePalette([{ at: 0, color: 'rgb(255 0 0)' }, { at: 1, color: 'blue' }], 0),
+    window.remediationControl.samplePalette([{ at: 0, color: 'rgb(255 0 0)' }, { at: 1, color: 'blue' }], 0.5),
+    window.remediationControl.samplePalette([{ at: 0, color: 'rgb(255 0 0)' }, { at: 1, color: 'blue' }], 1),
+  ]);
+  expect(rendererSamples.map((color) => color.rgba)).toEqual([[255, 0, 0, 255], [128, 0, 128, 255], [0, 0, 255, 255]]);
+  const hostile = [
+    '#fff" onmouseover="alert(1)',
+    'red; background:url(javascript:alert(1))',
+    '</div><script>alert(1)</script>',
+    'rgb(1 2 / calc(',
+    '',
+    'var(--injected, url(javascript:alert(1)))',
+    '#fff" onmouseover="window.hostileColorExecuted=true',
+    `rgb(${Array.from({ length: 80 }, () => '255').join(' ')})`,
+    'rgb(255 0 0)\n',
+    'rgba(255 0 0 / 0.5)',
+  ];
+  expect(await page.evaluate((colors) => colors.map((color) => window.remediationControl.normalizeColor(color)), hostile)).toEqual(hostile.map(() => null));
+
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const rgbView = await selectRegressionView(page, 2);
+  const rgbLegend = await page.locator('#legend-panel .legend-scale').evaluate((element) => (element as HTMLElement).style.getPropertyValue('--scale'));
+  expect(rgbLegend).toContain('rgb(255, 0, 0)');
+  expect(rgbLegend).toContain('rgb(0, 0, 255)');
+  await page.locator('#viewport canvas').screenshot({ path: testInfo.outputPath('palette-rgb-hsl-blue.png') });
+
+  const hexNamedView = await selectRegressionView(page, 3);
+  expect(hexNamedView).not.toBe(rgbView);
+  const hexNamedLegend = await page.locator('#legend-panel .legend-scale').evaluate((element) => (element as HTMLElement).style.getPropertyValue('--scale'));
+  expect(hexNamedLegend).toContain('rgb(255, 0, 0)');
+  await page.locator('#viewport canvas').screenshot({ path: testInfo.outputPath('palette-hex-shorthex-named.png') });
+});
+
+test('captures regular and irregular rendered surfaces after the winding correction', async ({ page }, testInfo) => {
+  for (const fixtureId of ['fixture:normal-surface', 'fixture:irregular']) {
+    await page.goto(`/?fixture=${encodeURIComponent(fixtureId)}`);
+    await waitForReady(page);
+    await page.locator('#viewport canvas').screenshot({ path: testInfo.outputPath(`${fixtureId.slice('fixture:'.length)}.png`) });
+  }
+});
+
+test('stale diagnostic stages cannot replace the selected snapshot or reappear after failure', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:diagnostics');
+  await page.evaluate(() => window.remediationControl.setDiagnosticStageDeferred(true));
+  const stageA = await selectRegressionStage(page, 0);
+  const stageB = await selectRegressionStage(page, 1);
+  await expect.poll(() => page.evaluate((id) => window.remediationControl.diagnosticStageCount(id), stageA)).toBe(1);
+  await expect.poll(() => page.evaluate((id) => window.remediationControl.diagnosticStageCount(id), stageB)).toBe(1);
+
+  await page.evaluate((id) => window.remediationControl.resolveStage(id, 'A stale'), stageA);
+  await page.evaluate((id) => window.remediationControl.rejectStage(id, 'B failed'), stageB);
+  await expect(page.locator('#provider-error')).toBeVisible();
+  await expect(page.locator('#diagnostics-menu')).toBeHidden();
+  await page.getByRole('button', { name: /Diagnostics/ }).click();
+  await expect(page.locator('#diagnostics-menu .stage-snapshot')).toHaveCount(0);
+  await expect(page.locator(`#diagnostics-menu [data-stage-id="${stageB}"]`)).toHaveAttribute('aria-selected', 'true');
+
+  await startRegressionHarness(page, 'fixture:diagnostics');
+  await page.evaluate(() => window.remediationControl.setDiagnosticStageDeferred(true));
+  const olderStage = await selectRegressionStage(page, 0);
+  const currentStage = await selectRegressionStage(page, 1);
+  await page.evaluate((id) => window.remediationControl.resolveStage(id, 'B current'), currentStage);
+  await expect(page.locator('.stage-snapshot')).toContainText('B current');
+  await page.evaluate((id) => window.remediationControl.resolveStage(id, 'A stale'), olderStage);
+  await expect(page.locator('.stage-snapshot')).toContainText('B current');
+  await expect(page.locator('.stage-snapshot')).not.toContainText('A stale');
+});
+
+test('fixture-open retry repeats opening that fixture', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  await page.evaluate(() => window.remediationControl.failNext('open', 'fixture:multi-domain'));
+  await page.locator('#fixture-selector').selectOption('fixture:multi-domain');
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+  expect(await page.evaluate(() => window.remediationControl.operationCount('open', 'fixture:multi-domain'))).toBe(1);
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForReady(page);
+  expect(await page.evaluate(() => window.remediationControl.operationCount('open', 'fixture:multi-domain'))).toBe(2);
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#body-name')).toHaveText('Multiple domain fixture');
+});
+
+test('metadata retry repeats only the failed provider request', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  await page.evaluate(() => window.remediationControl.failNext('summary', 'fixture:multi-domain'));
+  await page.locator('#fixture-selector').selectOption('fixture:multi-domain');
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+  expect(await page.evaluate(() => window.remediationControl.operationCount('open', 'fixture:multi-domain'))).toBe(1);
+  expect(await page.evaluate(() => window.remediationControl.operationCount('summary', 'fixture:multi-domain'))).toBe(1);
+
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForReady(page);
+  expect(await page.evaluate(() => window.remediationControl.operationCount('open', 'fixture:multi-domain'))).toBe(1);
+  expect(await page.evaluate(() => window.remediationControl.operationCount('summary', 'fixture:multi-domain'))).toBe(2);
+  await expect(page.locator('#provider-error')).toBeHidden();
+});
+
+test('domain load retry preserves and completes the requested domain', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:multi-domain');
+  await page.evaluate(() => window.remediationControl.failNext('views', 'domain-profile'));
+  await page.locator('#domain-selector').selectOption('domain-profile');
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+  await expect(page.locator('#domain-selector')).toHaveValue('domain-profile');
+  expect(await page.evaluate(() => window.remediationControl.operationCount('views', 'domain-profile'))).toBe(1);
+
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForReady(page);
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#domain-selector')).toHaveValue('domain-profile');
+  expect(await page.evaluate(() => window.remediationControl.operationCount('views', 'domain-profile'))).toBe(2);
+
+  await page.evaluate(() => window.remediationControl.failNext('geometry', 'domain-mesh'));
+  await page.locator('#domain-selector').selectOption('domain-mesh');
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForReady(page);
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#domain-selector')).toHaveValue('domain-mesh');
+  expect(await page.evaluate(() => window.remediationControl.operationCount('geometry', 'domain-mesh'))).toBe(2);
+});
+
+test('view-load retry preserves the current domain, view, and time selection', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:multi-domain');
+  await page.locator('#domain-selector').selectOption('domain-profile');
+  await waitForReady(page);
+  const selectedView = await selectRegressionView(page, 1);
+  await page.locator('#time-selector').selectOption('mean');
+  await waitForReady(page);
+  await page.evaluate((id) => window.remediationControl.failNext('tile', id), selectedView);
+  await page.locator('#time-selector').selectOption('slice-2');
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+  await expect(page.locator('#domain-selector')).toHaveValue('domain-profile');
+  await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', selectedView);
+  await expect(page.locator('#time-selector')).toHaveValue('slice-2');
+
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForReady(page);
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#domain-selector')).toHaveValue('domain-profile');
+  await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', selectedView);
+  await expect(page.locator('#time-selector')).toHaveValue('slice-2');
+});
+
+test('changing view invalidates a stale view retry action', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:multi-domain');
+  await page.getByTestId('debug-button').click();
+  const target = page.locator('#debug-menu [data-view-id]').nth(1);
+  const targetView = await target.getAttribute('data-view-id');
+  if (!targetView) throw new Error('Target view id is missing');
+  await page.evaluate((id) => window.remediationControl.failNext('tile', id), targetView);
+  await target.click();
+  await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', targetView);
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+
+  await selectRegressionView(page, 0);
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+});
+
+test('diagnostic-stage retry repeats the selected stage', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:diagnostics');
+  await page.evaluate(() => window.remediationControl.failNext('stage', 'stage-3'));
+  const stage = await selectRegressionStage(page, 2);
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+  await expect(page.locator(`#diagnostics-menu [data-stage-id="${stage}"]`)).toHaveAttribute('aria-selected', 'true');
+
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForReady(page);
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#diagnostics-menu')).toBeVisible();
+  await expect(page.locator(`#diagnostics-menu [data-stage-id="${stage}"]`)).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.stage-snapshot')).toContainText('Synthetic state 3');
+});
+
+test('inspection and explanation retry repeat their own point requests', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  const viewId = await page.locator('#legend-panel').getAttribute('data-view-id');
+  if (!viewId) throw new Error('Initial view id is missing');
+  await page.evaluate(({ id }) => {
+    window.remediationControl.failNext('inspect', '*');
+    window.remediationControl.failNext('explain', id);
+  }, { id: viewId });
+
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 0, 1] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(2);
+  await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Retried point'));
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Retried point');
+  await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForExplainCount(page, viewId, 'fixture:category-heavy', 2);
+  await page.evaluate(({ id }) => window.remediationControl.resolveExplain(id, 'Retried explanation'), { id: viewId });
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('.explain-tree')).toContainText('Retried explanation');
 });
 
 test('late explanation from view A cannot replace pending view B', async ({ page }) => {
@@ -638,6 +845,15 @@ async function selectRegressionView(page: Page, index: number): Promise<string> 
   await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', viewId);
   await waitForReady(page);
   return viewId;
+}
+
+async function selectRegressionStage(page: Page, index: number): Promise<string> {
+  if (await page.locator('#diagnostics-menu').isHidden()) await page.getByRole('button', { name: /Diagnostics/ }).click();
+  const option = page.locator('#diagnostics-menu [data-stage-id]').nth(index);
+  const stageId = await option.getAttribute('data-stage-id');
+  if (!stageId) throw new Error(`Diagnostic stage ${index} has no identifier`);
+  await option.click();
+  return stageId;
 }
 
 async function waitForExplainCount(page: Page, viewId: string, fixtureId: string, count: number): Promise<void> {

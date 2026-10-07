@@ -1,10 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { buildFixture, SCENARIOS } from '../src/fixtures/scenarios';
+import { buildFixture, buildGeometry, SCENARIOS } from '../src/fixtures/scenarios';
 import { MockBodyCatalog, MockBodyProvider } from '../src/provider/mock-provider';
 import { ProviderError } from '../src/provider/contracts';
 import { orderedGroups } from '../src/ui/view-model';
 
 describe('synthetic scenario builders', () => {
+  it('keeps surface triangle winding aligned with outward normals and radial winding unchanged', () => {
+    for (const irregular of [false, true]) {
+      const geometry = buildGeometry('surface-mesh', 7, irregular);
+      const checked = assertPositiveWinding(geometry.positions, geometry.normals, geometry.indices);
+      expect(checked).toBeGreaterThan(10_000);
+    }
+
+    const radial = buildGeometry('radial-profile', 7);
+    const radialNormals = new Float32Array(radial.positions.length);
+    for (let index = 2; index < radialNormals.length; index += 3) radialNormals[index] = 1;
+    expect(assertPositiveWinding(radial.positions, radialNormals, radial.indices)).toBeGreaterThan(8_000);
+  });
+
   it('produce deterministic descriptors and provider responses from a scenario seed', () => {
     for (const scenario of SCENARIOS) {
       const first = buildFixture(scenario);
@@ -50,6 +63,38 @@ describe('synthetic scenario builders', () => {
     expect(groups.flatMap(({ views }) => views)).toEqual(catalog.views);
   });
 });
+
+function assertPositiveWinding(
+  positions: Float32Array,
+  normals: Float32Array,
+  indices: Uint32Array,
+): number {
+  let checked = 0;
+  for (let index = 0; index < indices.length; index += 3) {
+    const first = indices[index]!;
+    const second = indices[index + 1]!;
+    const third = indices[index + 2]!;
+    const point = (vertex: number) => [positions[vertex * 3]!, positions[vertex * 3 + 1]!, positions[vertex * 3 + 2]!] as const;
+    const normal = (vertex: number) => [normals[vertex * 3]!, normals[vertex * 3 + 1]!, normals[vertex * 3 + 2]!] as const;
+    const p0 = point(first);
+    const p1 = point(second);
+    const p2 = point(third);
+    const edge1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    const edge2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+    const geometric = [
+      edge1[1]! * edge2[2]! - edge1[2]! * edge2[1]!,
+      edge1[2]! * edge2[0]! - edge1[0]! * edge2[2]!,
+      edge1[0]! * edge2[1]! - edge1[1]! * edge2[0]!,
+    ];
+    const length = Math.hypot(...geometric);
+    if (length < 1e-8) continue;
+    const expected = [0, 1, 2].map((axis) => normal(first)[axis]! + normal(second)[axis]! + normal(third)[axis]!);
+    const dot = geometric[0]! * expected[0]! + geometric[1]! * expected[1]! + geometric[2]! * expected[2]!;
+    expect(dot).toBeGreaterThan(0);
+    checked += 1;
+  }
+  return checked;
+}
 
 describe('MockBodyProvider contract', () => {
   it('returns descriptor-derived counts and optional data across generated scenarios', async () => {

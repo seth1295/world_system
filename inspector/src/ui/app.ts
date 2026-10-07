@@ -94,6 +94,7 @@ export class InspectorApp {
   private selectedPosition: PickPosition | null = null;
   private pointReport: PointReport | null = null;
   private failure: ProviderFailure | null = null;
+  private failureOwner: RetryIntent['kind'] | null = null;
   private retryIntent: RetryIntent | null = null;
   private loadState: LoadState = 'opening';
   private loadStateBeforeFailure: LoadState | null = null;
@@ -489,6 +490,20 @@ export class InspectorApp {
     this.explainFailure = null;
   }
 
+  private clearInspectionFailure(): void {
+    if (this.failureOwner === 'inspection' || this.failureOwner === 'explanation') this.clearFailure();
+  }
+
+  private closeInspection(): void {
+    this.inspectionRequestVersion += 1;
+    this.invalidateExplain();
+    this.clearInspectionFailure();
+    this.selectedPosition = null;
+    this.pointReport = null;
+    this.renderInspection();
+    this.element<HTMLButtonElement>('#inspect-center').focus();
+  }
+
   private async selectStage(stageId: string): Promise<void> {
     if (!this.provider) return;
     const provider = this.provider;
@@ -551,6 +566,7 @@ export class InspectorApp {
 
   private clearFailure(): void {
     this.failure = null;
+    this.failureOwner = null;
     this.retryIntent = null;
     if (this.loadState === 'error') {
       this.loadState = this.loadStateBeforeFailure ?? (this.activeView ? 'ready' : 'metadata');
@@ -565,6 +581,7 @@ export class InspectorApp {
     if (this.debugOpen || this.diagnosticsOpen || this.featuresOpen) this.closePopovers(false);
     if (this.loadState !== 'error') this.loadStateBeforeFailure = this.loadState;
     this.failure = failure;
+    this.failureOwner = retryIntent?.kind ?? null;
     this.retryIntent = failure.retryable && retryIntent && this.isRetryIntentCurrent(retryIntent) ? retryIntent : null;
     this.loadState = 'error';
     this.renderAll();
@@ -836,6 +853,11 @@ export class InspectorApp {
       return;
     }
     panel.hidden = false;
+    if (!this.pointReport && this.failureOwner === 'inspection' && this.failure) {
+      panel.classList.remove('large-report');
+      panel.innerHTML = `<div class="panel-heading"><div><p class="eyebrow">SELECTED POSITION</p><h2>Point inspection failed</h2></div><button class="icon-button close-inspection" aria-label="Close point inspection">×</button></div><p class="muted">${escape(this.failure.message)}</p>`;
+      return;
+    }
     if (!this.pointReport) {
       panel.classList.remove('large-report');
       panel.innerHTML = '<div class="panel-heading"><h2>Point inspection</h2><span class="muted">Loading response…</span></div>';
@@ -1026,7 +1048,7 @@ export class InspectorApp {
     const stageButton = target.closest<HTMLElement>('[data-stage-id]');
     if (stageButton?.dataset.stageId) { void this.selectStage(stageButton.dataset.stageId); return; }
     if (target.closest('.close-popover')) { this.closePopovers(true); return; }
-    if (target.closest('.close-inspection')) { this.inspectionRequestVersion += 1; this.invalidateExplain(); this.clearFailure(); this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
+    if (target.closest('.close-inspection')) { this.closeInspection(); return; }
     if (target.closest('#inspect-center')) { this.viewport.inspectCenter(); return; }
     if (target.closest('#retry-button')) { this.retryFailure(); return; }
     if (target.closest('.copy-position') && this.pointReport) { void this.copy(this.pointReport.positionValue); return; }
@@ -1065,7 +1087,7 @@ export class InspectorApp {
       if (this.debugOpen || this.diagnosticsOpen || this.featuresOpen) {
         event.preventDefault(); this.closePopovers(true); return;
       }
-      if (this.selectedPosition) { this.inspectionRequestVersion += 1; this.invalidateExplain(); this.clearFailure(); this.selectedPosition = null; this.pointReport = null; this.renderInspection(); this.element<HTMLButtonElement>('#inspect-center').focus(); return; }
+      if (this.selectedPosition) { this.closeInspection(); return; }
     }
     const isDebugSearch = target.id === 'debug-search';
     const isStageSearch = target.id === 'diagnostic-search';

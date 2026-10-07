@@ -16,7 +16,7 @@ const hostileColors = [
   'var(--injected, url(javascript:alert(1)))',
   '#fff" onmouseover="window.hostileColorExecuted=true',
 ] as const;
-const fixtureIds = ['fixture:category-heavy', 'fixture:multi-domain', 'fixture:diagnostics', 'fixture:radial'] as const;
+const fixtureIds = ['fixture:category-heavy', 'fixture:multi-domain', 'fixture:diagnostics', 'fixture:radial', 'fixture:normal-surface', 'fixture:void'] as const;
 const fixtureModels = new Map<string, FixtureModel>(fixtureIds.map((id) => {
   const spec = SCENARIOS.find((candidate) => candidate.id === id);
   if (!spec) throw new Error(`Missing fixture ${id}`);

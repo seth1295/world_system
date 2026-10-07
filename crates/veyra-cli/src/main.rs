@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -41,7 +42,11 @@ fn command_fmt(args: &[String]) -> Result<(), Box<dyn Error>> {
     let path = args.get(1).ok_or("missing JSON file path")?;
     let input = fs::read(path)?;
     let output = format_json(&input, mode)?;
-    println!("{}", String::from_utf8(output)?);
+    if mode == "--canonical" {
+        io::stdout().lock().write_all(&output)?;
+    } else {
+        println!("{}", String::from_utf8(output)?);
+    }
     Ok(())
 }
 

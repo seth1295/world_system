@@ -911,12 +911,15 @@ mod tests {
         }
         assert!(loader.finish().is_ok());
 
-        let mut invalid: Value = serde_json::from_slice(&root).unwrap();
-        invalid["sections"]["registry"]["path"] = Value::String("../escape.json".to_owned());
-        assert_eq!(
-            BodyLoader::begin(&serde_json::to_vec(&invalid).unwrap()).unwrap_err(),
-            LoaderError::InvalidPath
-        );
+        for unsafe_path in ["../escape.json", "registry/NUL", "registry/COM1.txt"] {
+            let mut invalid: Value = serde_json::from_slice(&root).unwrap();
+            invalid["sections"]["registry"]["path"] = Value::String(unsafe_path.to_owned());
+            assert_eq!(
+                BodyLoader::begin(&serde_json::to_vec(&invalid).unwrap()).unwrap_err(),
+                LoaderError::InvalidPath,
+                "accepted {unsafe_path:?}"
+            );
+        }
     }
 
     #[test]

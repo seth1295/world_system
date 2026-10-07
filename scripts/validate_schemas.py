@@ -499,14 +499,44 @@ def main() -> int:
     # Section paths are structurally expressible and share the core artifact-path grammar.
     section_cases = []
     for path, valid in [
-        ("registry/fields.json", True), ("", False), ("/absolute", False),
-        ("a/./b", False), ("a//b", False), ("../x", False),
+        ("registry/fields.json", True), ("", False), ("/x", False), ("/absolute", False),
+        ("a/./b", False), ("a//b", False), ("../x", False), ("a/../x", False),
         ("a\\b", False), ("C:/x", False), ("a:b", False), ("a/", False),
-        ("a\x00b", False),
+        ("C:relative", False), ("a/C:/x", False),
+        ("a\x00b", False), ("a\x01b", False), ("a\x1fb", False),
+        ("bad<name", False), ("bad>name", False), ('bad"name', False),
+        ("bad|name", False), ("bad?name", False), ("bad*name", False),
+        ("trailing ", False), ("trailing.", False), ("dir./file", False),
+        ("dir /file", False),
+        ("CON", False), ("con", False), ("Con.txt", False),
+        ("NUL", False), ("nul.json", False), ("PRN", False), ("AUX", False),
+        ("COM1", False), ("com9.bin", False), ("LPT1", False), ("lpt9.data", False),
+        ("registry/NUL", False), ("registry/COM1.txt", False),
+        ("COM¹", False), ("COM².ext", False), ("LPT³", False), ("LPT³.foo", False),
+        ("console", True), ("null", True), ("COM0", True), ("COM10", True),
+        ("LPT0", True), ("LPT10", True), ("xCON", True), ("CONx", True),
+        ("company.txt", True), (".hidden", True), ("café/世界.json", True),
+        ("delete\u007fcharacter", True),
     ]:
         instance = deepcopy(body_fixture)
         instance["sections"]["registry"]["path"] = path
         section_cases.append((f"registry path {path!r}", instance, valid))
+    for control in range(1, 32):
+        path = f"file{chr(control)}name"
+        instance = deepcopy(body_fixture)
+        instance["sections"]["registry"]["path"] = path
+        section_cases.append((f"registry path with ASCII control U+{control:04X}", instance, False))
+    for prefix in ("COM", "LPT"):
+        for digit in range(1, 10):
+            for basename in (f"{prefix}{digit}", f"{prefix}{digit}.data"):
+                instance = deepcopy(body_fixture)
+                instance["sections"]["registry"]["path"] = basename
+                section_cases.append((f"reserved device path {basename}", instance, False))
+        for digit in ("\u00b9", "\u00b2", "\u00b3"):
+            for basename in (f"{prefix}{digit}", f"{prefix}{digit}.data"):
+                instance = deepcopy(body_fixture)
+                instance["sections"]["registry"]["path"] = basename
+                section_cases.append((f"reserved superscript device path {basename}", instance, False))
     check_cases(body_validator, section_cases, "section path")
 
     # Schema cannot express uniqueBy(domain.id), capability dependencies, or cross-section

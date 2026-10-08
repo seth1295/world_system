@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+use unicode_normalization::UnicodeNormalization;
+
 /// Validates a canonical slash-separated path inside one artifact.
 pub fn validate_artifact_path(path: &str) -> Result<(), ArtifactPathError> {
     let bytes = path.as_bytes();
@@ -25,19 +27,41 @@ pub fn validate_artifact_path(path: &str) -> Result<(), ArtifactPathError> {
     Ok(())
 }
 
+/// Returns a host-independent Unicode collision key without changing the declared path.
+///
+/// The collision policy applies Unicode uppercase mapping followed by NFC normalization to the
+/// complete slash-separated path. Original path text remains the artifact reference; this key is
+/// only for checking case and normalization aliases. Two paths collide when their keys are equal,
+/// or when one key is a complete component prefix of the other (a file-versus-directory clash).
+pub fn artifact_path_collision_key(path: &str) -> String {
+    path.chars().flat_map(char::to_uppercase).collect::<String>().nfc().collect()
+}
+
+/// Reports equality or a file-versus-directory prefix collision between collision keys.
+pub fn artifact_path_keys_collide(left: &str, right: &str) -> bool {
+    left == right
+        || left.strip_prefix(right).is_some_and(|suffix| suffix.starts_with('/'))
+        || right.strip_prefix(left).is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn is_windows_forbidden_character(character: char) -> bool {
     matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
         || (character.is_ascii() && (character as u32) <= 0x1f)
 }
 
 fn is_windows_device_name(component: &str) -> bool {
+    let full_key = artifact_path_collision_key(component);
+    if ["CONIN$", "CONOUT$"].contains(&full_key.as_str()) {
+        return true;
+    }
     let basename = component.split('.').next().unwrap_or_default();
+    let basename_key = artifact_path_collision_key(basename);
     // Windows reserves these basenames even when a component has an extension.
-    if ["CON", "PRN", "AUX", "NUL"].iter().any(|name| basename.eq_ignore_ascii_case(name)) {
+    if ["CON", "PRN", "AUX", "NUL"].contains(&basename_key.as_str()) {
         return true;
     }
 
-    let bytes = basename.as_bytes();
+    let bytes = basename_key.as_bytes();
     if bytes.len() == 4
         && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
         && matches!(bytes[3], b'1'..=b'9')
@@ -45,9 +69,7 @@ fn is_windows_device_name(component: &str) -> bool {
         return true;
     }
 
-    ["COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"]
-        .iter()
-        .any(|name| basename.eq_ignore_ascii_case(name))
+    ["COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"].iter().any(|name| basename_key == *name)
 }
 
 /// A literal artifact path violates the VEYRA slash-separated relative-path grammar.
@@ -67,7 +89,10 @@ impl std::error::Error for ArtifactPathError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactPathError, validate_artifact_path};
+    use super::{
+        ArtifactPathError, artifact_path_collision_key, artifact_path_keys_collide,
+        validate_artifact_path,
+    };
 
     #[test]
     fn artifact_paths_use_the_same_literal_grammar_on_every_host() {
@@ -132,6 +157,14 @@ mod tests {
             "COM².ext",
             "LPT³",
             "LPT³.foo",
+            "CONIN$",
+            "conin$",
+            "ConIn$",
+            "con\u{0131}n$",
+            "CONOUT$",
+            "conout$",
+            "folder/conOut$",
+            "folder/CONOUT$",
         ] {
             assert_eq!(
                 validate_artifact_path(invalid),
@@ -160,6 +193,37 @@ mod tests {
                 );
             }
         }
+        for valid in ["CONIN$.txt", "CONOUT$.log", "CONIN$device", "conout$.data"] {
+            assert_eq!(validate_artifact_path(valid), Ok(()), "rejected {valid:?}");
+        }
+    }
+
+    #[test]
+    fn collision_keys_cover_unicode_case_normalization_and_directory_aliases() {
+        for (left, right) in [
+            ("sections/State.json", "sections/state.JSON"),
+            ("Résumé/Field.json", "résumé/field.JSON"),
+            ("Σ/data.json", "ς/DATA.JSON"),
+            ("café/data.json", "cafe\u{301}/DATA.JSON"),
+            ("straße/data.json", "STRASSE/DATA.JSON"),
+            ("Directory", "directory/child.json"),
+            ("Directory/child.json", "directory"),
+        ] {
+            let left_key = artifact_path_collision_key(left);
+            let right_key = artifact_path_collision_key(right);
+            assert!(
+                artifact_path_keys_collide(&left_key, &right_key),
+                "{left:?} and {right:?} did not collide"
+            );
+            assert!(
+                artifact_path_keys_collide(&right_key, &left_key),
+                "collision rule was not symmetric for {left:?} and {right:?}"
+            );
+        }
+
+        let left = artifact_path_collision_key("Data/one.json");
+        let right = artifact_path_collision_key("data/two.json");
+        assert!(!artifact_path_keys_collide(&left, &right));
     }
 
     #[test]

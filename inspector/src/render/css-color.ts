@@ -25,20 +25,30 @@ const colorCache = new Map<string, NormalizedColor | null>();
 
 /** Parse one standalone opaque CSS color into CSS and sRGB values used by both render paths. */
 export function normalizeCssColor(value: unknown): NormalizedColor | null {
+  return normalizeCssColorValue(value, false);
+}
+
+/** Parse one standalone CSS color while preserving its alpha for feature overlays. */
+export function normalizeCssColorWithAlpha(value: unknown): NormalizedColor | null {
+  return normalizeCssColorValue(value, true);
+}
+
+function normalizeCssColorValue(value: unknown, allowAlpha: boolean): NormalizedColor | null {
   if (typeof value !== 'string') return null;
   if (value.length > 128 || /[\u0000-\u001f\u007f]/.test(value)) return null;
   const source = value.trim();
   if (!source) return null;
   if (/\b(?:var|env|attr)\s*\(/i.test(source) || /^(?:inherit|initial|unset|revert|revert-layer|currentcolor)$/i.test(source)) return null;
-  const cached = colorCache.get(source);
+  const cacheKey = `${allowAlpha ? 'alpha' : 'opaque'}:${source}`;
+  const cached = colorCache.get(cacheKey);
   if (cached !== undefined) return cached;
   if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function' || !CSS.supports('color', source)) {
-    colorCache.set(source, null);
+    colorCache.set(cacheKey, null);
     return null;
   }
   const context = getColorContext();
   if (!context) {
-    colorCache.set(source, null);
+    colorCache.set(cacheKey, null);
     return null;
   }
 
@@ -54,7 +64,7 @@ export function normalizeCssColor(value: unknown): NormalizedColor | null {
     }
   }
   if (!parsedStyle) {
-    colorCache.set(source, null);
+    colorCache.set(cacheKey, null);
     return null;
   }
 
@@ -62,20 +72,32 @@ export function normalizeCssColor(value: unknown): NormalizedColor | null {
   context.fillStyle = parsedStyle;
   context.fillRect(0, 0, 1, 1);
   const pixel = context.getImageData(0, 0, 1, 1).data;
-  if (pixel[3] !== 255) {
-    colorCache.set(source, null);
+  if (!allowAlpha && pixel[3] !== 255) {
+    colorCache.set(cacheKey, null);
     return null;
   }
-  const rgba: readonly [number, number, number, number] = [pixel[0]!, pixel[1]!, pixel[2]!, pixel[3]!];
-  const hex = `#${rgba.slice(0, 3).map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
-  const alpha = Number((rgba[3] / 255).toFixed(6));
-  const normalized: NormalizedColor = {
-    css: rgba[3] === 255 ? `rgb(${rgba[0]}, ${rgba[1]}, ${rgba[2]})` : `rgba(${rgba[0]}, ${rgba[1]}, ${rgba[2]}, ${alpha})`,
-    hex,
-    rgba,
-  };
-  colorCache.set(source, normalized);
+  const rgba = (allowAlpha ? parseSerializedCanvasColor(parsedStyle) : null)
+    ?? [pixel[0]!, pixel[1]!, pixel[2]!, pixel[3]!] as const;
+  const normalized = colorFromRgba(rgba);
+  colorCache.set(cacheKey, normalized);
   return normalized;
+}
+
+function parseSerializedCanvasColor(value: string): readonly [number, number, number, number] | null {
+  const hex = value.match(/^#([\da-f]{3,4}|[\da-f]{6}|[\da-f]{8})$/i)?.[1];
+  if (hex) {
+    const channels = hex.length <= 4
+      ? [...hex].map((channel) => Number.parseInt(channel + channel, 16))
+      : hex.match(/.{2}/g)!.map((channel) => Number.parseInt(channel, 16));
+    return [channels[0]!, channels[1]!, channels[2]!, channels[3] ?? 255];
+  }
+  const match = value.match(/^rgba?\(\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))(%?)\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))(%?)\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))(%?)(?:\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))(%?))?\s*\)$/i);
+  if (!match) return null;
+  const channel = (value: string, percent: string): number => Math.round(Math.max(0, Math.min(255, Number(value) * (percent ? 2.55 : 1))));
+  const alpha = match[7] === undefined
+    ? 255
+    : Math.round(Math.max(0, Math.min(255, Number(match[7]) * (match[8] ? 2.55 : 255))));
+  return [channel(match[1]!, match[2]!), channel(match[3]!, match[4]!), channel(match[5]!, match[6]!), alpha];
 }
 
 /** Keep the legend and raster renderer on the same validated, ordered stop set. */

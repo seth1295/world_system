@@ -521,6 +521,171 @@ test('normalizes CSS color syntaxes once for legend and viewport rendering', asy
   await page.locator('#viewport canvas').screenshot({ path: testInfo.outputPath('palette-hex-shorthex-named.png') });
 });
 
+test('optional statistics rejection leaves a renderable view and shows unavailable statistics', async ({ page }, testInfo) => {
+  await startRegressionHarness(page, 'fixture:normal-surface');
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:normal-surface')!);
+  const domain = fixture.domains[0]!;
+  const view = fixture.catalogs.get(domain.id)!.views.find((candidate) => candidate.legend.kind === 'continuous' && candidate.legend.statsAvailable);
+  if (!view) throw new Error('Normal surface fixture has no continuous statistics view');
+  await page.evaluate((id) => window.remediationControl.failNext('stats', id), view.id);
+  await selectRegressionViewById(page, view.id);
+
+  await expect(page.locator('#provider-state')).toHaveAttribute('data-state', 'ready');
+  await expect(page.locator('#viewport canvas')).toBeVisible();
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#legend-panel .no-stats')).toHaveText('No statistics available');
+  await page.locator('#legend-panel').screenshot({ path: testInfo.outputPath('view-with-unavailable-statistics.png') });
+});
+
+test('required tile failure remains retryable when the optional statistics request rejects', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:normal-surface');
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:normal-surface')!);
+  const domain = fixture.domains[0]!;
+  const view = fixture.catalogs.get(domain.id)!.views.find((candidate) => candidate.legend.kind === 'continuous' && candidate.legend.statsAvailable);
+  if (!view) throw new Error('Normal surface fixture has no continuous statistics view');
+  await page.evaluate((id) => {
+    window.remediationControl.failNext('stats', id);
+    window.remediationControl.failNext('tile', id);
+  }, view.id);
+  await page.getByTestId('debug-button').click();
+  await page.locator(`#debug-menu [data-view-id="${view.id}"]`).click();
+  await expect(page.locator('#provider-error .error-message')).toHaveText('Temporary view data failure.');
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForReady(page);
+  await expect(page.locator('#provider-error')).toBeHidden();
+  await expect(page.locator('#viewport canvas')).toBeVisible();
+});
+
+test('late statistics from the prior view cannot overwrite the selected view', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:normal-surface');
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:normal-surface')!);
+  const domain = fixture.domains[0]!;
+  const views = fixture.catalogs.get(domain.id)!.views.filter((candidate) => candidate.legend.kind === 'continuous' && candidate.legend.statsAvailable);
+  const viewA = views[0];
+  const viewB = views[1];
+  if (!viewA || !viewB) throw new Error('Normal surface fixture requires two continuous statistics views');
+  await page.evaluate(() => window.remediationControl.setStatsDeferred(true));
+
+  const beforeA = await page.evaluate((id) => window.remediationControl.statsCount(id), viewA.id);
+  await selectRegressionViewById(page, viewA.id);
+  await expect.poll(() => page.evaluate((id) => window.remediationControl.statsCount(id), viewA.id)).toBe(beforeA + 1);
+  await selectRegressionViewById(page, viewB.id);
+  await expect.poll(() => page.evaluate((id) => window.remediationControl.statsCount(id), viewB.id)).toBe(1);
+  await expect(page.locator('#legend-panel .no-stats')).toBeVisible();
+
+  await page.evaluate((id) => window.remediationControl.resolveStats(id, 111, 113, 112), viewA.id);
+  await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', viewB.id);
+  await expect(page.locator('#legend-panel .no-stats')).toBeVisible();
+  await expect(page.locator('#legend-panel .stats-grid')).toHaveCount(0);
+
+  await page.evaluate((id) => window.remediationControl.resolveStats(id, 222, 224, 223), viewB.id);
+  await expect(page.locator('#legend-panel .stats-grid b').first()).toHaveAttribute('title', '222');
+  await expect(page.locator('#legend-panel .stats-grid b').first()).not.toHaveAttribute('title', '111');
+});
+
+test('feature overlays preserve alpha in CSS colors and reject hostile colors', async ({ page }, testInfo) => {
+  const validCases = [
+    { value: 'rgba(20, 40, 60, 0.4)', rgba: [20, 40, 60, 102], hex: '#14283c' },
+    { value: 'rgb(10 20 30 / 50%)', rgba: [10, 20, 30, 128], hex: '#0a141e' },
+    { value: '#33669980', rgba: [51, 102, 153, 128], hex: '#336699' },
+    { value: 'hsl(210 50% 40% / 25%)', rgba: [51, 102, 153, 64], hex: '#336699' },
+  ] as const;
+
+  for (const testCase of validCases) {
+    await startRegressionHarness(page, 'fixture:category-heavy', undefined, `overlayColor=${encodeURIComponent(testCase.value)}`);
+    const parsed = await page.evaluate((value) => window.remediationControl.normalizeOverlayColor(value), testCase.value);
+    expect(parsed?.rgba).toEqual(testCase.rgba);
+    expect(parsed?.hex).toBe(testCase.hex);
+    expect(await page.evaluate((value) => window.remediationControl.normalizeColor(value), testCase.value)).toBeNull();
+
+    await page.getByRole('button', { name: /Features/ }).click();
+    await page.locator('#features-menu input[data-feature-id]:not([disabled])').first().check();
+    await expect.poll(() => page.evaluate(() => window.remediationControl.overlayMaterialStates().length)).toBeGreaterThan(0);
+    const materials = await page.evaluate(() => window.remediationControl.overlayMaterialStates());
+    expect(materials.every(({ color, opacity, transparent }) => color === testCase.hex && transparent && Math.abs(opacity - 0.85 * testCase.rgba[3] / 255) < 0.001)).toBe(true);
+    if (testCase.value === validCases[0]!.value) {
+      await page.screenshot({ path: testInfo.outputPath('translucent-overlay.png') });
+    }
+  }
+
+  const hostile = 'red; background:url(javascript:alert(1))';
+  await startRegressionHarness(page, 'fixture:category-heavy', undefined, `overlayColor=${encodeURIComponent(hostile)}`);
+  expect(await page.evaluate((value) => window.remediationControl.normalizeOverlayColor(value), hostile)).toBeNull();
+  await page.getByRole('button', { name: /Features/ }).click();
+  await page.locator('#features-menu input[data-feature-id]:not([disabled])').first().check();
+  const fallback = await page.evaluate(() => window.remediationControl.overlayMaterialStates()[0]);
+  expect(fallback).toEqual({ color: '#dedede', opacity: 0.85, transparent: true });
+  expect(await page.evaluate(() => window.hostileColorExecuted)).toBe(false);
+  await page.screenshot({ path: testInfo.outputPath('invalid-overlay-fallback.png') });
+});
+
+for (const outcome of ['success', 'failure'] as const) {
+  test(`destroy invalidates a deferred fixture open followed by ${outcome}`, async ({ page }) => {
+    const fixtureId = 'fixture:multi-domain';
+    await page.goto(`/tests/remediation-harness.html?fixture=${encodeURIComponent(fixtureId)}&deferOpen=1`);
+    await expect.poll(() => page.evaluate((id) => window.remediationControl.operationCount('open', id), fixtureId)).toBe(1);
+    await verifyNoPostDestroyWork(page, () => page.evaluate(({ id, result }) => {
+      if (result === 'success') window.remediationControl.resolveOpen(id);
+      else window.remediationControl.rejectOpen(id, 'Late fixture open rejection.');
+    }, { id: fixtureId, result: outcome }));
+  });
+
+  test(`destroy invalidates a deferred tile load followed by ${outcome}`, async ({ page }) => {
+    await startRegressionHarness(page, 'fixture:normal-surface');
+    await waitForReady(page);
+    await page.evaluate(() => window.remediationControl.setTilesDeferred(true));
+    const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:normal-surface')!);
+    const domain = fixture.domains[0]!;
+    const targetView = fixture.catalogs.get(domain.id)!.views[1]!;
+    const before = await page.evaluate((id) => window.remediationControl.operationCount('tile', id), targetView.id);
+    await page.getByTestId('debug-button').click();
+    await page.locator(`#debug-menu [data-view-id="${targetView.id}"]`).click();
+    await expect.poll(() => page.evaluate((id) => window.remediationControl.operationCount('tile', id), targetView.id)).toBe(before + 1);
+    await verifyNoPostDestroyWork(page, () => page.evaluate(({ id, result }) => {
+      if (result === 'success') window.remediationControl.resolveTile(id);
+      else window.remediationControl.rejectTile(id, 'Late tile rejection.');
+    }, { id: targetView.id, result: outcome }));
+  });
+
+  test(`destroy invalidates a deferred domain catalogue followed by ${outcome}`, async ({ page }) => {
+    await startRegressionHarness(page, 'fixture:multi-domain');
+    await waitForReady(page);
+    await page.evaluate(() => window.remediationControl.setViewsDeferred(true));
+    await page.locator('#domain-selector').selectOption('domain-profile');
+    await expect.poll(() => page.evaluate(() => window.remediationControl.operationCount('views', 'domain-profile'))).toBe(1);
+    await verifyNoPostDestroyWork(page, () => page.evaluate(({ domainId, result }) => {
+      if (result === 'success') window.remediationControl.resolveViews(domainId);
+      else window.remediationControl.rejectViews(domainId, 'Late domain catalogue rejection.');
+    }, { domainId: 'domain-profile', result: outcome }));
+  });
+
+  test(`destroy invalidates a deferred point inspection followed by ${outcome}`, async ({ page }) => {
+    await startRegressionHarness(page, 'fixture:category-heavy');
+    await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 0, 1] } as const);
+    await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+    await verifyNoPostDestroyWork(page, () => page.evaluate((result) => {
+      if (result === 'success') window.remediationControl.resolveInspection(0, 'Late point response');
+      else window.remediationControl.rejectInspection(0, 'Late point rejection.');
+    }, outcome));
+  });
+
+  test(`destroy invalidates a deferred explanation followed by ${outcome}`, async ({ page }) => {
+    await startRegressionHarness(page, 'fixture:category-heavy');
+    const viewId = await page.locator('#legend-panel').getAttribute('data-view-id');
+    if (!viewId) throw new Error('Initial view identifier is missing');
+    await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 0, 1] } as const);
+    await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+    await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Point before explanation'));
+    await expect(page.locator('#inspection-panel h2')).toHaveText('Point before explanation');
+    await waitForExplainCount(page, viewId, 'fixture:category-heavy', 1);
+    await verifyNoPostDestroyWork(page, () => page.evaluate(({ id, result }) => {
+      if (result === 'success') window.remediationControl.resolveExplain(id, 'Late explanation');
+      else window.remediationControl.rejectExplain(id, 'Late explanation rejection.');
+    }, { id: viewId, result: outcome }));
+  });
+}
+
 test('captures regular and irregular rendered surfaces after the winding correction', async ({ page }, testInfo) => {
   for (const fixtureId of ['fixture:normal-surface', 'fixture:irregular']) {
     await page.goto(`/?fixture=${encodeURIComponent(fixtureId)}`);
@@ -1086,11 +1251,12 @@ test('stale explanation failures are ignored while current failures still surfac
   await expect(page.locator('.explain-error')).toHaveText('current explanation failure');
 });
 
-async function startRegressionHarness(page: Page, fixtureId: string, profileSamples?: number): Promise<void> {
+async function startRegressionHarness(page: Page, fixtureId: string, profileSamples?: number, extraQuery = ''): Promise<void> {
   await page.setViewportSize(viewSizes[1]!);
   await page.addInitScript(() => { window.hostileColorExecuted = false; });
   const profileQuery = profileSamples === undefined ? '' : `&profileSamples=${profileSamples}`;
-  await page.goto(`/tests/remediation-harness.html?fixture=${encodeURIComponent(fixtureId)}${profileQuery}`);
+  const additionalQuery = extraQuery ? `&${extraQuery}` : '';
+  await page.goto(`/tests/remediation-harness.html?fixture=${encodeURIComponent(fixtureId)}${profileQuery}${additionalQuery}`);
   await waitForReady(page);
 }
 
@@ -1115,6 +1281,13 @@ async function selectRegressionView(page: Page, index: number): Promise<string> 
   await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', viewId);
   await waitForReady(page);
   return viewId;
+}
+
+async function selectRegressionViewById(page: Page, viewId: string): Promise<void> {
+  await page.getByTestId('debug-button').click();
+  await page.locator(`#debug-menu [data-view-id="${viewId}"]`).click();
+  await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', viewId);
+  await waitForReady(page);
 }
 
 async function selectRegressionStage(page: Page, index: number): Promise<string> {
@@ -1149,6 +1322,21 @@ async function openFailedInspection(page: Page, fixtureId: string, failureMode: 
     await page.evaluate(() => window.remediationControl.rejectInspection(0, 'Point details are unavailable.'));
   }
   await expect(page.locator('#inspection-panel h2')).toHaveText('Point inspection failed');
+}
+
+async function verifyNoPostDestroyWork(page: Page, completeLateRequest: () => Promise<void>): Promise<void> {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.evaluate(() => window.remediationControl.destroyApp());
+  const destroyedDom = await page.locator('#app').innerHTML();
+  const initialUnhandled = await page.evaluate(() => window.remediationControl.unhandledRejectionCount());
+  await completeLateRequest();
+  await page.waitForTimeout(30);
+  expect(await page.locator('#app').innerHTML()).toBe(destroyedDom);
+  expect(await page.evaluate(() => window.remediationControl.postDestroyViewportCalls())).toBe(0);
+  expect(await page.evaluate(() => window.remediationControl.postDestroyRenderCalls())).toBe(0);
+  expect(await page.evaluate(() => window.remediationControl.unhandledRejectionCount())).toBe(initialUnhandled);
+  expect(pageErrors).toEqual([]);
 }
 
 async function waitForExplainCount(page: Page, viewId: string, fixtureId: string, count: number): Promise<void> {

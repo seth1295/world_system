@@ -296,20 +296,12 @@ mod tests {
                 "Climate",
                 Some(climate_order),
             ),
-            descriptor(
-                "derived.ocean",
-                Some("veyra.cap.ocean/1"),
-                "Ocean",
-                Some(ocean_order),
-            ),
+            descriptor("derived.ocean", Some("veyra.cap.ocean/1"), "Ocean", Some(ocean_order)),
         ];
         sort_views(&mut views);
         assert_eq!(views[0].id, "derived.ocean");
         assert_eq!(views[1].id, "field.climate");
-        assert_eq!(
-            serde_json::to_value(&views[0]).unwrap()["display_order"],
-            40
-        );
+        assert_eq!(serde_json::to_value(&views[0]).unwrap()["display_order"], 40);
     }
 
     #[test]

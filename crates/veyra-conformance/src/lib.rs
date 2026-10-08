@@ -1376,14 +1376,11 @@ fn verify_stage4(world_root: &Path) -> Result<Vec<FixtureResult>, ConformanceErr
         })
         || stellar_views.is_empty()
         || stellar_views.iter().any(|view| view.display_order != Some(80))
-        || cb7_views
-            .iter()
-            .position(|view| view.display_order.is_none())
-            .is_some_and(|first_unordered| {
-                cb7_views[first_unordered..]
-                    .iter()
-                    .any(|view| view.display_order.is_some())
-            })
+        || cb7_views.iter().position(|view| view.display_order.is_none()).is_some_and(
+            |first_unordered| {
+                cb7_views[first_unordered..].iter().any(|view| view.display_order.is_some())
+            },
+        )
     {
         return Err(ConformanceError::Assertion(
             "cb7 view catalog is not capability driven or ordered",

@@ -38,22 +38,20 @@ pub fn generate_foundation(
 ) -> Result<(), ConformanceError> {
     let world_root = world_root.as_ref();
     let vector_root = vector_root.as_ref();
-    if world_root.join("cb0-addressing/body.json").exists()
-        || world_root.join("cb5-hashing/body.json").exists()
-        || world_root.join("cb9-minimal-void/body.json").exists()
-    {
-        verify_foundation(world_root, vector_root)?;
-        return Ok(());
+    let foundation_ready = ["cb0-addressing", "cb5-hashing", "cb9-minimal-void"]
+        .iter()
+        .all(|name| world_root.join(name).join("body.json").exists());
+    if !foundation_ready {
+        fs::create_dir_all(world_root).map_err(ConformanceError::Io)?;
+        let cb0_id = generate_cb0(&world_root.join("cb0-addressing"))?;
+        let (cb5_id, cb5_blobs) = generate_cb5(&world_root.join("cb5-hashing"))?;
+        let cb9_id = generate_cb9(&world_root.join("cb9-minimal-void"))?;
+        generate_cb6(&world_root.join("cb6-compat"), world_root.join("cb5-hashing"), &cb5_blobs)?;
+        write_golden_vectors(vector_root, cb0_id, cb5_id, cb9_id)?;
+        write_topology_vectors(vector_root)?;
     }
-    fs::create_dir_all(world_root).map_err(ConformanceError::Io)?;
-
-    let cb0_id = generate_cb0(&world_root.join("cb0-addressing"))?;
-    let (cb5_id, cb5_blobs) = generate_cb5(&world_root.join("cb5-hashing"))?;
-    let cb9_id = generate_cb9(&world_root.join("cb9-minimal-void"))?;
-    generate_cb6(&world_root.join("cb6-compat"), world_root.join("cb5-hashing"), &cb5_blobs)?;
-
-    write_golden_vectors(vector_root, cb0_id, cb5_id, cb9_id)?;
-    write_topology_vectors(vector_root)?;
+    generate_stage4(world_root)?;
+    verify_foundation(world_root, vector_root)?;
     Ok(())
 }
 
@@ -111,6 +109,7 @@ pub fn verify_foundation(
         cb5.baseline_id(),
         cb9.baseline_id(),
     )?;
+    results.extend(verify_stage4(world_root)?);
     Ok(results)
 }
 
@@ -203,6 +202,1628 @@ fn generate_cb9(path: &Path) -> Result<Hash32, ConformanceError> {
         0,
     )
     .map(|result| result.0)
+}
+
+fn generate_stage4(world_root: &Path) -> Result<(), ConformanceError> {
+    if !world_root.join("cb1-seams/body.json").exists() {
+        generate_cb1(&world_root.join("cb1-seams"))?;
+    }
+    if !world_root.join("cb2-categories/body.json").exists() {
+        generate_cb2(&world_root.join("cb2-categories"))?;
+    }
+    if !world_root.join("cb7-star1d/body.json").exists() {
+        generate_cb7(&world_root.join("cb7-star1d"))?;
+    }
+    if !world_root.join("cb8-rock/body.json").exists() {
+        generate_cb8(&world_root.join("cb8-rock"))?;
+    }
+    let corpus_root =
+        world_root.parent().ok_or(ConformanceError::Assertion("conformance world root parent"))?;
+    let query_path = corpus_root.join("queries/stage4.jsonl");
+    if !query_path.exists() {
+        let queries = stage4_queries();
+        let lines = queries
+            .iter()
+            .map(|query| {
+                serde_json::to_string(query)
+                    .map_err(|_| ConformanceError::Assertion("Stage 4 query JSON"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        write_new(query_path.clone(), format!("{lines}\n").as_bytes())?;
+    }
+    let expected_path = corpus_root.join("expected/stage4.jsonl");
+    if !expected_path.exists() {
+        let output = run_stage4_queries(world_root, &query_path)?;
+        write_new(expected_path, format!("{}\n", output.join("\n")).as_bytes())?;
+    }
+    Ok(())
+}
+
+fn generate_cb1(path: &Path) -> Result<(), ConformanceError> {
+    let mut analytic_field = stage4_field(
+        FieldId::new(0x7ffe, 1),
+        "conformance.seam_scalar",
+        FIXTURE_CAPABILITY,
+        "surface",
+        "scalar.temperature",
+        "f32",
+        "1",
+        "0",
+        Some("K"),
+        "bilinear",
+        "mean",
+        2,
+        "ancillary",
+        None,
+        Some(json!({"group":"Conformance","label":"Analytic seam field","legend":"continuous"})),
+    );
+    analytic_field["sampling"]["above_native"] = json!("refine");
+    let mut periodic_field = stage4_field(
+        FieldId::new(0x7ffe, 3),
+        "conformance.periodic_signal",
+        FIXTURE_CAPABILITY,
+        "surface",
+        "scalar.temperature",
+        "u16",
+        "1",
+        "0",
+        Some("K"),
+        "bilinear",
+        "mean",
+        2,
+        "ancillary",
+        None,
+        Some(json!({"group":"Conformance","label":"Periodic signal","legend":"continuous"})),
+    );
+    periodic_field["temporal"] = json!({"kind":"periodic_slices","count":3,"period_ref":"rotation.period","origin_ref":"rotation.epoch","reduce_default":"mean"});
+    periodic_field["sampling"]["above_native"] = json!("smooth_only");
+    let mut checker_field = stage4_field(
+        FieldId::new(0x7ffe, 2),
+        "conformance.face_checker",
+        FIXTURE_CAPABILITY,
+        "surface",
+        "category",
+        "u8",
+        "1",
+        "0",
+        None,
+        "nearest",
+        "mode_lowest_tiebreak",
+        2,
+        "ancillary",
+        Some(json!({"nodata":255})),
+        Some(json!({"group":"Conformance","label":"Face checker","legend":"vocab_counts"})),
+    );
+    checker_field["sampling"]["above_native"] = json!("inherit");
+    for field in [&mut analytic_field, &mut periodic_field, &mut checker_field] {
+        field["sampling"].as_object_mut().unwrap().remove("below_native");
+    }
+    let fields = vec![analytic_field, checker_field, periodic_field];
+    let (analytic, analytic_blobs) =
+        dir_cube_index(FieldId::new(0x7ffe, 1), DType::F32, 2, 2, |face, i, j| {
+            let key = DirCube::key(face, i, j, 2).expect("fixture cell");
+            let direction = DirCube.cell_center(key).expect("fixture direction");
+            let value = (direction.x() + 2.0 * direction.y() + 3.0 * direction.z()) as f32;
+            value.to_bits().to_le_bytes().to_vec()
+        })?;
+    let (mut checker, mut checker_blobs) =
+        dir_cube_index(FieldId::new(0x7ffe, 2), DType::U8, 2, 2, |face, i, j| {
+            vec![if face == 0 && i == 0 && j == 0 {
+                255
+            } else {
+                1 + ((face + i as u8 + j as u8) % 3)
+            }]
+        })?;
+    let constant = checker
+        .entries
+        .iter_mut()
+        .find(|entry| entry.key >> 61 == 5)
+        .ok_or(ConformanceError::Assertion("cb1 constant face entry"))?;
+    constant.value = IndexValue::Const(2);
+    checker_blobs.pop();
+    let (periodic, periodic_blobs) =
+        dir_cube_sliced_index(FieldId::new(0x7ffe, 3), DType::U16, 2, 2, 3, |_, _, _, slice| {
+            (10_u16 + slice * 10).to_le_bytes().to_vec()
+        })?;
+    let mut domain = dir_cube_domain_2();
+    domain["max_level"] = json!(3);
+    build_stage4_artifact(
+        path,
+        "cb1-seams",
+        fields,
+        vec![json!({"id":FIXTURE_CAPABILITY,"params":{},"compat":"ancillary"})],
+        vec![domain],
+        json!({"kind":"sphere","radius_m":"1"}),
+        vec![],
+        vec![],
+        vec![analytic, checker, periodic],
+        [analytic_blobs, checker_blobs, periodic_blobs].concat(),
+        json!({"fixture":"cube seams and corners"}),
+    )?;
+    Ok(())
+}
+
+fn generate_cb2(path: &Path) -> Result<(), ConformanceError> {
+    let field = stage4_field(
+        FieldId::new(0x0105, 1),
+        "surface_material.class",
+        "veyra.cap.surface_material/1",
+        "surface",
+        "category",
+        "u8",
+        "1",
+        "0",
+        None,
+        "nearest",
+        "mode_lowest_tiebreak",
+        2,
+        "critical",
+        Some(json!({"nodata":255,"vocab":"surface_material.class/1"})),
+        Some(json!({"group":"Surface material","label":"Material class","legend":"vocab_counts"})),
+    );
+    let (index, blobs) = dir_cube_pyramid_index(
+        FieldId::new(0x0105, 1),
+        DType::U8,
+        2,
+        2,
+        "mode_lowest_tiebreak",
+        Some(255),
+        |face, i, j| {
+            vec![if face == 0 && i == 0 && j == 0 {
+                255
+            } else {
+                ((face + i as u8 + j as u8) % 3) + 1
+            }]
+        },
+    )?;
+    let vocab = json!({"schema":"veyra.vocab/1","id":"surface_material.class/1","values":[
+        {"id":1,"label":"Class A"},{"id":2,"label":"Class B"},{"id":3,"label":"Class C"}
+    ]});
+    build_stage4_artifact(
+        path,
+        "cb2-categories",
+        vec![field],
+        vec![
+            json!({"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}}),
+            json!({"id":"veyra.cap.surface_material/1","params":{"domain":"surface"}}),
+        ],
+        vec![dir_cube_domain_2()],
+        json!({"kind":"sphere","radius_m":"1"}),
+        vec![json!({"id":"figure_surface","kind":"figure_surface"})],
+        vec![(
+            "surface_material.class/1".to_owned(),
+            "vocab/surface_material.class.json".to_owned(),
+            vocab,
+        )],
+        vec![index],
+        blobs,
+        json!({"fixture":"categorical values, ties, and nodata"}),
+    )?;
+    Ok(())
+}
+
+fn generate_cb7(path: &Path) -> Result<(), ConformanceError> {
+    let templates = [
+        (1, "stellar.density", "scalar.density", "u32", "0.01", "kg/m3", "Stellar density"),
+        (2, "stellar.temperature", "scalar.temperature", "u32", "0.01", "K", "Stellar temperature"),
+        (3, "stellar.pressure", "scalar.pressure", "u32", "0.01", "Pa", "Stellar pressure"),
+        (
+            4,
+            "stellar.hydrogen_fraction",
+            "scalar.fraction",
+            "u16",
+            "0.0001",
+            "1",
+            "Hydrogen fraction",
+        ),
+    ];
+    let mut fields = Vec::new();
+    let mut indexes = Vec::new();
+    let mut blobs = Vec::new();
+    for (local_id, name, semantic, dtype, scale, unit, label) in templates {
+        let field_id = FieldId::new(0x0130, local_id);
+        fields.push(stage4_field(
+            field_id,
+            name,
+            "veyra.cap.stellar_structure/1",
+            "interior",
+            semantic,
+            dtype,
+            scale,
+            "0",
+            Some(unit),
+            "linear",
+            "mean",
+            4,
+            "critical",
+            None,
+            Some(json!({"group":"Stellar structure","label":label,"legend":"continuous"})),
+        ));
+        let dtype_value = if dtype == "u16" { DType::U16 } else { DType::U32 };
+        let raw_values = (0..16_u64)
+            .map(|shell| match local_id {
+                1 => 10_000 + shell as i64 * 100,
+                2 => 100_000 + shell as i64 * 2_000,
+                3 => 1_000_000 + shell as i64 * 100_000,
+                _ => 7_000 - shell as i64 * 100,
+            })
+            .collect();
+        let (index, field_blobs) =
+            radial_pyramid_index(field_id, dtype_value, 2, 4, "mean", None, raw_values)?;
+        indexes.push(index);
+        blobs.extend(field_blobs);
+    }
+    build_stage4_artifact(
+        path,
+        "cb7-star1d",
+        fields,
+        vec![json!({"id":"veyra.cap.stellar_structure/1","params":{"domain":"interior"}})],
+        vec![
+            json!({"id":"interior","topology":"veyra.topo.radial_1d/1","frame":"body_fixed","vertical":{"kind":"radius","extent_m":"10"},"tile_log2":2,"max_level":4}),
+        ],
+        json!({"kind":"radial_profile_sphere","extent_m":"10"}),
+        vec![json!({"id":"photosphere","kind":"sphere","radius_m":"10"})],
+        vec![],
+        indexes,
+        blobs,
+        json!({"class":"star","fixture":"radial stellar interior"}),
+    )?;
+    Ok(())
+}
+
+fn generate_cb8(path: &Path) -> Result<(), ConformanceError> {
+    let radius_id = FieldId::new(0x0100, 1);
+    let material_id = FieldId::new(0x0105, 1);
+    let thermal_id = FieldId::new(0x0106, 1);
+    let mut fields = vec![
+        stage4_field(
+            radius_id,
+            "figure.radius_m",
+            "veyra.cap.solid_surface/1",
+            "surface",
+            "scalar.distance",
+            "u32",
+            "1",
+            "0",
+            Some("m"),
+            "bilinear",
+            "mean",
+            2,
+            "critical",
+            None,
+            Some(json!({"group":"Solid surface","label":"Radius","legend":"continuous"})),
+        ),
+        stage4_field(
+            material_id,
+            "surface_material.class",
+            "veyra.cap.surface_material/1",
+            "surface",
+            "category",
+            "u8",
+            "1",
+            "0",
+            None,
+            "nearest",
+            "mode_lowest_tiebreak",
+            2,
+            "critical",
+            Some(json!({"nodata":255,"vocab":"surface_material.class/1"})),
+            Some(
+                json!({"group":"Surface material","label":"Material class","legend":"vocab_counts"}),
+            ),
+        ),
+        stage4_field(
+            thermal_id,
+            "thermal_state.surface_temperature",
+            "veyra.cap.thermal_state/1",
+            "surface",
+            "scalar.temperature",
+            "i16",
+            "0.1",
+            "0",
+            Some("K"),
+            "bilinear",
+            "mean",
+            2,
+            "critical",
+            None,
+            Some(
+                json!({"group":"Thermal state","label":"Surface temperature","legend":"continuous"}),
+            ),
+        ),
+    ];
+    for field in &mut fields {
+        field["sampling"].as_object_mut().unwrap().remove("below_native");
+    }
+    let (radius_index, mut blobs) = dir_cube_index(radius_id, DType::U32, 2, 2, |face, i, j| {
+        (1000_u32 + u32::from(face) * 100 + i as u32 * 20 + j as u32 * 7).to_le_bytes().to_vec()
+    })?;
+    let (material_index, material_blobs) =
+        dir_cube_index(material_id, DType::U8, 2, 2, |face, i, j| {
+            vec![((face + i as u8 + j as u8) % 4) + 1]
+        })?;
+    let (thermal_index, thermal_blobs) =
+        dir_cube_index(thermal_id, DType::I16, 2, 2, |face, i, j| {
+            (2500_i16 + i as i16 * 15 + j as i16 * 7 + i16::from(face) * 10).to_le_bytes().to_vec()
+        })?;
+    blobs.extend(material_blobs);
+    blobs.extend(thermal_blobs);
+    let vocab = json!({"schema":"veyra.vocab/1","id":"surface_material.class/1","values":[
+        {"id":1,"label":"Rock A"},{"id":2,"label":"Rock B"},{"id":3,"label":"Rock C"},{"id":4,"label":"Rock D"}
+    ]});
+    build_stage4_artifact(
+        path,
+        "cb8-rock",
+        fields,
+        vec![
+            json!({"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}}),
+            json!({"id":"veyra.cap.surface_material/1","params":{"domain":"surface"}}),
+            json!({"id":"veyra.cap.thermal_state/1","params":{"domain":"surface"}}),
+        ],
+        vec![dir_cube_domain_2()],
+        json!({"kind":"star_convex_radial","radius_field":"figure.radius_m"}),
+        vec![json!({"id":"figure_surface","kind":"figure_surface"})],
+        vec![(
+            "surface_material.class/1".to_owned(),
+            "vocab/surface_material.class.json".to_owned(),
+            vocab,
+        )],
+        vec![radius_index, material_index, thermal_index],
+        blobs,
+        json!({"class":"irregular_rock","fixture":"star-convex non-spherical surface"}),
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage4_field(
+    id: FieldId,
+    name: &str,
+    capability: &str,
+    domain: &str,
+    semantic: &str,
+    dtype: &str,
+    scale: &str,
+    offset: &str,
+    unit: Option<&str>,
+    interpolation: &str,
+    downsample: &str,
+    native_level: u8,
+    compat: &str,
+    storage_extra: Option<Value>,
+    display: Option<Value>,
+) -> Value {
+    let mut storage = json!({"dtype":dtype,"scale":scale,"offset":offset});
+    if let Some(extra) = storage_extra.and_then(|value| value.as_object().cloned()) {
+        let object = storage.as_object_mut().expect("storage object");
+        object.extend(extra);
+    }
+    let mut field = json!({
+        "id":id.to_string(),"name":name,"capability":capability,"domain":domain,
+        "semantic":semantic,"persistence":"invariant","storage":storage,
+        "native_level":native_level,"temporal":{"kind":"static"},
+        "sampling":{"interp":interpolation,"below_native":"pyramid"},
+        "downsample":downsample,"compat":compat
+    });
+    let object = field.as_object_mut().expect("field object");
+    if let Some(unit) = unit {
+        object.insert("unit".to_owned(), json!(unit));
+    }
+    if let Some(display) = display {
+        object.insert("display".to_owned(), display);
+    }
+    field
+}
+
+fn dir_cube_index(
+    field_id: FieldId,
+    dtype: DType,
+    tile_log2: u8,
+    level: u8,
+    mut pixel: impl FnMut(u8, u64, u64) -> Vec<u8>,
+) -> Result<(IndexBlob, Vec<Vec<u8>>), ConformanceError> {
+    dir_cube_sliced_index(field_id, dtype, tile_log2, level, 1, |face, i, j, _| pixel(face, i, j))
+}
+
+fn dir_cube_sliced_index(
+    field_id: FieldId,
+    dtype: DType,
+    tile_log2: u8,
+    level: u8,
+    slices: u16,
+    mut pixel: impl FnMut(u8, u64, u64, u16) -> Vec<u8>,
+) -> Result<(IndexBlob, Vec<Vec<u8>>), ConformanceError> {
+    let edge = 1_u64 << level.min(tile_log2);
+    let mut entries = Vec::new();
+    let mut blobs = Vec::new();
+    for face in 0..6_u8 {
+        let mut payload = Vec::new();
+        for slice in 0..slices {
+            for j in 0..edge {
+                for i in 0..edge {
+                    payload.extend(pixel(face, i, j, slice));
+                }
+            }
+        }
+        let blob = CanonicalBlob::new(
+            BlobKind::RasterTile,
+            dtype,
+            u16::try_from(edge).map_err(|_| ConformanceError::Assertion("cube tile width"))?,
+            u16::try_from(edge).map_err(|_| ConformanceError::Assertion("cube tile height"))?,
+            slices,
+            payload,
+        )
+        .map_err(|_| ConformanceError::Assertion("cube raster blob"))?;
+        let canonical = blob.encode();
+        let blob_id = hash::hash(&canonical);
+        let cell = DirCube::key(face, 0, 0, level)
+            .map_err(|_| ConformanceError::Assertion("cube index tile cell"))?;
+        let tile = DirCube
+            .tile_key(cell, tile_log2)
+            .map_err(|_| ConformanceError::Assertion("cube index tile key"))?;
+        entries.push(IndexEntry {
+            level: tile.level,
+            key: tile.address.0,
+            value: IndexValue::Blob(blob_id),
+        });
+        blobs.push(canonical);
+    }
+    Ok((
+        IndexBlob { field_id: field_id.0, topology: TopologyTag::DirCube, tile_log2, entries },
+        blobs,
+    ))
+}
+
+fn dir_cube_pyramid_index(
+    field_id: FieldId,
+    dtype: DType,
+    tile_log2: u8,
+    native_level: u8,
+    operator: &str,
+    nodata: Option<i64>,
+    pixel: impl FnMut(u8, u64, u64) -> Vec<u8>,
+) -> Result<(IndexBlob, Vec<Vec<u8>>), ConformanceError> {
+    let (_, native_blobs) = dir_cube_index(field_id, dtype, tile_log2, native_level, pixel)?;
+    let mut entries = Vec::new();
+    let mut blobs = Vec::new();
+    for face in 0..6_u8 {
+        let mut canonical = native_blobs[usize::from(face)].clone();
+        let mut level = native_level;
+        loop {
+            let decoded = CanonicalBlob::decode(&canonical)
+                .map_err(|_| ConformanceError::Assertion("pyramid input raster"))?;
+            let cell = DirCube::key(face, 0, 0, level)
+                .map_err(|_| ConformanceError::Assertion("pyramid cell"))?;
+            let tile = DirCube
+                .tile_key(cell, tile_log2)
+                .map_err(|_| ConformanceError::Assertion("pyramid tile key"))?;
+            let hash = hash::hash(&canonical);
+            entries.push(IndexEntry { level, key: tile.address.0, value: IndexValue::Blob(hash) });
+            blobs.push(canonical.clone());
+            if level == 0 {
+                break;
+            }
+            let parent = veyra_writer::PyramidBuilder::downsample_tile(
+                TopologyTag::DirCube,
+                dtype,
+                operator,
+                nodata,
+                &[decoded],
+            )
+            .map_err(ConformanceError::Writer)?;
+            canonical = parent.encode();
+            level -= 1;
+        }
+    }
+    entries.sort_by_key(|entry| (entry.level, entry.key));
+    Ok((
+        IndexBlob { field_id: field_id.0, topology: TopologyTag::DirCube, tile_log2, entries },
+        blobs,
+    ))
+}
+
+fn radial_pyramid_index(
+    field_id: FieldId,
+    dtype: DType,
+    tile_log2: u8,
+    native_level: u8,
+    operator: &str,
+    nodata: Option<i64>,
+    native_values: Vec<i64>,
+) -> Result<(IndexBlob, Vec<Vec<u8>>), ConformanceError> {
+    let native_count = 1_usize << native_level;
+    if native_values.len() != native_count {
+        return Err(ConformanceError::Assertion("radial pyramid native value count"));
+    }
+    let mut levels: Vec<Vec<i64>> = vec![Vec::new(); usize::from(native_level) + 1];
+    levels[usize::from(native_level)] = native_values;
+    for level in (1..=native_level).rev() {
+        let children = &levels[usize::from(level)];
+        let (pairs, remainder) = children.as_chunks::<2>();
+        if !remainder.is_empty() {
+            return Err(ConformanceError::Assertion("radial pyramid child pairs"));
+        }
+        let mut parents = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            parents.push(
+                veyra_writer::PyramidBuilder::reduce_group(dtype, operator, nodata, pair)
+                    .map_err(ConformanceError::Writer)?,
+            );
+        }
+        levels[usize::from(level - 1)] = parents;
+    }
+    let mut entries = Vec::new();
+    let mut blobs = Vec::new();
+    for level in 0..=native_level {
+        let count = 1_u64 << level;
+        let edge = 1_u64 << level.min(tile_log2);
+        for start in (0..count).step_by(usize::try_from(edge).unwrap()) {
+            let mut payload = Vec::new();
+            for raw in &levels[usize::from(level)][start as usize..(start + edge) as usize] {
+                payload.extend(encode_integer_pixel(dtype, *raw)?);
+            }
+            let blob = CanonicalBlob::new(
+                BlobKind::RasterTile,
+                dtype,
+                u16::try_from(edge)
+                    .map_err(|_| ConformanceError::Assertion("radial tile width"))?,
+                1,
+                1,
+                payload,
+            )
+            .map_err(|_| ConformanceError::Assertion("radial raster blob"))?;
+            let canonical = blob.encode();
+            let blob_id = hash::hash(&canonical);
+            let cell = Radial1d::key(level, start)
+                .map_err(|_| ConformanceError::Assertion("radial index tile cell"))?;
+            let tile = Radial1d::default()
+                .tile_key(cell, tile_log2)
+                .map_err(|_| ConformanceError::Assertion("radial index tile key"))?;
+            entries.push(IndexEntry {
+                level: tile.level,
+                key: tile.address.0,
+                value: IndexValue::Blob(blob_id),
+            });
+            blobs.push(canonical);
+        }
+    }
+    entries.sort_by_key(|entry| (entry.level, entry.key));
+    Ok((
+        IndexBlob { field_id: field_id.0, topology: TopologyTag::Radial1d, tile_log2, entries },
+        blobs,
+    ))
+}
+
+fn encode_integer_pixel(dtype: DType, value: i64) -> Result<Vec<u8>, ConformanceError> {
+    match dtype {
+        DType::U8 => u8::try_from(value)
+            .map(|value| vec![value])
+            .map_err(|_| ConformanceError::Assertion("radial u8 pyramid range")),
+        DType::I8 => i8::try_from(value)
+            .map(|value| vec![value as u8])
+            .map_err(|_| ConformanceError::Assertion("radial i8 pyramid range")),
+        DType::U16 => u16::try_from(value)
+            .map(|value| value.to_le_bytes().to_vec())
+            .map_err(|_| ConformanceError::Assertion("radial u16 pyramid range")),
+        DType::I16 => i16::try_from(value)
+            .map(|value| value.to_le_bytes().to_vec())
+            .map_err(|_| ConformanceError::Assertion("radial i16 pyramid range")),
+        DType::U32 => u32::try_from(value)
+            .map(|value| value.to_le_bytes().to_vec())
+            .map_err(|_| ConformanceError::Assertion("radial u32 pyramid range")),
+        DType::I32 => i32::try_from(value)
+            .map(|value| value.to_le_bytes().to_vec())
+            .map_err(|_| ConformanceError::Assertion("radial i32 pyramid range")),
+        DType::F32 | DType::Raw => Err(ConformanceError::Assertion("radial pyramid dtype")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_stage4_artifact(
+    path: &Path,
+    fixture_name: &str,
+    fields: Vec<Value>,
+    capabilities: Vec<Value>,
+    domains: Vec<Value>,
+    figure: Value,
+    reference_surfaces: Vec<Value>,
+    vocabularies: Vec<(String, String, Value)>,
+    indexes: Vec<IndexBlob>,
+    blobs: Vec<Vec<u8>>,
+    classification: Value,
+) -> Result<Hash32, ConformanceError> {
+    let mut writer = ArtifactWriter::new(path).map_err(ConformanceError::Writer)?;
+    let registry = json!({"schema":"veyra.field_registry/1","fields":fields});
+    let registry_hash = writer
+        .write_json_section("registry/fields.json", &pretty(&registry)?)
+        .map_err(ConformanceError::Writer)?;
+    let descriptor_hash = writer
+        .write_json_section(
+            "dynamics/descriptor.json",
+            &pretty(&json!({"schema":"veyra.dynamics_descriptor/1","type":"opaque-v1"}))?,
+        )
+        .map_err(ConformanceError::Writer)?;
+    let origin_hash = writer
+        .write_json_section(
+            "dynamics/origin.json",
+            &pretty(&json!({"schema":"veyra.dynamics_origin/1","epoch":"0","state":{}}))?,
+        )
+        .map_err(ConformanceError::Writer)?;
+    let mut vocab_refs = Vec::new();
+    for (name, section_path, document) in vocabularies {
+        let section_hash = writer
+            .write_json_section(&section_path, &pretty(&document)?)
+            .map_err(ConformanceError::Writer)?;
+        vocab_refs.push(json!({"name":name,"path":section_path,"hash":section_hash.to_string()}));
+    }
+    for blob in blobs {
+        writer.write_blob(&blob).map_err(ConformanceError::Writer)?;
+    }
+    let mut index_refs = serde_json::Map::new();
+    for index in indexes {
+        let field_id = FieldId(index.field_id);
+        let index_hash = writer.write_index(field_id, &index).map_err(ConformanceError::Writer)?;
+        index_refs.insert(field_id.to_string(), Value::String(index_hash.to_string()));
+    }
+    let mut required_features = std::collections::BTreeSet::from([
+        "veyra.body/1".to_owned(),
+        "veyra.canon.jcs/1".to_owned(),
+        "veyra.codec.zstd-shuffle2/1".to_owned(),
+    ]);
+    for domain in &domains {
+        if let Some(topology) = domain.get("topology").and_then(Value::as_str) {
+            required_features.insert(topology.to_owned());
+        }
+    }
+    for capability in &capabilities {
+        if let Some(id) = capability.get("id").and_then(Value::as_str)
+            && id != FIXTURE_CAPABILITY
+        {
+            required_features.insert(id.to_owned());
+        }
+    }
+    let object_id = ObjectId::derive(
+        UniverseId::fixture_sentinel(),
+        &ObjectAddress::Fixture { name: fixture_name.to_owned() },
+    )
+    .map_err(ConformanceError::Id)?;
+    let body = json!({
+        "schema":"veyra.body/1","format_version":{"major":1,"minor":0},
+        "required_features":required_features.into_iter().collect::<Vec<_>>(),
+        "identity":{"object_id":object_id.to_string(),"origin":{"kind":"fixture","name":fixture_name}},
+        "classification":classification,"physical":{"gm_m3_s2":"1","gravity_model":"point_mass"},
+        "figure":figure,
+        "frames":{"body_fixed":{"axes":"+Z is the positive rotation pole; +X is the prime meridian; right-handed","rotation":{"kind":"uniform","period_s":"86400","epoch":"0","orientation_q_at_epoch":["1","0","0","0"],"relative_to":"universe_inertial"}}},
+        "reference_surfaces":reference_surfaces,
+        "dynamics":{"descriptor":{"path":"dynamics/descriptor.json","hash":descriptor_hash.to_string()},"origin_keyframe":{"path":"dynamics/origin.json","hash":origin_hash.to_string()}},
+        "capabilities":capabilities,"domains":domains,"codec":"zstd+shuffle2",
+        "sections":{"registry":{"path":"registry/fields.json","hash":registry_hash.to_string()},"vocab":vocab_refs},
+        "indexes":index_refs
+    });
+    let baseline = writer.write_body_json(&pretty(&body)?).map_err(ConformanceError::Writer)?;
+    let reopened = open_directory(path).map_err(ConformanceError::Writer)?;
+    if reopened.baseline_id() != baseline {
+        return Err(ConformanceError::Assertion("Stage 4 artifact did not round trip"));
+    }
+    Ok(baseline)
+}
+
+fn dir_cube_domain_2() -> Value {
+    json!({"id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed","vertical":{"kind":"none"},"tile_log2":2,"max_level":2})
+}
+
+fn stage4_queries() -> Vec<Value> {
+    let cell = |face, i, j| format_key(DirCube::key(face, i, j, 2).expect("Stage 4 query cell").0);
+    let cube_tile = DirCube
+        .tile_key(DirCube::key(0, 0, 0, 2).expect("Stage 4 geometry cell"), 2)
+        .expect("Stage 4 geometry tile");
+    let face_five_tile = DirCube
+        .tile_key(DirCube::key(5, 0, 0, 2).expect("Stage 4 face cell"), 2)
+        .expect("Stage 4 face tile");
+    let radial_tile = Radial1d::default()
+        .tile_key(Radial1d::key(4, 0).expect("Stage 4 radial cell"), 2)
+        .expect("Stage 4 radial tile");
+    let mut queries = vec![
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0001","position":{"kind":"cell","domain":"surface","key":cell(0,1,1)},"level":2,"time":"static"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0001","position":{"kind":"direction","xyz":[1,1,0]},"level":2,"time":"static"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0001","position":{"kind":"direction","xyz":[1,1,1]},"level":2,"time":"static"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0002","position":{"kind":"cell","domain":"surface","key":cell(5,0,0)},"level":2,"time":"static"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0002","position":{"kind":"cell","domain":"surface","key":cell(0,0,1)},"level":3,"time":"static"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0003","position":{"kind":"cell","domain":"surface","key":cell(0,1,1)},"level":3,"time":"slice:0"}),
+        json!({"fixture":"cb2-categories","op":"sample","field":"0x01050001","position":{"kind":"cell","domain":"surface","key":cell(0,0,0)},"level":2,"time":"static"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0003","position":{"kind":"cell","domain":"surface","key":cell(0,1,1)},"level":2,"time":"mean"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0003","position":{"kind":"cell","domain":"surface","key":cell(0,1,1)},"level":2,"time":"phase:0.5"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0003","position":{"kind":"cell","domain":"surface","key":cell(0,1,1)},"level":2,"time":"slice:2"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0003","position":{"kind":"cell","domain":"surface","key":cell(0,1,1)},"level":2,"time":"min"}),
+        json!({"fixture":"cb1-seams","op":"sample","field":"0x7ffe0003","position":{"kind":"cell","domain":"surface","key":cell(0,1,1)},"level":2,"time":"max"}),
+        json!({"fixture":"cb1-seams","op":"tile","field":"0x7ffe0003","key":{"level":2,"address":format_key(DirCube::key(0,0,0,0).unwrap().0)},"time":"slice:1","view":"raw","halo":1}),
+        json!({"fixture":"cb1-seams","op":"tile","field":"0x7ffe0001","key":{"level":face_five_tile.level,"address":format_key(face_five_tile.address.0)},"time":"static","view":"derived:topology.cube_face","halo":0}),
+        json!({"fixture":"cb1-seams","op":"tile","field":"0x7ffe0001","key":{"level":cube_tile.level,"address":format_key(cube_tile.address.0)},"time":"static","view":"derived:topology.tile_level","halo":0}),
+        json!({"fixture":"cb1-seams","op":"tile","field":"0x7ffe0001","key":{"level":cube_tile.level,"address":format_key(cube_tile.address.0)},"time":"static","view":"derived:topology.axial_latitude","halo":0}),
+        json!({"fixture":"cb7-star1d","op":"tile","field":"0x01300001","key":{"level":radial_tile.level,"address":format_key(radial_tile.address.0)},"time":"static","view":"derived:topology.radial_profile","halo":0}),
+        json!({"fixture":"cb2-categories","op":"sample","field":"0x01050001","position":{"kind":"cell","domain":"surface","key":cell(0,0,0)},"level":2,"time":"static"}),
+        json!({"fixture":"cb2-categories","op":"sample","field":"0x01050001","position":{"kind":"cell","domain":"surface","key":cell(0,0,1)},"level":2,"time":"static"}),
+        json!({"fixture":"cb2-categories","op":"sample","field":"0x01050001","position":{"kind":"cell","domain":"surface","key":cell(0,0,0)},"level":1,"time":"static"}),
+        json!({"fixture":"cb2-categories","op":"histogram","field":"0x01050001","bins":4,"level":2,"time":"static"}),
+        json!({"fixture":"cb1-seams","op":"stats","field":"0x7ffe0001","level":2,"time":"static"}),
+        json!({"fixture":"cb7-star1d","op":"sample","field":"0x01300001","position":{"kind":"radius","r_m":5},"level":4,"time":"static"}),
+        json!({"fixture":"cb7-star1d","op":"sample","field":"0x01300001","position":{"kind":"radius","r_m":5},"level":2,"time":"static"}),
+        json!({"fixture":"cb7-star1d","op":"stats","field":"0x01300001","level":"native","time":"static"}),
+        json!({"fixture":"cb7-star1d","op":"views"}),
+        json!({"fixture":"cb8-rock","op":"geometry","domain":"surface","tile":{"level":cube_tile.level,"address":format_key(cube_tile.address.0)},"grid_n":4}),
+        json!({"fixture":"cb8-rock","op":"views"}),
+        json!({"fixture":"cb9-minimal-void","op":"views"}),
+    ];
+    for face in 0..6_u8 {
+        for (s, t) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.0)] {
+            let direction =
+                DirCube.direction_at_face_st(face, s, t).expect("cube edge query direction");
+            queries.push(json!({
+                "fixture":"cb1-seams","op":"sample","field":"0x7ffe0001",
+                "position":{"kind":"direction","xyz":[direction.x(),direction.y(),direction.z()]},
+                "level":2,"time":"static"
+            }));
+        }
+    }
+    for x in [-1.0, 1.0] {
+        for y in [-1.0, 1.0] {
+            for z in [-1.0, 1.0] {
+                queries.push(json!({
+                    "fixture":"cb1-seams","op":"sample","field":"0x7ffe0001",
+                    "position":{"kind":"direction","xyz":[x,y,z]},
+                    "level":2,"time":"static"
+                }));
+            }
+        }
+    }
+    for face in 0..6_u8 {
+        for j in 0..6_u32 {
+            for i in 0..6_u32 {
+                let s = (f64::from(i) + 0.5) / 6.0;
+                let t = (f64::from(j) + 0.5) / 6.0;
+                let direction =
+                    DirCube.direction_at_face_st(face, s, t).expect("cube grid query direction");
+                queries.push(json!({
+                    "fixture":"cb1-seams","op":"sample","field":"0x7ffe0001",
+                    "position":{"kind":"direction","xyz":[direction.x(),direction.y(),direction.z()]},
+                    "level":2,"time":"static"
+                }));
+            }
+        }
+    }
+    queries
+}
+
+fn verify_stage4(world_root: &Path) -> Result<Vec<FixtureResult>, ConformanceError> {
+    let cb1 = open_directory(world_root.join("cb1-seams")).map_err(ConformanceError::Writer)?;
+    let scalar_field = FieldId::new(0x7ffe, 1);
+    for face in 0..6_u8 {
+        for i in 0..4_u64 {
+            for j in 0..4_u64 {
+                let key = DirCube::key(face, i, j, 2)
+                    .map_err(|_| ConformanceError::Assertion("cb1 cell key"))?;
+                let direction = DirCube
+                    .cell_center(key)
+                    .map_err(|_| ConformanceError::Assertion("cb1 cell center"))?;
+                let expected =
+                    f64::from((direction.x() + 2.0 * direction.y() + 3.0 * direction.z()) as f32);
+                let sample = cb1
+                    .sample(&veyra_core::sample::SampleQuery {
+                        field: scalar_field,
+                        pos: veyra_core::sample::Position::Cell {
+                            domain: "surface".to_owned(),
+                            key,
+                        },
+                        level: veyra_core::sample::LevelSel::Exact(2),
+                        time: veyra_core::sample::TimeSel::Static,
+                    })
+                    .map_err(|_| ConformanceError::Assertion("cb1 analytic center sample"))?;
+                if sample.value.is_none_or(|value| (value - expected).abs() > 1.0e-6) {
+                    return Err(ConformanceError::Assertion(
+                        "cb1 analytic sample differs from its stored function",
+                    ));
+                }
+            }
+        }
+    }
+    let mut edge_samples = 0;
+    for face in 0..6_u8 {
+        for (s, t) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.0)] {
+            let direction = DirCube
+                .direction_at_face_st(face, s, t)
+                .map_err(|_| ConformanceError::Assertion("cb1 edge direction"))?;
+            let sample = cb1
+                .sample(&veyra_core::sample::SampleQuery {
+                    field: scalar_field,
+                    pos: veyra_core::sample::Position::Direction(direction),
+                    level: veyra_core::sample::LevelSel::Exact(2),
+                    time: veyra_core::sample::TimeSel::Static,
+                })
+                .map_err(|_| ConformanceError::Assertion("cb1 edge sample"))?;
+            if sample.value.is_none_or(|value| !value.is_finite()) {
+                return Err(ConformanceError::Assertion("cb1 edge sample is not finite"));
+            }
+            edge_samples += 1;
+        }
+    }
+    for x in [-1.0, 1.0] {
+        for y in [-1.0, 1.0] {
+            for z in [-1.0, 1.0] {
+                let direction = veyra_core::spatial::Dir::new(x, y, z)
+                    .map_err(|_| ConformanceError::Assertion("cb1 corner direction"))?;
+                let sample = cb1
+                    .sample(&veyra_core::sample::SampleQuery {
+                        field: scalar_field,
+                        pos: veyra_core::sample::Position::Direction(direction),
+                        level: veyra_core::sample::LevelSel::Exact(2),
+                        time: veyra_core::sample::TimeSel::Static,
+                    })
+                    .map_err(|_| ConformanceError::Assertion("cb1 corner sample"))?;
+                if sample.value.is_none_or(|value| !value.is_finite()) {
+                    return Err(ConformanceError::Assertion("cb1 corner sample is not finite"));
+                }
+            }
+        }
+    }
+    let periodic_cell =
+        DirCube::key(0, 1, 1, 2).map_err(|_| ConformanceError::Assertion("cb1 periodic cell"))?;
+    for (time, expected, source) in [
+        (veyra_core::sample::TimeSel::Static, 20.0, veyra_core::sample::SampleSource::TimeReduced),
+        (veyra_core::sample::TimeSel::Mean, 20.0, veyra_core::sample::SampleSource::TimeReduced),
+        (veyra_core::sample::TimeSel::Phase(0.5), 20.0, veyra_core::sample::SampleSource::Stored),
+        (veyra_core::sample::TimeSel::Slice(2), 30.0, veyra_core::sample::SampleSource::Stored),
+        (veyra_core::sample::TimeSel::Min, 10.0, veyra_core::sample::SampleSource::TimeReduced),
+        (veyra_core::sample::TimeSel::Max, 30.0, veyra_core::sample::SampleSource::TimeReduced),
+    ] {
+        let sample = cb1
+            .sample(&veyra_core::sample::SampleQuery {
+                field: FieldId::new(0x7ffe, 3),
+                pos: veyra_core::sample::Position::Cell {
+                    domain: "surface".to_owned(),
+                    key: periodic_cell,
+                },
+                level: veyra_core::sample::LevelSel::Exact(2),
+                time,
+            })
+            .map_err(|_| ConformanceError::Assertion("cb1 periodic sample"))?;
+        if sample.value != Some(expected) || sample.source != source {
+            return Err(ConformanceError::Assertion("cb1 periodic selection or source reporting"));
+        }
+    }
+    let periodic_tile_key = DirCube.tile_key(DirCube::key(0, 0, 0, 2).unwrap(), 2).unwrap();
+    let raw_slice = cb1
+        .tile(&veyra_core::sample::TileRequest {
+            field: FieldId::new(0x7ffe, 3),
+            key: periodic_tile_key,
+            time: veyra_core::sample::TimeSel::Slice(0),
+            halo: 0,
+            view: veyra_core::sample::TileView::Raw,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb1 raw periodic tile"))?;
+    let reduced_tile = cb1
+        .tile(&veyra_core::sample::TileRequest {
+            field: FieldId::new(0x7ffe, 3),
+            key: periodic_tile_key,
+            time: veyra_core::sample::TimeSel::Mean,
+            halo: 0,
+            view: veyra_core::sample::TileView::TimeReduce,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb1 reduced periodic tile"))?;
+    if raw_slice
+        .values
+        .first()
+        .and_then(|value| *value)
+        .is_none_or(|value| (value - 10.0).abs() > 1.0e-12)
+        || reduced_tile
+            .values
+            .first()
+            .and_then(|value| *value)
+            .is_none_or(|value| (value - 20.0).abs() > 1.0e-12)
+        || !matches!(
+            cb1.tile(&veyra_core::sample::TileRequest {
+                field: FieldId::new(0x7ffe, 3),
+                key: periodic_tile_key,
+                time: veyra_core::sample::TimeSel::Static,
+                halo: 0,
+                view: veyra_core::sample::TileView::Raw,
+            }),
+            Err(veyra_core::sample::SampleError::UnsupportedSelection)
+        )
+    {
+        return Err(ConformanceError::Assertion("cb1 raw versus reduced tile time selection"));
+    }
+    for level in [veyra_core::sample::LevelSel::Exact(3), veyra_core::sample::LevelSel::Canonical] {
+        if !matches!(
+            cb1.sample(&veyra_core::sample::SampleQuery {
+                field: scalar_field,
+                pos: veyra_core::sample::Position::Direction(
+                    veyra_core::spatial::Dir::new(1.0, 0.0, 0.0).unwrap(),
+                ),
+                level,
+                time: veyra_core::sample::TimeSel::Static,
+            }),
+            Err(veyra_core::sample::SampleError::UnsupportedRefinement)
+        ) {
+            return Err(ConformanceError::Assertion(
+                "unimplemented refinement must fail explicitly",
+            ));
+        }
+    }
+    let stats = cb1
+        .stats(
+            scalar_field,
+            veyra_core::sample::LevelSel::Exact(2),
+            veyra_core::sample::TimeSel::Static,
+        )
+        .map_err(|_| ConformanceError::Assertion("cb1 weighted statistics"))?;
+    if (stats.valid_measure - 4.0 * core::f64::consts::PI).abs() > 1.0e-12 {
+        return Err(ConformanceError::Assertion("cb1 solid-angle weights do not sum to four pi"));
+    }
+    let center_key =
+        DirCube::key(0, 1, 1, 2).map_err(|_| ConformanceError::Assertion("cb1 plan cell"))?;
+    let center_query = veyra_core::sample::SampleQuery {
+        field: scalar_field,
+        pos: veyra_core::sample::Position::Cell { domain: "surface".to_owned(), key: center_key },
+        level: veyra_core::sample::LevelSel::Exact(2),
+        time: veyra_core::sample::TimeSel::Static,
+    };
+    if !cb1
+        .plan(&center_query)
+        .map_err(|_| ConformanceError::Assertion("cb1 pure sample plan"))?
+        .is_empty()
+    {
+        return Err(ConformanceError::Assertion("fully loaded CB1 query still needs resources"));
+    }
+    verify_cb1_halos(&cb1, scalar_field)?;
+    let constant_sample = cb1
+        .sample(&veyra_core::sample::SampleQuery {
+            field: FieldId::new(0x7ffe, 2),
+            pos: veyra_core::sample::Position::Cell {
+                domain: "surface".to_owned(),
+                key: DirCube::key(5, 0, 0, 2).unwrap(),
+            },
+            level: veyra_core::sample::LevelSel::Exact(2),
+            time: veyra_core::sample::TimeSel::Static,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb1 constant sample"))?;
+    if constant_sample.source != veyra_core::sample::SampleSource::Const
+        || constant_sample.category != Some(2)
+    {
+        return Err(ConformanceError::Assertion("cb1 constant tile source reporting"));
+    }
+    let inherited = cb1
+        .sample(&veyra_core::sample::SampleQuery {
+            field: FieldId::new(0x7ffe, 2),
+            pos: veyra_core::sample::Position::Cell {
+                domain: "surface".to_owned(),
+                key: DirCube::key(0, 0, 1, 2).unwrap(),
+            },
+            level: veyra_core::sample::LevelSel::Exact(3),
+            time: veyra_core::sample::TimeSel::Static,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb1 inherited sample"))?;
+    if inherited.source != veyra_core::sample::SampleSource::Inherited || inherited.level_used != 2
+    {
+        return Err(ConformanceError::Assertion("cb1 inherited level/source reporting"));
+    }
+    let smoothed = cb1
+        .sample(&veyra_core::sample::SampleQuery {
+            field: FieldId::new(0x7ffe, 3),
+            pos: veyra_core::sample::Position::Cell {
+                domain: "surface".to_owned(),
+                key: DirCube::key(0, 1, 1, 2).unwrap(),
+            },
+            level: veyra_core::sample::LevelSel::Exact(3),
+            time: veyra_core::sample::TimeSel::Slice(0),
+        })
+        .map_err(|_| ConformanceError::Assertion("cb1 smooth-only sample"))?;
+    if smoothed.source != veyra_core::sample::SampleSource::Stored || smoothed.level_used != 2 {
+        return Err(ConformanceError::Assertion("cb1 smooth-only level/source reporting"));
+    }
+    let cb2 =
+        open_directory(world_root.join("cb2-categories")).map_err(ConformanceError::Writer)?;
+    if !cb2.fields().iter().any(|field| field.semantic == "category") {
+        return Err(ConformanceError::Assertion("cb2 category field is missing"));
+    }
+    let nodata_sample = cb2
+        .sample(&veyra_core::sample::SampleQuery {
+            field: FieldId::new(0x0105, 1),
+            pos: veyra_core::sample::Position::Cell {
+                domain: "surface".to_owned(),
+                key: DirCube::key(0, 0, 0, 2).unwrap(),
+            },
+            level: veyra_core::sample::LevelSel::Exact(2),
+            time: veyra_core::sample::TimeSel::Static,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb2 nodata sample"))?;
+    if nodata_sample.source != veyra_core::sample::SampleSource::Nodata
+        || nodata_sample.value.is_some()
+    {
+        return Err(ConformanceError::Assertion("cb2 nodata source reporting"));
+    }
+    let pyramid_sample = cb2
+        .sample(&veyra_core::sample::SampleQuery {
+            field: FieldId::new(0x0105, 1),
+            pos: veyra_core::sample::Position::Cell {
+                domain: "surface".to_owned(),
+                key: DirCube::key(0, 0, 0, 2).unwrap(),
+            },
+            level: veyra_core::sample::LevelSel::Exact(1),
+            time: veyra_core::sample::TimeSel::Static,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb2 stored pyramid sample"))?;
+    if pyramid_sample.source != veyra_core::sample::SampleSource::Pyramid
+        || pyramid_sample.category != Some(2)
+    {
+        return Err(ConformanceError::Assertion("cb2 below-native pyramid or tie handling"));
+    }
+    let category_histogram = cb2
+        .histogram(
+            FieldId::new(0x0105, 1),
+            4,
+            veyra_core::sample::LevelSel::Exact(2),
+            veyra_core::sample::TimeSel::Static,
+        )
+        .map_err(|_| ConformanceError::Assertion("cb2 weighted histogram"))?;
+    let histogram_weight: f64 = category_histogram.bins.iter().map(|bin| bin.weight).sum();
+    let histogram_cells: u64 = category_histogram.bins.iter().map(|bin| bin.cells).sum();
+    let mut expected_histogram_weight = 0.0;
+    let mut expected_histogram_cells = 0;
+    for face in 0..6_u8 {
+        for i in 0..4_u64 {
+            for j in 0..4_u64 {
+                if (face, i, j) == (0, 0, 0) {
+                    continue;
+                }
+                let key = DirCube::key(face, i, j, 2).unwrap();
+                expected_histogram_weight += DirCube.cell_measure(key).unwrap();
+                expected_histogram_cells += 1;
+            }
+        }
+    }
+    if histogram_cells != expected_histogram_cells
+        || (histogram_weight - expected_histogram_weight).abs() > 1.0e-12
+    {
+        return Err(ConformanceError::Assertion(
+            "cb2 histogram weights do not match valid cell measures",
+        ));
+    }
+    let sphere_tile = DirCube.tile_key(DirCube::key(0, 0, 0, 2).unwrap(), 2).unwrap();
+    let sphere_geometry = cb2
+        .domain_geometry("surface", sphere_tile, 2)
+        .map_err(|_| ConformanceError::Assertion("cb2 sphere geometry"))?;
+    if sphere_geometry.vertices_m.iter().any(|point| {
+        let radius_squared = point[0] * point[0] + point[1] * point[1] + point[2] * point[2];
+        (radius_squared - 1.0).abs() > 1.0e-12
+    }) {
+        return Err(ConformanceError::Assertion(
+            "cb2 sphere geometry does not preserve its declared radius",
+        ));
+    }
+    let cb7 = open_directory(world_root.join("cb7-star1d")).map_err(ConformanceError::Writer)?;
+    if cb7.figure().kind != "radial_profile_sphere"
+        || cb7.capabilities().iter().any(|capability| {
+            matches!(
+                capability.id.as_str(),
+                "veyra.cap.solid_surface/1"
+                    | "veyra.cap.topography/1"
+                    | "veyra.cap.tectonics/1"
+                    | "veyra.cap.ocean/1"
+                    | "veyra.cap.climate/1"
+            )
+        })
+        || cb7.domains().len() != 1
+        || cb7.domains()[0].topology != "veyra.topo.radial_1d/1"
+        || cb7
+            .reference_surfaces()
+            .iter()
+            .any(|surface| surface.get("kind").and_then(Value::as_str) == Some("figure_surface"))
+    {
+        return Err(ConformanceError::Assertion(
+            "cb7 must be a radial stellar body without a solid surface",
+        ));
+    }
+    let stellar_sample = cb7
+        .sample(&veyra_core::sample::SampleQuery {
+            field: FieldId::new(0x0130, 1),
+            pos: veyra_core::sample::Position::Radial { r_m: 5.0 },
+            level: veyra_core::sample::LevelSel::Native,
+            time: veyra_core::sample::TimeSel::Static,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb7 radial interior sample"))?;
+    if stellar_sample.value != Some(107.5) {
+        return Err(ConformanceError::Assertion(
+            "cb7 radial sample does not match its analytic profile",
+        ));
+    }
+    let stellar_pyramid = cb7
+        .sample(&veyra_core::sample::SampleQuery {
+            field: FieldId::new(0x0130, 1),
+            pos: veyra_core::sample::Position::Radial { r_m: 5.0 },
+            level: veyra_core::sample::LevelSel::Exact(2),
+            time: veyra_core::sample::TimeSel::Static,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb7 radial pyramid sample"))?;
+    if stellar_pyramid.source != veyra_core::sample::SampleSource::Pyramid
+        || stellar_pyramid.level_used != 2
+        || stellar_pyramid.value.is_none_or(|value| (value - 107.5).abs() > 1.0e-12)
+    {
+        return Err(ConformanceError::Assertion("cb7 radial pyramid source or value"));
+    }
+    let radial_stats = cb7
+        .stats(
+            FieldId::new(0x0130, 1),
+            veyra_core::sample::LevelSel::Native,
+            veyra_core::sample::TimeSel::Static,
+        )
+        .map_err(|_| ConformanceError::Assertion("cb7 volume-weighted statistics"))?;
+    let sphere_volume = 4.0 * core::f64::consts::PI / 3.0 * 10.0 * 10.0 * 10.0;
+    if (radial_stats.valid_measure - sphere_volume).abs() > sphere_volume * 1.0e-12 {
+        return Err(ConformanceError::Assertion(
+            "cb7 shell weights do not sum to the declared volume",
+        ));
+    }
+    verify_cb7_halo(&cb7)?;
+    if !cb7.views().iter().any(|view| view.group == "Stellar structure")
+        || cb7.views().iter().any(|view| {
+            matches!(view.group.as_str(), "Topography" | "Tectonics" | "Ocean" | "Climate")
+        })
+    {
+        return Err(ConformanceError::Assertion("cb7 view catalog is not capability driven"));
+    }
+    let cb8 = open_directory(world_root.join("cb8-rock")).map_err(ConformanceError::Writer)?;
+    if cb8.figure().kind != "star_convex_radial"
+        || cb8.capabilities().iter().any(|capability| {
+            matches!(
+                capability.id.as_str(),
+                "veyra.cap.topography/1"
+                    | "veyra.cap.tectonics/1"
+                    | "veyra.cap.ocean/1"
+                    | "veyra.cap.climate/1"
+            )
+        })
+        || cb8.root_value()["reference_surfaces"]
+            .as_array()
+            .is_none_or(|surfaces| surfaces.len() != 1)
+        || cb8
+            .section("dynamics/descriptor.json")
+            .is_none_or(|descriptor| descriptor.get("orbit").is_some())
+    {
+        return Err(ConformanceError::Assertion(
+            "cb8 must remain a non-spherical body without ocean or climate",
+        ));
+    }
+    let rock_tile = DirCube.tile_key(DirCube::key(0, 0, 0, 2).unwrap(), 2).unwrap();
+    let geometry = cb8
+        .domain_geometry("surface", rock_tile, 4)
+        .map_err(|_| ConformanceError::Assertion("cb8 radius-field geometry"))?;
+    let radius_squared: Vec<f64> = geometry
+        .vertices_m
+        .iter()
+        .map(|point| point[0] * point[0] + point[1] * point[1] + point[2] * point[2])
+        .collect();
+    let minimum = radius_squared.iter().copied().reduce(f64::min).unwrap_or(0.0);
+    let maximum = radius_squared.iter().copied().reduce(f64::max).unwrap_or(0.0);
+    if maximum <= minimum {
+        return Err(ConformanceError::Assertion(
+            "cb8 geometry must use a non-spherical radius field",
+        ));
+    }
+    let inspection = cb8
+        .inspect(
+            &veyra_core::sample::Position::Direction(
+                veyra_core::spatial::Dir::new(1.0, 0.0, 0.0).unwrap(),
+            ),
+            veyra_core::sample::LevelSel::Native,
+            veyra_core::sample::TimeSel::Static,
+        )
+        .map_err(|_| ConformanceError::Assertion("cb8 point inspection"))?;
+    if inspection.fields.len() != 3
+        || !inspection.fields.iter().any(|field| {
+            field.name == "figure.radius_m"
+                && field.sample.as_ref().is_some_and(|sample| sample.value.is_some())
+        })
+    {
+        return Err(ConformanceError::Assertion("cb8 inspection did not report its stored fields"));
+    }
+    let cb9 =
+        open_directory(world_root.join("cb9-minimal-void")).map_err(ConformanceError::Writer)?;
+    if cb9
+        .views()
+        .iter()
+        .any(|view| matches!(view.group.as_str(), "Topography" | "Tectonics" | "Ocean" | "Climate"))
+    {
+        return Err(ConformanceError::Assertion("cb9 must not declare terrestrial view groups"));
+    }
+    if !cb9.views().is_empty() {
+        return Err(ConformanceError::Assertion("cb9 zero-capability body must not have views"));
+    }
+    let corpus_root =
+        world_root.parent().ok_or(ConformanceError::Assertion("conformance world root parent"))?;
+    let actual = run_stage4_queries(world_root, &corpus_root.join("queries/stage4.jsonl"))?;
+    let expected = read_lines(&corpus_root.join("expected/stage4.jsonl"))?;
+    if actual != expected {
+        return Err(ConformanceError::Assertion(
+            "Stage 4 query output differs from committed expected JSONL",
+        ));
+    }
+    Ok(vec![
+        FixtureResult {
+            name: "cb1-seams".to_owned(),
+            evidence: format!(
+                "analytic cells and {edge_samples} face-edge samples PASS; weighted measure=4pi"
+            ),
+        },
+        FixtureResult {
+            name: "cb2-categories".to_owned(),
+            evidence: "categorical and nodata raster verified".to_owned(),
+        },
+        FixtureResult {
+            name: "cb7-star1d".to_owned(),
+            evidence: format!(
+                "radial interior sample={} with no solid surface",
+                stellar_sample.value.unwrap()
+            ),
+        },
+        FixtureResult {
+            name: "cb8-rock".to_owned(),
+            evidence: format!(
+                "radius-field geometry varies from {:.0} to {:.0} m²",
+                minimum, maximum
+            ),
+        },
+        FixtureResult {
+            name: "cb9-minimal-void".to_owned(),
+            evidence: "zero-field view catalog remains capability-free".to_owned(),
+        },
+    ])
+}
+
+fn verify_cb1_halos(body: &veyra_core::io::Body, field: FieldId) -> Result<(), ConformanceError> {
+    use veyra_core::spatial::FaceEdge;
+    let edges = [FaceEdge::UMinus, FaceEdge::UPlus, FaceEdge::VMinus, FaceEdge::VPlus];
+    for face in 0..6_u8 {
+        let tile_key = DirCube.tile_key(DirCube::key(face, 0, 0, 2).unwrap(), 2).unwrap();
+        let tile = body
+            .tile(&veyra_core::sample::TileRequest {
+                field,
+                key: tile_key,
+                time: veyra_core::sample::TimeSel::Static,
+                halo: 1,
+                view: veyra_core::sample::TileView::Raw,
+            })
+            .map_err(|_| ConformanceError::Assertion("cb1 halo tile"))?;
+        if (tile.dim_i, tile.dim_j) != (6, 6) || tile.values.len() != 36 {
+            return Err(ConformanceError::Assertion("cb1 halo dimensions"));
+        }
+        for edge in edges {
+            for along in 0..4_u64 {
+                let (source, target_i, target_j) = match edge {
+                    FaceEdge::UMinus => {
+                        (DirCube::key(face, 0, along, 2).unwrap(), 0_usize, along as usize + 1)
+                    }
+                    FaceEdge::UPlus => {
+                        (DirCube::key(face, 3, along, 2).unwrap(), 5_usize, along as usize + 1)
+                    }
+                    FaceEdge::VMinus => {
+                        (DirCube::key(face, along, 0, 2).unwrap(), along as usize + 1, 0_usize)
+                    }
+                    FaceEdge::VPlus => {
+                        (DirCube::key(face, along, 3, 2).unwrap(), along as usize + 1, 5_usize)
+                    }
+                };
+                let adjacent = DirCube.neighbor(source, edge).unwrap();
+                let expected = sample_cell_value(body, field, "surface", adjacent, 2)?;
+                let actual = tile.values[target_j * usize::from(tile.dim_i) + target_i]
+                    .ok_or(ConformanceError::Assertion("cb1 halo cell is nodata"))?;
+                if (actual - expected).abs() > 1.0e-6 {
+                    return Err(ConformanceError::Assertion("cb1 cross-face halo value"));
+                }
+            }
+        }
+        for (i, j, output_i, output_j) in
+            [(0, 0, 0_usize, 0_usize), (3, 0, 5, 0), (0, 3, 0, 5), (3, 3, 5, 5)]
+        {
+            let corner = DirCube::key(face, i, j, 2).unwrap();
+            let adjacent = DirCube.corner_stencil(corner).unwrap().unwrap();
+            let left = sample_cell_value(body, field, "surface", adjacent[0], 2)?;
+            let right = sample_cell_value(body, field, "surface", adjacent[1], 2)?;
+            let expected = (left + right) / 2.0;
+            let actual = tile.values[output_j * usize::from(tile.dim_i) + output_i]
+                .ok_or(ConformanceError::Assertion("cb1 corner halo is nodata"))?;
+            if (actual - expected).abs() > 1.0e-6 {
+                return Err(ConformanceError::Assertion("cb1 cube-corner halo rule"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_cb7_halo(body: &veyra_core::io::Body) -> Result<(), ConformanceError> {
+    let field = FieldId::new(0x0130, 1);
+    let first = Radial1d::default().tile_key(Radial1d::key(4, 0).unwrap(), 2).unwrap();
+    let first_tile = body
+        .tile(&veyra_core::sample::TileRequest {
+            field,
+            key: first,
+            time: veyra_core::sample::TimeSel::Static,
+            halo: 1,
+            view: veyra_core::sample::TileView::Raw,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb7 radial halo tile"))?;
+    let start = sample_cell_value(body, field, "interior", Radial1d::key(4, 0).unwrap(), 4)?;
+    let next_tile = sample_cell_value(body, field, "interior", Radial1d::key(4, 4).unwrap(), 4)?;
+    if first_tile.dim_i != 6
+        || first_tile.values[0] != Some(start)
+        || first_tile.values[1] != Some(start)
+        || first_tile.values[5] != Some(next_tile)
+    {
+        return Err(ConformanceError::Assertion("cb7 radial halo clamping or neighbor"));
+    }
+    let last = Radial1d::default().tile_key(Radial1d::key(4, 12).unwrap(), 2).unwrap();
+    let last_tile = body
+        .tile(&veyra_core::sample::TileRequest {
+            field,
+            key: last,
+            time: veyra_core::sample::TimeSel::Static,
+            halo: 1,
+            view: veyra_core::sample::TileView::Raw,
+        })
+        .map_err(|_| ConformanceError::Assertion("cb7 final radial halo tile"))?;
+    let end = sample_cell_value(body, field, "interior", Radial1d::key(4, 15).unwrap(), 4)?;
+    if last_tile.values[4] != Some(end) || last_tile.values[5] != Some(end) {
+        return Err(ConformanceError::Assertion("cb7 radial endpoint halo clamp"));
+    }
+    Ok(())
+}
+
+fn sample_cell_value(
+    body: &veyra_core::io::Body,
+    field: FieldId,
+    domain: &str,
+    key: CellKey,
+    level: u8,
+) -> Result<f64, ConformanceError> {
+    body.sample(&veyra_core::sample::SampleQuery {
+        field,
+        pos: veyra_core::sample::Position::Cell { domain: domain.to_owned(), key },
+        level: veyra_core::sample::LevelSel::Exact(level),
+        time: veyra_core::sample::TimeSel::Static,
+    })
+    .map_err(|_| ConformanceError::Assertion("sample addressed conformance cell"))?
+    .value
+    .ok_or(ConformanceError::Assertion("sampled conformance cell is nodata"))
+}
+
+fn run_stage4_queries(
+    world_root: &Path,
+    query_path: &Path,
+) -> Result<Vec<String>, ConformanceError> {
+    let mut bodies = std::collections::BTreeMap::new();
+    let mut output = Vec::new();
+    for query in read_lines(query_path)? {
+        let value: Value = serde_json::from_str(&query)
+            .map_err(|_| ConformanceError::Assertion("Stage 4 query JSON"))?;
+        let fixture =
+            value["fixture"].as_str().ok_or(ConformanceError::Assertion("Stage 4 fixture name"))?;
+        if !bodies.contains_key(fixture) {
+            bodies.insert(
+                fixture.to_owned(),
+                open_directory(world_root.join(fixture)).map_err(ConformanceError::Writer)?,
+            );
+        }
+        let body = bodies.get(fixture).ok_or(ConformanceError::Assertion("Stage 4 body cache"))?;
+        let operation =
+            value["op"].as_str().ok_or(ConformanceError::Assertion("Stage 4 query operation"))?;
+        let result = match operation {
+            "sample" => {
+                let field_text =
+                    value["field"].as_str().ok_or(ConformanceError::Assertion("Stage 4 field"))?;
+                let field = FieldId::parse(field_text)
+                    .map_err(|_| ConformanceError::Assertion("Stage 4 field ID"))?;
+                let position = query_position(&value["position"])?;
+                let level = query_level(&value["level"])?;
+                let time = query_time(&value["time"])?;
+                let sample = body
+                    .sample(&veyra_core::sample::SampleQuery { field, pos: position, level, time })
+                    .map_err(|_| ConformanceError::Assertion("Stage 4 sample query"))?;
+                json!({"value_bits":sample.value.map(f64_bits),"raw":sample.raw.map(raw_json),"category":sample.category,"level_used":sample.level_used,"source":format!("{:?}",sample.source),"cell":format_key(sample.cell.0)})
+            }
+            "stats" => {
+                let field = query_field(&value["field"])?;
+                let stats = body
+                    .stats(field, query_level(&value["level"])?, query_time(&value["time"])?)
+                    .map_err(|_| ConformanceError::Assertion("Stage 4 stats query"))?;
+                json!({"cells":stats.cells,"nodata_cells":stats.nodata_cells,"valid_measure_bits":f64_bits(stats.valid_measure),"minimum_bits":stats.minimum.map(f64_bits),"maximum_bits":stats.maximum.map(f64_bits),"mean_bits":stats.mean.map(f64_bits)})
+            }
+            "histogram" => {
+                let bins = value["bins"]
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or(ConformanceError::Assertion("Stage 4 histogram bins"))?;
+                let histogram = body
+                    .histogram(
+                        query_field(&value["field"])?,
+                        bins,
+                        query_level(&value["level"])?,
+                        query_time(&value["time"])?,
+                    )
+                    .map_err(|_| ConformanceError::Assertion("Stage 4 histogram query"))?;
+                json!({"minimum_bits":histogram.minimum.map(f64_bits),"maximum_bits":histogram.maximum.map(f64_bits),"bins":histogram.bins.iter().map(|bin| json!({"lower_bits":f64_bits(bin.lower),"upper_bits":f64_bits(bin.upper),"weight_bits":f64_bits(bin.weight),"cells":bin.cells})).collect::<Vec<_>>()})
+            }
+            "tile" => {
+                let key_value = &value["key"];
+                let key = veyra_core::spatial::TileKey {
+                    level: u8::try_from(
+                        key_value["level"]
+                            .as_u64()
+                            .ok_or(ConformanceError::Assertion("tile query level"))?,
+                    )
+                    .map_err(|_| ConformanceError::Assertion("tile query level range"))?,
+                    address: CellKey(parse_key(
+                        key_value["address"]
+                            .as_str()
+                            .ok_or(ConformanceError::Assertion("tile query address"))?,
+                    )?),
+                };
+                let view = match value["view"].as_str() {
+                    Some("raw") => veyra_core::sample::TileView::Raw,
+                    Some("time_reduce") => veyra_core::sample::TileView::TimeReduce,
+                    Some(view) if view.starts_with("derived:") => {
+                        veyra_core::sample::TileView::Derived(view[8..].to_owned())
+                    }
+                    _ => return Err(ConformanceError::Assertion("tile query view")),
+                };
+                let tile = body
+                    .tile(&veyra_core::sample::TileRequest {
+                        field: query_field(&value["field"])?,
+                        key,
+                        time: query_time(&value["time"])?,
+                        halo: u8::try_from(
+                            value["halo"]
+                                .as_u64()
+                                .ok_or(ConformanceError::Assertion("tile query halo"))?,
+                        )
+                        .map_err(|_| ConformanceError::Assertion("tile query halo range"))?,
+                        view,
+                    })
+                    .map_err(|_| ConformanceError::Assertion("Stage 4 tile query"))?;
+                json!({"dim_i":tile.dim_i,"dim_j":tile.dim_j,"slices":tile.slices,"source":format!("{:?}",tile.source),"values_bits":tile.values.iter().map(|value| value.map(f64_bits)).collect::<Vec<_>>()})
+            }
+            "views" => {
+                json!({"views":body.views().iter().map(|view| json!({"id":view.id,"group":view.group,"label":view.label,"field_name":view.field_name})).collect::<Vec<_>>() })
+            }
+            "geometry" => {
+                let domain = value["domain"]
+                    .as_str()
+                    .ok_or(ConformanceError::Assertion("Stage 4 geometry domain"))?;
+                let tile_value = &value["tile"];
+                let tile = veyra_core::spatial::TileKey {
+                    level: u8::try_from(
+                        tile_value["level"]
+                            .as_u64()
+                            .ok_or(ConformanceError::Assertion("geometry level"))?,
+                    )
+                    .map_err(|_| ConformanceError::Assertion("geometry level range"))?,
+                    address: CellKey(parse_key(
+                        tile_value["address"]
+                            .as_str()
+                            .ok_or(ConformanceError::Assertion("geometry key"))?,
+                    )?),
+                };
+                let grid_n = u16::try_from(
+                    value["grid_n"].as_u64().ok_or(ConformanceError::Assertion("geometry grid"))?,
+                )
+                .map_err(|_| ConformanceError::Assertion("geometry grid range"))?;
+                let geometry = body
+                    .domain_geometry(domain, tile, grid_n)
+                    .map_err(|_| ConformanceError::Assertion("Stage 4 geometry query"))?;
+                let radius_squared: Vec<f64> = geometry
+                    .vertices_m
+                    .iter()
+                    .map(|point| point[0] * point[0] + point[1] * point[1] + point[2] * point[2])
+                    .collect();
+                json!({"vertices":geometry.vertices_m.len(),"triangles":geometry.triangles.len(),"min_radius_squared_bits":radius_squared.iter().copied().reduce(f64::min).map(f64_bits),"max_radius_squared_bits":radius_squared.iter().copied().reduce(f64::max).map(f64_bits)})
+            }
+            _ => return Err(ConformanceError::Assertion("unknown Stage 4 query operation")),
+        };
+        output.push(
+            serde_json::to_string(&json!({"fixture":fixture,"op":operation,"result":result}))
+                .map_err(|_| ConformanceError::Assertion("Stage 4 query output JSON"))?,
+        );
+    }
+    Ok(output)
+}
+
+fn query_field(value: &Value) -> Result<FieldId, ConformanceError> {
+    FieldId::parse(value.as_str().ok_or(ConformanceError::Assertion("Stage 4 field ID"))?)
+        .map_err(|_| ConformanceError::Assertion("Stage 4 field ID"))
+}
+
+fn query_position(value: &Value) -> Result<veyra_core::sample::Position, ConformanceError> {
+    match value["kind"].as_str() {
+        Some("direction") => {
+            let xyz =
+                value["xyz"].as_array().ok_or(ConformanceError::Assertion("query direction"))?;
+            if xyz.len() != 3 {
+                return Err(ConformanceError::Assertion("query direction arity"));
+            }
+            let components = xyz
+                .iter()
+                .map(|value| {
+                    value.as_f64().ok_or(ConformanceError::Assertion("query direction component"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let direction =
+                veyra_core::spatial::Dir::new(components[0], components[1], components[2])
+                    .map_err(|_| ConformanceError::Assertion("query direction"))?;
+            Ok(veyra_core::sample::Position::Direction(direction))
+        }
+        Some("cell") => Ok(veyra_core::sample::Position::Cell {
+            domain: value["domain"]
+                .as_str()
+                .ok_or(ConformanceError::Assertion("query cell domain"))?
+                .to_owned(),
+            key: CellKey(parse_key(
+                value["key"].as_str().ok_or(ConformanceError::Assertion("query cell key"))?,
+            )?),
+        }),
+        Some("radius") => Ok(veyra_core::sample::Position::Radial {
+            r_m: value["r_m"].as_f64().ok_or(ConformanceError::Assertion("query radius"))?,
+        }),
+        _ => Err(ConformanceError::Assertion("unknown Stage 4 position kind")),
+    }
+}
+
+fn query_level(value: &Value) -> Result<veyra_core::sample::LevelSel, ConformanceError> {
+    if let Some(level) = value.as_u64() {
+        return u8::try_from(level)
+            .map(veyra_core::sample::LevelSel::Exact)
+            .map_err(|_| ConformanceError::Assertion("query level range"));
+    }
+    match value.as_str() {
+        Some("native") => Ok(veyra_core::sample::LevelSel::Native),
+        Some("canonical") => Ok(veyra_core::sample::LevelSel::Canonical),
+        _ => Err(ConformanceError::Assertion("unknown Stage 4 level")),
+    }
+}
+
+fn query_time(value: &Value) -> Result<veyra_core::sample::TimeSel, ConformanceError> {
+    let Some(value) = value.as_str() else {
+        return Err(ConformanceError::Assertion("Stage 4 time selector"));
+    };
+    match value {
+        "static" => Ok(veyra_core::sample::TimeSel::Static),
+        "mean" => Ok(veyra_core::sample::TimeSel::Mean),
+        "min" => Ok(veyra_core::sample::TimeSel::Min),
+        "max" => Ok(veyra_core::sample::TimeSel::Max),
+        _ if value.starts_with("slice:") => value[6..]
+            .parse::<u16>()
+            .map(veyra_core::sample::TimeSel::Slice)
+            .map_err(|_| ConformanceError::Assertion("Stage 4 slice number")),
+        _ if value.starts_with("phase:") => value[6..]
+            .parse::<f64>()
+            .map(veyra_core::sample::TimeSel::Phase)
+            .map_err(|_| ConformanceError::Assertion("Stage 4 phase number")),
+        _ => Err(ConformanceError::Assertion("unknown Stage 4 time selector")),
+    }
+}
+
+fn raw_json(raw: veyra_core::sample::RawValue) -> Value {
+    match raw {
+        veyra_core::sample::RawValue::Integer(value) => json!(value),
+        veyra_core::sample::RawValue::Float(value) => json!(format!("0x{:08x}", value.to_bits())),
+    }
+}
+
+fn f64_bits(value: f64) -> String {
+    format!("0x{:016x}", value.to_bits())
+}
+
+fn read_lines(path: &Path) -> Result<Vec<String>, ConformanceError> {
+    let text = fs::read_to_string(path).map_err(ConformanceError::Io)?;
+    Ok(text.lines().filter(|line| !line.is_empty()).map(str::to_owned).collect())
 }
 
 fn generate_cb6(path: &Path, cb5: PathBuf, cb5_blobs: &[Hash32]) -> Result<(), ConformanceError> {

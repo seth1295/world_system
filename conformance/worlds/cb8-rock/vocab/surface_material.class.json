@@ -1,0 +1,22 @@
+{
+  "id": "surface_material.class/1",
+  "schema": "veyra.vocab/1",
+  "values": [
+    {
+      "id": 1,
+      "label": "Rock A"
+    },
+    {
+      "id": 2,
+      "label": "Rock B"
+    },
+    {
+      "id": 3,
+      "label": "Rock C"
+    },
+    {
+      "id": 4,
+      "label": "Rock D"
+    }
+  ]
+}

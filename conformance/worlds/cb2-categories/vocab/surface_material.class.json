@@ -1,0 +1,18 @@
+{
+  "id": "surface_material.class/1",
+  "schema": "veyra.vocab/1",
+  "values": [
+    {
+      "id": 1,
+      "label": "Class A"
+    },
+    {
+      "id": 2,
+      "label": "Class B"
+    },
+    {
+      "id": 3,
+      "label": "Class C"
+    }
+  ]
+}

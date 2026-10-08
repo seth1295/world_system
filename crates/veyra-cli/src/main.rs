@@ -4,9 +4,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use veyra_core::body::FieldId;
 use veyra_core::canon::{hash, jcs};
 use veyra_core::ids::{ObjectAddress, ObjectId, UniverseId};
-use veyra_core::spatial::{CellKey, Dir, DirCube, Radial1d, Topology};
+use veyra_core::sample::{LevelSel, Position, SampleQuery, TileRequest, TileView, TimeSel};
+use veyra_core::spatial::{CellKey, Dir, DirCube, Radial1d, TileKey, Topology};
 use veyra_writer::{open_directory, verify_directory};
 
 fn main() {
@@ -115,27 +117,215 @@ fn command_body(args: &[String]) -> Result<(), Box<dyn Error>> {
     let action = args
         .first()
         .map(String::as_str)
-        .ok_or("usage: veyra body verify|info|fields <directory>")?;
-    let path = args.get(1).ok_or("missing body directory")?;
+        .ok_or("usage: veyra body verify|info|fields|sample|tile|inspect|views <directory>")?;
     match action {
-        "verify" => println!("OK baseline=bas:{}", verify_directory(path)?),
+        "verify" => {
+            let path = args.get(1).ok_or("missing body directory")?;
+            println!("OK baseline=bas:{}", verify_directory(path)?);
+        }
         "info" => {
+            let path = args.get(1).ok_or("missing body directory")?;
             let body = open_directory(path)?;
             let root = body.root_value();
             println!("object_id={}", body.object_id()?);
             println!("baseline_id=bas:{}", body.baseline_id());
             println!("fields={}", body.fields().len());
-            println!("capabilities={}", root["capabilities"].as_array().map_or(0, Vec::len));
-            println!("domains={}", root["domains"].as_array().map_or(0, Vec::len));
+            println!("capabilities={}", body.capabilities().len());
+            println!("domains={}", body.domains().len());
             println!("classification={}", root["classification"]);
         }
         "fields" => {
+            let path = args.get(1).ok_or("missing body directory")?;
             let body = open_directory(path)?;
             println!("{}", serde_json::to_string_pretty(body.fields())?);
         }
-        _ => return Err("body action must be verify, info, or fields".into()),
+        "views" => {
+            let path = args.get(1).ok_or("missing body directory")?;
+            let body = open_directory(path)?;
+            println!("{}", serde_json::to_string_pretty(&body.views())?);
+        }
+        "sample" => {
+            let path = args.get(1).ok_or("missing body directory")?;
+            let body = open_directory(path)?;
+            let query = parse_sample_query(&body, &args[2..])?;
+            let sample = body.sample(&query)?;
+            println!("{}", serde_json::to_string_pretty(&sample_json(&sample))?);
+        }
+        "inspect" => {
+            let path = args.get(1).ok_or("missing body directory")?;
+            let body = open_directory(path)?;
+            let position = parse_position(&args[2..])?;
+            let report =
+                body.inspect(&position, parse_level(&args[2..])?, parse_time(&args[2..])?)?;
+            let fields: Vec<_> = report
+                .fields
+                .iter()
+                .map(|field| {
+                    serde_json::json!({
+                        "id":field.field.to_string(),"name":field.name,"semantic":field.semantic,
+                        "unit":field.unit,"sample":field.sample.as_ref().map(sample_json),"issue":field.issue
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({"fields":fields}))?);
+        }
+        "tile" => {
+            let path = args.get(1).ok_or("missing body directory")?;
+            let body = open_directory(path)?;
+            let field = parse_field_id(&body, &option_value(&args[2..], "--field")?)?;
+            let (level, address) = parse_tile_key(&option_value(&args[2..], "--key")?)?;
+            let key = TileKey { level, address };
+            let halo = option_value_optional(&args[2..], "--halo")?
+                .map(|value| value.parse::<u8>())
+                .transpose()?
+                .unwrap_or(0);
+            let time = parse_time(&args[2..])?;
+            let periodic =
+                body.fields().iter().find(|descriptor| descriptor.id == field).is_some_and(
+                    |descriptor| {
+                        descriptor.temporal.get("kind").and_then(serde_json::Value::as_str)
+                            == Some("periodic_slices")
+                    },
+                );
+            let view = match option_value_optional(&args[2..], "--view")?.as_deref() {
+                Some("raw") => TileView::Raw,
+                Some("time_reduce") => TileView::TimeReduce,
+                Some(view) if view.starts_with("derived:") => {
+                    TileView::Derived(view[8..].to_owned())
+                }
+                Some(_) => return Err("--view must be raw, time_reduce, or derived:ID".into()),
+                None if periodic && !matches!(time, TimeSel::Slice(_) | TimeSel::Phase(_)) => {
+                    TileView::TimeReduce
+                }
+                None => TileView::Raw,
+            };
+            let request = TileRequest { field, key, time, halo, view };
+            let tile = body.tile(&request)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "level":tile.key.level,"address":format!("0x{:016x}", tile.key.address.0),
+                    "dim_i":tile.dim_i,"dim_j":tile.dim_j,"slices":tile.slices,
+                    "source":format!("{:?}", tile.source),"values":tile.values
+                }))?
+            );
+        }
+        _ => {
+            return Err(
+                "body action must be verify, info, fields, sample, tile, inspect, or views".into(),
+            );
+        }
     }
     Ok(())
+}
+
+fn parse_sample_query(
+    body: &veyra_core::io::Body,
+    args: &[String],
+) -> Result<SampleQuery, Box<dyn Error>> {
+    Ok(SampleQuery {
+        field: parse_field_id(body, &option_value(args, "--field")?)?,
+        pos: parse_position(args)?,
+        level: parse_level(args)?,
+        time: parse_time(args)?,
+    })
+}
+
+fn parse_field_id(body: &veyra_core::io::Body, text: &str) -> Result<FieldId, Box<dyn Error>> {
+    if let Ok(field) = FieldId::parse(text) {
+        return Ok(field);
+    }
+    body.fields()
+        .iter()
+        .find(|field| field.name == text)
+        .map(|field| field.id)
+        .ok_or_else(|| format!("unknown field {text}").into())
+}
+
+fn parse_position(args: &[String]) -> Result<Position, Box<dyn Error>> {
+    let mut found = Vec::new();
+    for (option, kind) in [
+        ("--dir", "direction"),
+        ("--axial-latlon", "axial"),
+        ("--cell", "cell"),
+        ("--radius", "radius"),
+    ] {
+        if let Some(value) = option_value_optional(args, option)? {
+            found.push((kind, value));
+        }
+    }
+    if found.len() != 1 {
+        return Err("provide exactly one of --dir, --axial-latlon, --cell, or --radius".into());
+    }
+    let (kind, value) = &found[0];
+    match *kind {
+        "direction" => {
+            let parts: Vec<f64> = value.split(',').map(str::parse).collect::<Result<_, _>>()?;
+            if parts.len() != 3 {
+                return Err("--dir requires x,y,z".into());
+            }
+            Ok(Position::Direction(Dir::new(parts[0], parts[1], parts[2])?))
+        }
+        "axial" => {
+            let parts: Vec<f64> = value.split(',').map(str::parse).collect::<Result<_, _>>()?;
+            if parts.len() != 2 {
+                return Err("--axial-latlon requires latitude,longitude in degrees".into());
+            }
+            let radians = core::f64::consts::PI / 180.0;
+            Ok(Position::AxialLatLon { lat_rad: parts[0] * radians, lon_rad: parts[1] * radians })
+        }
+        "cell" => {
+            let (domain, key) = value.split_once(':').ok_or("--cell requires DOMAIN:KEY")?;
+            Ok(Position::Cell { domain: domain.to_owned(), key: parse_cell_key(key)? })
+        }
+        "radius" => Ok(Position::Radial { r_m: value.parse()? }),
+        _ => Err("invalid position selector".into()),
+    }
+}
+
+fn parse_level(args: &[String]) -> Result<LevelSel, Box<dyn Error>> {
+    match option_value_optional(args, "--level")?.as_deref().unwrap_or("native") {
+        "native" => Ok(LevelSel::Native),
+        "canonical" => Ok(LevelSel::Canonical),
+        value => Ok(LevelSel::Exact(value.parse()?)),
+    }
+}
+
+fn parse_time(args: &[String]) -> Result<TimeSel, Box<dyn Error>> {
+    if let Some(slice) = option_value_optional(args, "--slice")? {
+        if slice == "mean" {
+            return Ok(TimeSel::Mean);
+        }
+        return Ok(TimeSel::Slice(slice.parse()?));
+    }
+    match option_value_optional(args, "--time")?.as_deref().unwrap_or("static") {
+        "static" => Ok(TimeSel::Static),
+        "mean" => Ok(TimeSel::Mean),
+        "min" => Ok(TimeSel::Min),
+        "max" => Ok(TimeSel::Max),
+        value if value.starts_with("phase:") => Ok(TimeSel::Phase(value[6..].parse()?)),
+        value if value.starts_with("slice:") => Ok(TimeSel::Slice(value[6..].parse()?)),
+        _ => Err("--time must be static, mean, min, max, phase:N, or slice:N".into()),
+    }
+}
+
+fn parse_tile_key(text: &str) -> Result<(u8, CellKey), Box<dyn Error>> {
+    let (level, key) = text.split_once(':').ok_or("--key requires LEVEL:KEY")?;
+    Ok((level.parse()?, parse_cell_key(key)?))
+}
+
+fn sample_json(sample: &veyra_core::sample::Sample) -> serde_json::Value {
+    serde_json::json!({
+        "value":sample.value,
+        "raw":sample.raw.map(|raw| match raw {
+            veyra_core::sample::RawValue::Integer(value) => serde_json::json!(value),
+            veyra_core::sample::RawValue::Float(value) => serde_json::json!(value),
+        }),
+        "category":sample.category,
+        "level_used":sample.level_used,
+        "source":format!("{:?}", sample.source),
+        "cell":format!("0x{:016x}", sample.cell.0),
+    })
 }
 
 fn command_conformance(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -193,7 +383,7 @@ fn repo_root() -> PathBuf {
 
 fn print_help() {
     println!(
-        "VEYRA foundation CLI\n\
+        "VEYRA World System CLI\n\
          Commands:\n\
            fmt --canonical|--pretty <file>\n\
            hash <file>\n\
@@ -201,7 +391,9 @@ fn print_help() {
            id object --fixture <name> [--universe uni:b3:<hex>]\n\
            cell --dir x,y,z --level <0..30>\n\
            tile-key --topology dir_cube|radial_1d --cell <key> --tile-log2 <n>\n\
-           body verify|info|fields <artifact-directory>\n\
+           body verify|info|fields|views <artifact-directory>\n\
+           body sample|inspect <artifact-directory> --field <id|name> <position> [--level native|canonical|N] [--slice K|--time mean|min|max|phase:N]\n\
+           body tile <artifact-directory> --field <id|name> --key LEVEL:KEY [--halo 0|1] [--time selection] [--view raw|time_reduce|derived:ID]\n\
            conformance gen|verify [world-root] [vector-root]"
     );
 }

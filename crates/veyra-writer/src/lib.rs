@@ -12,6 +12,7 @@ use veyra_core::body::{BodyRoot, FieldId, FieldRegistry, NamedSectionRef, parse_
 use veyra_core::canon::blob::{CanonicalBlob, shuffle2};
 use veyra_core::canon::hash;
 use veyra_core::canon::index::IndexBlob;
+use veyra_core::canon::index::TopologyTag;
 use veyra_core::canon::jcs;
 use veyra_core::canon::ledger;
 use veyra_core::ids::Hash32;
@@ -19,6 +20,9 @@ use veyra_core::io::{BlobSource, Body, BodyLoader, LoaderError, Need, SourceErro
 use veyra_core::path::{
     artifact_path_collision_key, artifact_path_keys_collide, validate_artifact_path,
 };
+
+pub mod pyramid;
+pub use pyramid::PyramidBuilder;
 
 /// Writes new body files and refuses to overwrite existing paths.
 pub struct ArtifactWriter {
@@ -106,6 +110,19 @@ impl ArtifactWriter {
         self.write_new(&path, &compressed)?;
         self.blobs.insert(id);
         Ok(id)
+    }
+
+    /// Builds and writes a parent raster tile from its child tile set.
+    pub fn write_pyramid_blob(
+        &mut self,
+        topology: TopologyTag,
+        dtype: veyra_core::canon::blob::DType,
+        operator: &str,
+        nodata: Option<i64>,
+        children: &[CanonicalBlob],
+    ) -> Result<Hash32, WriterError> {
+        let parent = PyramidBuilder::downsample_tile(topology, dtype, operator, nodata, children)?;
+        self.write_blob(&parent.encode())
     }
 
     /// Writes and verifies an append-only ledger whose expected identity is its head.
@@ -386,6 +403,10 @@ pub enum WriterError {
     IndexFieldMismatch,
     /// Canonical VYB1 bytes are invalid.
     InvalidBlob,
+    /// Pyramid inputs, operator, or output range is invalid.
+    InvalidPyramid,
+    /// The V1 integer pyramid operators do not define a conversion for this storage dtype.
+    UnsupportedPyramidDType(veyra_core::canon::blob::DType),
     /// Ledger content or head is invalid.
     InvalidLedger,
     /// Body root has already been written by this writer.
@@ -416,6 +437,10 @@ impl fmt::Display for WriterError {
                 formatter.write_str("root index refers to an unregistered field")
             }
             Self::InvalidBlob => formatter.write_str("invalid canonical blob"),
+            Self::InvalidPyramid => formatter.write_str("invalid pyramid input or output"),
+            Self::UnsupportedPyramidDType(dtype) => {
+                write!(formatter, "V1 pyramid arithmetic is unsupported for {dtype:?}")
+            }
             Self::InvalidLedger => formatter.write_str("invalid ledger or head hash"),
             Self::BodyAlreadyWritten => formatter.write_str("body root has already been written"),
             Self::BodyIdMismatch => formatter.write_str("body.id does not match body.json"),

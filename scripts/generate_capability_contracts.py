@@ -33,6 +33,8 @@ def main() -> int:
             "requires": document["requires"],
             "params_schema": document["params_schema"],
             "required_reference_surface_kinds": document["required_reference_surface_kinds"],
+            "derived_views": document["derived_views"],
+            "display": document["display"],
         }
     projection = {
         "schema": "veyra.capability_contracts/1",

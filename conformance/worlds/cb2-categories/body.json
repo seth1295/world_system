@@ -1,0 +1,109 @@
+{
+  "capabilities": [
+    {
+      "id": "veyra.cap.solid_surface/1",
+      "params": {
+        "figure_ref": "figure"
+      }
+    },
+    {
+      "id": "veyra.cap.surface_material/1",
+      "params": {
+        "domain": "surface"
+      }
+    }
+  ],
+  "classification": {
+    "fixture": "categorical values, ties, and nodata"
+  },
+  "codec": "zstd+shuffle2",
+  "domains": [
+    {
+      "frame": "body_fixed",
+      "id": "surface",
+      "max_level": 2,
+      "tile_log2": 2,
+      "topology": "veyra.topo.dir_cube/1",
+      "vertical": {
+        "kind": "none"
+      }
+    }
+  ],
+  "dynamics": {
+    "descriptor": {
+      "hash": "b3:b01078c32ea4667e403820fa46815b2b7263622b8a68007c2d99dafa7743b401",
+      "path": "dynamics/descriptor.json"
+    },
+    "origin_keyframe": {
+      "hash": "b3:fc1bdd45418ef243d05ba74121f44aa207eef579ade34df14cbbaf6fc41276a9",
+      "path": "dynamics/origin.json"
+    }
+  },
+  "figure": {
+    "kind": "sphere",
+    "radius_m": "1"
+  },
+  "format_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "frames": {
+    "body_fixed": {
+      "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed",
+      "rotation": {
+        "epoch": "0",
+        "kind": "uniform",
+        "orientation_q_at_epoch": [
+          "1",
+          "0",
+          "0",
+          "0"
+        ],
+        "period_s": "86400",
+        "relative_to": "universe_inertial"
+      }
+    }
+  },
+  "identity": {
+    "object_id": "obj:4467321aeb564398e9afb0f059af87f1",
+    "origin": {
+      "kind": "fixture",
+      "name": "cb2-categories"
+    }
+  },
+  "indexes": {
+    "0x01050001": "b3:e98ca26a722914971cd15e14813ae18084670b3a3121c1ad3109fff1a150c15f"
+  },
+  "physical": {
+    "gm_m3_s2": "1",
+    "gravity_model": "point_mass"
+  },
+  "reference_surfaces": [
+    {
+      "id": "figure_surface",
+      "kind": "figure_surface"
+    }
+  ],
+  "required_features": [
+    "veyra.body/1",
+    "veyra.canon.jcs/1",
+    "veyra.cap.solid_surface/1",
+    "veyra.cap.surface_material/1",
+    "veyra.codec.zstd-shuffle2/1",
+    "veyra.topo.dir_cube/1"
+  ],
+  "schema": "veyra.body/1",
+  "sections": {
+    "registry": {
+      "hash": "b3:7aa2da2740c244cc35b5437733b079028f2b9281d18533856d6a523bfa9c0569",
+      "path": "registry/fields.json"
+    },
+    "vocab": [
+      {
+        "hash": "b3:6eea3ada98bdf0805bfe85982793e8bd1072d04c7da29108de33892deb9a11d2",
+        "name": "surface_material.class/1",
+        "path": "vocab/surface_material.class.json"
+      }
+    ]
+  }
+}

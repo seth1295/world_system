@@ -162,7 +162,7 @@ export class InspectorApp {
           <label id="temporal-control" class="control-label temporal-control" hidden>Time <select id="time-selector" aria-label="Time selection"></select></label>
           <button id="diagnostics-button" class="toolbar-button" aria-haspopup="dialog" aria-expanded="false" hidden>Diagnostics</button>
           <button id="features-button" class="toolbar-button" aria-haspopup="dialog" aria-expanded="false" hidden>Features</button>
-          <button id="inspect-center" class="toolbar-button inspect-action" title="Inspect the center of the displayed model">Inspect point</button>
+          <button id="inspect-center" class="toolbar-button inspect-action" title="Inspect the center of the displayed model" disabled>Inspect point</button>
           <button id="settings-button" class="icon-button" aria-label="Display settings" title="Display settings">⋯</button>
         </div>
       </header>
@@ -357,6 +357,7 @@ export class InspectorApp {
     const version = ++this.requestVersion;
     this.inspectionRequestVersion += 1;
     this.invalidateExplain();
+    this.closePopovers(false);
     this.clearFailure();
     this.activeDomain = domain;
     this.catalog = { groups: [], views: [] };
@@ -540,7 +541,9 @@ export class InspectorApp {
     this.pointReport = null;
     this.inspectionPending = false;
     this.renderInspection();
-    this.element<HTMLButtonElement>('#inspect-center').focus();
+    const inspectButton = this.element<HTMLButtonElement>('#inspect-center');
+    if (inspectButton.disabled) this.element<HTMLSelectElement>('#fixture-selector').focus();
+    else inspectButton.focus();
   }
 
   private async selectStage(stageId: string): Promise<void> {
@@ -691,7 +694,7 @@ export class InspectorApp {
         this.renderDebugMenu();
         this.renderFeatures();
         this.renderDiagnostics();
-        this.element<HTMLButtonElement>('#diagnostics-button').setAttribute('aria-expanded', 'true');
+        this.syncPopoverTriggers();
         void this.selectStage(intent.stageId);
         return;
       case 'inspection':
@@ -722,6 +725,7 @@ export class InspectorApp {
 
   private renderAll(missingResources: readonly string[] = []): void {
     if (this.destroyed) return;
+    this.renderInspectCenterButton();
     this.renderFixtureSelector();
     this.renderIdentity();
     if (this.fixtures.length === 0) this.element<HTMLElement>('#body-name').textContent = 'No fixtures available';
@@ -730,6 +734,7 @@ export class InspectorApp {
     this.renderTemporalControl();
     this.renderDiagnosticsButton();
     this.renderFeaturesButton();
+    this.syncPopoverTriggers();
     this.renderStatus(missingResources);
     this.renderError();
     this.renderLegend(missingResources);
@@ -737,6 +742,10 @@ export class InspectorApp {
     this.renderDebugMenu();
     this.renderDiagnostics();
     this.renderFeatures();
+  }
+
+  private renderInspectCenterButton(): void {
+    this.element<HTMLButtonElement>('#inspect-center').disabled = !this.viewport.hasInspectableModel;
   }
 
   private renderFixtureSelector(): void {
@@ -795,7 +804,14 @@ export class InspectorApp {
     button.textContent = available ? `Features · ${this.featureCatalog.tables.length}` : 'Features';
   }
 
+  private syncPopoverTriggers(): void {
+    this.renderDebugButton();
+    this.renderDiagnosticsButton();
+    this.renderFeaturesButton();
+  }
+
   private renderStatus(missingResources: readonly string[] = []): void {
+    this.renderInspectCenterButton();
     const status = this.element<HTMLElement>('#provider-state');
     status.dataset.state = this.loadState;
     const messages: Record<LoadState, string> = {
@@ -1049,7 +1065,7 @@ export class InspectorApp {
     this.renderDebugMenu();
     this.renderDiagnostics();
     this.renderFeatures();
-    this.element<HTMLButtonElement>('#debug-button').setAttribute('aria-expanded', String(this.debugOpen));
+    this.syncPopoverTriggers();
     if (this.debugOpen) this.root.querySelector<HTMLInputElement>('#debug-search')?.focus();
   }
 
@@ -1061,9 +1077,7 @@ export class InspectorApp {
     this.renderDebugMenu();
     this.renderDiagnostics();
     this.renderFeatures();
-    this.element<HTMLButtonElement>('#debug-button').setAttribute('aria-expanded', 'false');
-    this.element<HTMLButtonElement>('#diagnostics-button').setAttribute('aria-expanded', 'false');
-    this.element<HTMLButtonElement>('#features-button').setAttribute('aria-expanded', 'false');
+    this.syncPopoverTriggers();
     if (returnFocus && focusSelector) this.root.querySelector<HTMLButtonElement>(focusSelector)?.focus();
   }
 
@@ -1081,7 +1095,7 @@ export class InspectorApp {
       this.debugOpen = false;
       this.featuresOpen = false;
       this.renderDebugMenu(); this.renderFeatures(); this.renderDiagnostics();
-      this.element<HTMLButtonElement>('#diagnostics-button').setAttribute('aria-expanded', String(this.diagnosticsOpen));
+      this.syncPopoverTriggers();
       if (this.diagnosticsOpen) this.root.querySelector<HTMLInputElement>('#diagnostic-search')?.focus();
       return;
     }
@@ -1090,7 +1104,7 @@ export class InspectorApp {
       this.debugOpen = false;
       this.diagnosticsOpen = false;
       this.renderDebugMenu(); this.renderDiagnostics(); this.renderFeatures();
-      this.element<HTMLButtonElement>('#features-button').setAttribute('aria-expanded', String(this.featuresOpen));
+      this.syncPopoverTriggers();
       return;
     }
     const viewButton = target.closest<HTMLElement>('[data-view-id]');

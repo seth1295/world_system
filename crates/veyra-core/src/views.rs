@@ -23,6 +23,9 @@ pub struct ViewDescriptor {
     pub operator: Option<String>,
     /// Capability or topology group.
     pub group: String,
+    /// Declared capability display order, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_order: Option<u32>,
     /// User-facing label from the field or capability declaration.
     pub label: String,
     /// Preserved display declaration for consumers.
@@ -33,6 +36,7 @@ impl Body {
     /// Returns stored, topology-derived, and declared capability-derived views.
     pub fn views(&self) -> Vec<ViewDescriptor> {
         let mut views = Vec::new();
+        let definitions = crate::capability::definitions().ok();
         for domain in self.domains() {
             match domain.topology.as_str() {
                 "veyra.topo.dir_cube/1" => {
@@ -49,6 +53,7 @@ impl Body {
                             capability: None,
                             operator: Some(id.to_owned()),
                             group: "Spatial".to_owned(),
+                            display_order: None,
                             label: label.to_owned(),
                             display: None,
                         });
@@ -62,6 +67,7 @@ impl Body {
                     capability: None,
                     operator: Some("topology.radial_profile".to_owned()),
                     group: "Spatial".to_owned(),
+                    display_order: None,
                     label: "Radial profile".to_owned(),
                     display: None,
                 }),
@@ -76,6 +82,10 @@ impl Body {
             let Some(display) = field.extra.get("display").filter(|value| value.is_object()) else {
                 continue;
             };
+            let display_order = definitions
+                .as_ref()
+                .and_then(|definitions| definitions.contracts.get(&field.capability))
+                .and_then(capability_display_order);
             views.push(ViewDescriptor {
                 id: format!("field:{}", field.id),
                 domain: field.domain.clone(),
@@ -84,6 +94,7 @@ impl Body {
                 capability: Some(field.capability.clone()),
                 operator: None,
                 group: display.get("group").and_then(Value::as_str).unwrap_or("Fields").to_owned(),
+                display_order,
                 label: display
                     .get("label")
                     .and_then(Value::as_str)
@@ -95,7 +106,7 @@ impl Body {
 
         let declared_capabilities: std::collections::BTreeSet<&str> =
             self.capabilities().iter().map(|capability| capability.id.as_str()).collect();
-        if let Ok(definitions) = crate::capability::definitions() {
+        if let Some(definitions) = definitions {
             for capability_id in &declared_capabilities {
                 let Some(contract) = definitions.contracts.get(*capability_id) else {
                     continue;
@@ -115,6 +126,7 @@ impl Body {
                     .and_then(Value::as_str)
                     .unwrap_or(&group)
                     .to_owned();
+                let display_order = capability_display_order(contract);
                 let Some(derived_views) = contract.get("derived_views").and_then(Value::as_array)
                 else {
                     continue;
@@ -146,17 +158,34 @@ impl Body {
                         capability: Some((*capability_id).to_owned()),
                         operator: Some(operator.to_owned()),
                         group: group.clone(),
+                        display_order,
                         label: label.clone(),
                         display: Some(declaration.clone()),
                     });
                 }
             }
         }
-        views.sort_by(|left, right| {
-            (&left.group, &left.domain, &left.id).cmp(&(&right.group, &right.domain, &right.id))
-        });
+        sort_views(&mut views);
         views
     }
+}
+
+fn capability_display_order(contract: &Value) -> Option<u32> {
+    contract
+        .get("display")
+        .and_then(|display| display.get("order"))
+        .and_then(Value::as_u64)
+        .and_then(|order| u32::try_from(order).ok())
+}
+
+fn sort_views(views: &mut [ViewDescriptor]) {
+    views.sort_by(|left, right| {
+        (left.display_order.is_none(), left.display_order.unwrap_or_default())
+            .cmp(&(right.display_order.is_none(), right.display_order.unwrap_or_default()))
+            .then_with(|| left.group.cmp(&right.group))
+            .then_with(|| left.domain.cmp(&right.domain))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 fn dependencies_available(contract: &Value, declared: &std::collections::BTreeSet<&str>) -> bool {
@@ -190,9 +219,32 @@ fn required_view_domain(
 
 #[cfg(test)]
 mod tests {
-    use super::{dependencies_available, required_view_domain};
+    use super::{
+        ViewDescriptor, capability_display_order, dependencies_available, required_view_domain,
+        sort_views,
+    };
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    fn descriptor(
+        id: &str,
+        capability: Option<&str>,
+        group: &str,
+        order: Option<u32>,
+    ) -> ViewDescriptor {
+        ViewDescriptor {
+            id: id.to_owned(),
+            domain: "surface".to_owned(),
+            field: None,
+            field_name: None,
+            capability: capability.map(|value| value.to_owned()),
+            operator: Some(id.to_owned()),
+            group: group.to_owned(),
+            display_order: order,
+            label: id.to_owned(),
+            display: None,
+        }
+    }
 
     #[test]
     fn derived_view_capability_dependencies_must_be_declared() {
@@ -224,6 +276,53 @@ mod tests {
         assert_eq!(
             required_view_domain(one_need.as_array().unwrap(), &fields, Some("domain-b")),
             None
+        );
+    }
+
+    #[test]
+    fn capability_display_order_is_preserved_and_drives_catalog_order() {
+        let definitions = crate::capability::definitions().unwrap();
+        let climate = definitions.contracts.get("veyra.cap.climate/1").unwrap();
+        let ocean = definitions.contracts.get("veyra.cap.ocean/1").unwrap();
+        let climate_order = capability_display_order(climate).unwrap();
+        let ocean_order = capability_display_order(ocean).unwrap();
+        assert_eq!(climate_order, 50);
+        assert_eq!(ocean_order, 40);
+
+        let mut views = vec![
+            descriptor(
+                "field.climate",
+                Some("veyra.cap.climate/1"),
+                "Climate",
+                Some(climate_order),
+            ),
+            descriptor(
+                "derived.ocean",
+                Some("veyra.cap.ocean/1"),
+                "Ocean",
+                Some(ocean_order),
+            ),
+        ];
+        sort_views(&mut views);
+        assert_eq!(views[0].id, "derived.ocean");
+        assert_eq!(views[1].id, "field.climate");
+        assert_eq!(
+            serde_json::to_value(&views[0]).unwrap()["display_order"],
+            40
+        );
+    }
+
+    #[test]
+    fn missing_and_equal_display_orders_have_deterministic_ties() {
+        let mut views = vec![
+            descriptor("z-view", None, "Fields", Some(5)),
+            descriptor("b-view", None, "Fields", None),
+            descriptor("a-view", None, "Fields", Some(5)),
+        ];
+        sort_views(&mut views);
+        assert_eq!(
+            views.iter().map(|view| view.id.as_str()).collect::<Vec<_>>(),
+            vec!["a-view", "z-view", "b-view"]
         );
     }
 }

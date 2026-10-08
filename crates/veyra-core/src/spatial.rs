@@ -515,9 +515,10 @@ impl DirCube {
     /// Returns the two cardinal stencil cells used for an out-of-range corner query.
     pub fn corner_stencil(self, key: CellKey) -> Result<Option<[CellKey; 2]>, SpatialError> {
         let (_, i, j, level) = Self::decode(key)?;
+        let count = 1_u64 << level;
         let edge_i = if i == 0 {
             Some(FaceEdge::UMinus)
-        } else if i + 1 == 1_u64 << level {
+        } else if i + 1 == count {
             Some(FaceEdge::UPlus)
         } else {
             None
@@ -529,6 +530,15 @@ impl DirCube {
         } else {
             None
         };
+        self.corner_stencil_for_edges(key, edge_i, edge_j)
+    }
+
+    fn corner_stencil_for_edges(
+        self,
+        key: CellKey,
+        edge_i: Option<FaceEdge>,
+        edge_j: Option<FaceEdge>,
+    ) -> Result<Option<[CellKey; 2]>, SpatialError> {
         match (edge_i, edge_j) {
             (Some(u), Some(v)) => Ok(Some([self.neighbor(key, u)?, self.neighbor(key, v)?])),
             _ => Ok(None),
@@ -571,7 +581,11 @@ impl DirCube {
                 Ok(vec![(self.neighbor(boundary, edge)?, 1.0)])
             }
             (true, true) => {
-                let cells = self.corner_stencil(boundary)?.ok_or(SpatialError::InvalidCellKey)?;
+                let edge_i = if i < 0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                let edge_j = if j < 0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                let cells = self
+                    .corner_stencil_for_edges(boundary, Some(edge_i), Some(edge_j))?
+                    .ok_or(SpatialError::InvalidCellKey)?;
                 Ok(vec![(cells[0], 0.5), (cells[1], 0.5)])
             }
         }
@@ -761,7 +775,13 @@ impl Topology for DirCube {
                 Ok(vec![WeightedCell { key: self.neighbor(boundary, edge)?, weight: 1.0 }])
             }
             (true, true) => {
-                let cells = self.corner_stencil(boundary)?.ok_or(SpatialError::InvalidCellKey)?;
+                let edge_i =
+                    if global_i < 0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                let edge_j =
+                    if global_j < 0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                let cells = self
+                    .corner_stencil_for_edges(boundary, Some(edge_i), Some(edge_j))?
+                    .ok_or(SpatialError::InvalidCellKey)?;
                 Ok(vec![
                     WeightedCell { key: cells[0], weight: 0.5 },
                     WeightedCell { key: cells[1], weight: 0.5 },
@@ -1374,6 +1394,64 @@ mod tests {
                     assert_eq!(DirCube::decode(cells[0]).unwrap().3, 3);
                     assert_eq!(DirCube::decode(cells[1]).unwrap().3, 3);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn level_zero_bilinear_and_halo_corners_preserve_crossed_sides() {
+        let topology = DirCube;
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                for z in [-1.0, 1.0] {
+                    let direction = Dir::new(x, y, z).unwrap();
+                    let (face, u, v) = super::project_direction(direction);
+                    let edge_i =
+                        if u < 0.0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                    let edge_j =
+                        if v < 0.0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                    let base = DirCube::key(face, 0, 0, 0).unwrap();
+                    let stencil = topology
+                        .interpolation_stencil(
+                            TopologyPoint::Direction(direction),
+                            0,
+                            InterpolationMode::Bilinear,
+                        )
+                        .unwrap();
+                    let weight = |key| {
+                        stencil
+                            .iter()
+                            .find(|entry| entry.key == key)
+                            .map_or(0.0, |entry| entry.weight)
+                    };
+                    assert!((weight(base) - 0.25).abs() < 1.0e-12);
+                    assert!(
+                        (weight(topology.neighbor(base, edge_i).unwrap()) - 0.375).abs()
+                            < 1.0e-12
+                    );
+                    assert!(
+                        (weight(topology.neighbor(base, edge_j).unwrap()) - 0.375).abs()
+                            < 1.0e-12
+                    );
+                }
+            }
+        }
+
+        for face in 0..6 {
+            let base = DirCube::key(face, 0, 0, 0).unwrap();
+            let tile = topology.tile_key(base, 0).unwrap();
+            for (i, j, edge_i, edge_j) in [
+                (-1, -1, FaceEdge::UMinus, FaceEdge::VMinus),
+                (-1, 1, FaceEdge::UMinus, FaceEdge::VPlus),
+                (1, -1, FaceEdge::UPlus, FaceEdge::VMinus),
+                (1, 1, FaceEdge::UPlus, FaceEdge::VPlus),
+            ] {
+                let halo = topology.tile_halo_cells(tile, 0, i, j).unwrap();
+                assert_eq!(halo.len(), 2);
+                assert_eq!(halo[0].key, topology.neighbor(base, edge_i).unwrap());
+                assert_eq!(halo[1].key, topology.neighbor(base, edge_j).unwrap());
+                assert_eq!(halo[0].weight, 0.5);
+                assert_eq!(halo[1].weight, 0.5);
             }
         }
     }

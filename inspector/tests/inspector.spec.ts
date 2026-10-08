@@ -64,6 +64,106 @@ test('void fixture is stable, empty, and produces no browser errors', async ({ p
   expect(errors).toEqual([]);
 });
 
+test('Inspect point is disabled until the viewport displays an inspectable model', async ({ page }) => {
+  const inspectButton = page.getByRole('button', { name: 'Inspect point' });
+  await page.goto('/?fixture=fixture%3Avoid');
+  await waitForReady(page);
+  await expect(inspectButton).toBeDisabled();
+
+  await page.goto('/?fixture=fixture%3Amissing-content');
+  await expect(page.locator('#provider-error')).toBeVisible();
+  await expect(inspectButton).toBeDisabled();
+
+  await page.goto('/tests/remediation-harness.html?fixture=fixture%3Anormal-surface&deferOpen=1');
+  await expect(inspectButton).toBeDisabled();
+  await expect(page.locator('#provider-state')).toHaveAttribute('data-state', 'opening');
+  await page.evaluate(() => window.remediationControl.resolveOpen('fixture:normal-surface'));
+  await waitForReady(page);
+  await expect(inspectButton).toBeEnabled();
+
+  const fixture = buildFixture(SCENARIOS.find(({ id }) => id === 'fixture:normal-surface')!);
+  const domain = fixture.domains[0]!;
+  const views = fixture.catalogs.get(domain.id)!.views;
+  const loadingView = views[1]!;
+  const failingView = views[2]!;
+
+  await page.evaluate(() => window.remediationControl.setTilesDeferred(true));
+  const priorTileCount = await page.evaluate((id) => window.remediationControl.operationCount('tile', id), loadingView.id);
+  await page.getByTestId('debug-button').click();
+  await page.locator(`#debug-menu [data-view-id="${loadingView.id}"]`).click();
+  await expect.poll(() => page.evaluate((id) => window.remediationControl.operationCount('tile', id), loadingView.id)).toBe(priorTileCount + 1);
+  await expect(inspectButton).toBeDisabled();
+  await page.evaluate((id) => window.remediationControl.resolveTile(id), loadingView.id);
+  await waitForReady(page);
+  await expect(inspectButton).toBeEnabled();
+
+  await page.evaluate((id) => {
+    window.remediationControl.setTilesDeferred(false);
+    window.remediationControl.failNext('tile', id);
+  }, failingView.id);
+  await page.getByTestId('debug-button').click();
+  await page.locator(`#debug-menu [data-view-id="${failingView.id}"]`).click();
+  await expect(page.locator('#provider-error')).toBeVisible();
+  await expect(inspectButton).toBeDisabled();
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await waitForReady(page);
+  await expect(inspectButton).toBeEnabled();
+});
+
+test('popover trigger expanded state follows the active menu during switching, closing, and failures', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:diagnostics');
+  const debug = page.getByTestId('debug-button');
+  const diagnostics = page.locator('#diagnostics-button');
+  const features = page.locator('#features-button');
+  await expect(debug).toHaveAttribute('aria-expanded', 'false');
+  await expect(diagnostics).toHaveAttribute('aria-expanded', 'false');
+  await expect(features).toHaveAttribute('aria-expanded', 'false');
+
+  await debug.click();
+  await expect(debug).toHaveAttribute('aria-expanded', 'true');
+  await expect(diagnostics).toHaveAttribute('aria-expanded', 'false');
+  await expect(features).toHaveAttribute('aria-expanded', 'false');
+
+  await diagnostics.click();
+  await expect(debug).toHaveAttribute('aria-expanded', 'false');
+  await expect(diagnostics).toHaveAttribute('aria-expanded', 'true');
+  await expect(features).toHaveAttribute('aria-expanded', 'false');
+
+  await features.click();
+  await expect(debug).toHaveAttribute('aria-expanded', 'false');
+  await expect(diagnostics).toHaveAttribute('aria-expanded', 'false');
+  await expect(features).toHaveAttribute('aria-expanded', 'true');
+  await page.locator('#features-menu .close-popover').click();
+  await expect(debug).toHaveAttribute('aria-expanded', 'false');
+  await expect(diagnostics).toHaveAttribute('aria-expanded', 'false');
+  await expect(features).toHaveAttribute('aria-expanded', 'false');
+
+  await debug.click();
+  await page.keyboard.press('Escape');
+  await expect(debug).toHaveAttribute('aria-expanded', 'false');
+  await expect(diagnostics).toHaveAttribute('aria-expanded', 'false');
+  await expect(features).toHaveAttribute('aria-expanded', 'false');
+
+  await diagnostics.click();
+  const stage = page.locator('#diagnostics-menu [data-stage-id]').first();
+  const stageId = await stage.getAttribute('data-stage-id');
+  if (!stageId) throw new Error('Diagnostic stage identifier is missing');
+  await page.evaluate((id) => window.remediationControl.failNext('stage', id), stageId);
+  await stage.click();
+  await expect(page.locator('#provider-error')).toBeVisible();
+  await expect(debug).toHaveAttribute('aria-expanded', 'false');
+  await expect(diagnostics).toHaveAttribute('aria-expanded', 'false');
+  await expect(features).toHaveAttribute('aria-expanded', 'false');
+
+  await page.locator('#fixture-selector').selectOption('fixture:void');
+  await waitForReady(page);
+  await expect(debug).toHaveAttribute('aria-expanded', 'false');
+  await expect(diagnostics).toHaveAttribute('aria-expanded', 'false');
+  await expect(features).toHaveAttribute('aria-expanded', 'false');
+  await expect(debug).toBeDisabled();
+  await expect(diagnostics).toBeHidden();
+});
+
 test('canvas picking opens a point report through the provider', async ({ page }) => {
   await page.setViewportSize(viewSizes[1]!);
   await page.goto('/?fixture=fixture%3Anormal-surface');
@@ -746,7 +846,7 @@ test('radial Inspect point selects the profile center and a missing surface hit 
   await page.screenshot({ path: testInfo.outputPath('radial-center-inspection.png') });
 
   await startRegressionHarness(page, 'fixture:void');
-  await page.getByRole('button', { name: 'Inspect point' }).click();
+  await expect(page.getByRole('button', { name: 'Inspect point' })).toBeDisabled();
   await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(0);
   await expect(page.locator('#inspection-panel')).toBeHidden();
 });
@@ -1071,6 +1171,8 @@ for (const closeMethod of ['button', 'escape'] as const) {
     await expect(page.locator('#provider-error')).toBeVisible();
     await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
     await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Inspect point' })).toBeDisabled();
+    await expect(page.locator('#fixture-selector')).toBeFocused();
     await expect(page.locator('#provider-state')).toHaveAttribute('data-state', 'error');
     await page.screenshot({ path: testInfo.outputPath('view-failure-after-inspection-close.png') });
 

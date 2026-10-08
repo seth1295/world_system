@@ -89,6 +89,10 @@ export class Viewport {
     this.render();
   }
 
+  get hasInspectableModel(): boolean {
+    return this.currentKind !== null && this.pickables.length > 0;
+  }
+
   setOverlays(tables: readonly FeatureTable[]): void {
     for (const object of this.overlayObjects.splice(0)) {
       this.root.remove(object);

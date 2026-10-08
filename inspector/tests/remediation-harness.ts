@@ -81,6 +81,7 @@ class ControlledProvider extends MockBodyProvider {
   }
 
   override async tile(viewId: string, timeSelectionId?: string, diagnosticStageId?: string): Promise<DisplayTile> {
+    this.control.recordOperation('tile', viewId);
     if (this.control.shouldFail('tile', viewId) || this.control.shouldFail('tile', '*')) throw retryableFailure('view data');
     return super.tile(viewId, timeSelectionId, diagnosticStageId);
   }

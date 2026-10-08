@@ -803,6 +803,90 @@ test('retryable inspection rejection ends loading and a successful retry restore
   await expect(page.locator('#provider-error')).toBeHidden();
 });
 
+for (const failureMode of ['retryable', 'non-retryable'] as const) {
+  test(`${failureMode} inspection failure is retired by a view change without stealing the view retry`, async ({ page }, testInfo) => {
+    await openFailedInspection(page, 'fixture:category-heavy', failureMode);
+    if (failureMode === 'retryable') await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+    else await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath('inspection-failure-before-view-change.png') });
+
+    await page.getByTestId('debug-button').click();
+    const target = page.locator('#debug-menu [data-view-id]').nth(1);
+    const targetViewId = await target.getAttribute('data-view-id');
+    if (!targetViewId) throw new Error('Target view identifier is missing');
+    await page.evaluate((id) => window.remediationControl.failNext('tile', id), targetViewId);
+    await target.click();
+
+    await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', targetViewId);
+    await expect(page.locator('#provider-error .error-code')).toHaveText('E_RETRYABLE_TEST');
+    await expect(page.locator('#provider-error .error-message')).toHaveText('Temporary view data failure.');
+    await expect(page.locator('#inspection-panel')).toBeHidden();
+    await expect(page.locator('#provider-state')).toHaveAttribute('data-state', 'error');
+    await page.screenshot({ path: testInfo.outputPath('view-failure-after-retirement.png') });
+
+    await page.getByRole('button', { name: 'Retry' }).click();
+    await waitForReady(page);
+    await expect(page.locator('#provider-error')).toBeHidden();
+    await expect(page.locator('#inspection-panel')).toBeHidden();
+    await expect.poll(() => page.evaluate((id) => window.remediationControl.operationCount('tile', id), targetViewId)).toBe(2);
+    await page.screenshot({ path: testInfo.outputPath('view-recovered-after-retirement.png') });
+  });
+}
+
+test('failed inspection is retired when changing time', async ({ page }) => {
+  await openFailedInspection(page, 'fixture:multi-domain', 'non-retryable');
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Point inspection failed');
+  await page.locator('#time-selector').selectOption('slice-2');
+  await waitForReady(page);
+  await expect(page.locator('#time-selector')).toHaveValue('slice-2');
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await expect(page.locator('#provider-error')).toBeHidden();
+});
+
+test('failed inspection is retired when changing diagnostic stage', async ({ page }) => {
+  await openFailedInspection(page, 'fixture:diagnostics', 'non-retryable');
+  const stage = await selectRegressionStage(page, 1);
+  await waitForReady(page);
+  await expect(page.locator(`#diagnostics-menu [data-stage-id="${stage}"]`)).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await expect(page.locator('#provider-error')).toBeHidden();
+});
+
+test('late inspection completion after a view transition cannot reopen the retired panel', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 0, 1] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+  await expect(page.locator('#inspection-panel')).toContainText('Loading response');
+
+  await selectRegressionView(page, 1);
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await page.evaluate(() => window.remediationControl.resolveInspection(0, 'Late retired response'));
+  await expect(page.locator('#inspection-panel')).toBeHidden();
+  await expect(page.locator('#provider-error')).toBeHidden();
+});
+
+test('completed point reports remain available across view, time, and stage transitions', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:category-heavy');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Completed view report');
+  await selectRegressionView(page, 1);
+  await expect(page.locator('#inspection-panel')).toBeVisible();
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Completed view report');
+
+  await startRegressionHarness(page, 'fixture:multi-domain');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Completed time report');
+  await page.locator('#time-selector').selectOption('slice-2');
+  await waitForReady(page);
+  await expect(page.locator('#inspection-panel')).toBeVisible();
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Completed time report');
+
+  await startRegressionHarness(page, 'fixture:diagnostics');
+  await pickRegressionPoint(page, { kind: 'surface-direction', direction: [0, 0, 1] }, 'Completed stage report');
+  await selectRegressionStage(page, 0);
+  await waitForReady(page);
+  await expect(page.locator('#inspection-panel')).toBeVisible();
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Completed stage report');
+});
+
 for (const closeMethod of ['button', 'escape'] as const) {
   test(`closing inspection with ${closeMethod} preserves an unrelated view-load failure`, async ({ page }, testInfo) => {
     await openRetryableViewFailureWithInspection(page);
@@ -1054,6 +1138,17 @@ async function openRetryableViewFailureWithInspection(page: Page): Promise<void>
   await expect(page.locator('#legend-panel')).toHaveAttribute('data-view-id', targetViewId);
   await expect(page.locator('#provider-error')).toBeVisible();
   await expect(page.locator('#inspection-panel h2')).toHaveText('Inspection before view failure');
+}
+
+async function openFailedInspection(page: Page, fixtureId: string, failureMode: 'retryable' | 'non-retryable'): Promise<void> {
+  await startRegressionHarness(page, fixtureId);
+  if (failureMode === 'retryable') await page.evaluate(() => window.remediationControl.failNext('inspect', '*'));
+  await page.evaluate((position) => window.remediationControl.pickPoint(position), { kind: 'surface-direction', direction: [0, 0, 1] } as const);
+  await expect.poll(() => page.evaluate(() => window.remediationControl.inspectionCount())).toBe(1);
+  if (failureMode === 'non-retryable') {
+    await page.evaluate(() => window.remediationControl.rejectInspection(0, 'Point details are unavailable.'));
+  }
+  await expect(page.locator('#inspection-panel h2')).toHaveText('Point inspection failed');
 }
 
 async function waitForExplainCount(page: Page, viewId: string, fixtureId: string, count: number): Promise<void> {

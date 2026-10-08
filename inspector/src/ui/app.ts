@@ -93,6 +93,7 @@ export class InspectorApp {
   private selectedOverlays = new Set<string>();
   private selectedPosition: PickPosition | null = null;
   private pointReport: PointReport | null = null;
+  private inspectionPending = false;
   private failure: ProviderFailure | null = null;
   private failureOwner: RetryIntent['kind'] | null = null;
   private retryIntent: RetryIntent | null = null;
@@ -196,6 +197,7 @@ export class InspectorApp {
     this.selectedOverlays.clear();
     this.selectedPosition = null;
     this.pointReport = null;
+    this.inspectionPending = false;
     this.loadState = 'opening';
     this.setFixtureQuery(fixtureId);
     this.closePopovers(false);
@@ -352,6 +354,7 @@ export class InspectorApp {
     this.snapshot = null;
     this.pointReport = null;
     this.selectedPosition = null;
+    this.inspectionPending = false;
     this.geometry = null;
     this.stats = undefined;
     this.viewport.clearData();
@@ -383,6 +386,7 @@ export class InspectorApp {
     if (!view || !this.provider) return;
     const version = ++this.requestVersion;
     this.invalidateExplain();
+    this.retireIncompleteInspection();
     this.clearFailure();
     this.activeView = view;
     this.activeTimeId = this.defaultTime(view);
@@ -405,6 +409,7 @@ export class InspectorApp {
     }
     const timeId = this.activeTimeId;
     const stageId = this.activeStageId;
+    this.retireIncompleteInspection();
     this.clearFailure();
     this.loadState = 'view';
     this.renderStatus();
@@ -451,17 +456,20 @@ export class InspectorApp {
     this.clearFailure();
     this.selectedPosition = position;
     this.pointReport = null;
+    this.inspectionPending = true;
     this.renderInspection();
     let report: PointReport;
     try {
       report = await provider.inspect(position);
     } catch (error) {
       if (this.isCurrentInspection(version, provider, fixtureId, domainId, position)) {
+        this.inspectionPending = false;
         this.showFailure(error, { kind: 'inspection', fixtureId, provider, domainId: domainId ?? null, position });
       }
       return;
     }
     if (!this.isCurrentInspection(version, provider, fixtureId, domainId, position)) return;
+    this.inspectionPending = false;
     this.pointReport = report;
     this.renderInspection();
     const input = this.root.querySelector<HTMLInputElement>('#field-search');
@@ -490,6 +498,15 @@ export class InspectorApp {
     this.explainFailure = null;
   }
 
+  private retireIncompleteInspection(): void {
+    if (!this.selectedPosition || this.pointReport) return;
+    this.inspectionRequestVersion += 1;
+    this.selectedPosition = null;
+    this.pointReport = null;
+    this.inspectionPending = false;
+    this.renderInspection();
+  }
+
   private clearInspectionFailure(): void {
     if (this.failureOwner === 'inspection' || this.failureOwner === 'explanation') this.clearFailure();
   }
@@ -500,6 +517,7 @@ export class InspectorApp {
     this.clearInspectionFailure();
     this.selectedPosition = null;
     this.pointReport = null;
+    this.inspectionPending = false;
     this.renderInspection();
     this.element<HTMLButtonElement>('#inspect-center').focus();
   }
@@ -508,6 +526,7 @@ export class InspectorApp {
     if (!this.provider) return;
     const provider = this.provider;
     this.activeStageId = stageId;
+    this.retireIncompleteInspection();
     this.clearFailure();
     this.snapshot = null;
     const version = ++this.requestVersion;
@@ -539,6 +558,7 @@ export class InspectorApp {
 
   private async selectTime(timeId: string): Promise<void> {
     if (!this.activeView?.timeSelections?.some(({ id }) => id === timeId)) return;
+    this.retireIncompleteInspection();
     this.clearFailure();
     this.activeTimeId = timeId;
     const version = ++this.requestVersion;
@@ -856,6 +876,11 @@ export class InspectorApp {
     if (!this.pointReport && this.failureOwner === 'inspection' && this.failure) {
       panel.classList.remove('large-report');
       panel.innerHTML = `<div class="panel-heading"><div><p class="eyebrow">SELECTED POSITION</p><h2>Point inspection failed</h2></div><button class="icon-button close-inspection" aria-label="Close point inspection">×</button></div><p class="muted">${escape(this.failure.message)}</p>`;
+      return;
+    }
+    if (!this.pointReport && !this.inspectionPending) {
+      panel.hidden = true;
+      panel.innerHTML = '';
       return;
     }
     if (!this.pointReport) {

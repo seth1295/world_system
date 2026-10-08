@@ -438,7 +438,7 @@ impl Body {
         let value = match reduction {
             Reduction::Single => valid.first().copied(),
             Reduction::Mean if !valid.is_empty() => {
-                Some(valid.iter().sum::<f64>() / valid.len() as f64)
+                Some(temporal_mean(&valid)?)
             }
             Reduction::Min => valid.iter().copied().reduce(f64::min),
             Reduction::Max => valid.iter().copied().reduce(f64::max),
@@ -748,21 +748,16 @@ impl Body {
             let Some(value) = sample.value else { return Ok(None) };
             let neighbor_direction = DirCube.cell_center(neighbor)?;
             let neighbor_radius = self.figure_radius_at(neighbor_direction, domain, level)?;
-            let dot = (center_direction.x() * neighbor_direction.x()
-                + center_direction.y() * neighbor_direction.y()
-                + center_direction.z() * neighbor_direction.z())
-            .clamp(-1.0, 1.0);
-            let distance = libm::acos(dot) * ((center_radius + neighbor_radius) * 0.5);
+            let angle = angular_distance(center_direction, neighbor_direction)?;
+            let mean_radius = center_radius * 0.5 + neighbor_radius * 0.5;
+            let distance = angle * mean_radius;
+            if !distance.is_finite() || distance <= 0.0 {
+                return Err(SampleError::InvalidScale);
+            }
             values.push(value);
             distances.push(distance);
         }
-        let u_gradient = (values[1] - values[0]) / (distances[0] + distances[1]);
-        let v_gradient = (values[3] - values[2]) / (distances[2] + distances[3]);
-        let slope = libm::atan(libm::sqrt(u_gradient * u_gradient + v_gradient * v_gradient));
-        if !slope.is_finite() {
-            return Err(SampleError::InvalidScale);
-        }
-        Ok(Some(slope))
+        Ok(Some(slope_from_cardinal_samples(&values, &distances)?))
     }
 
     fn threshold_partition_at(
@@ -1327,6 +1322,73 @@ fn decode_physical(field: &FieldDescriptor, raw: RawValue) -> Result<f64, Sample
     Ok(value)
 }
 
+fn temporal_mean(values: &[f64]) -> Result<f64, SampleError> {
+    if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
+        return Err(SampleError::InvalidScale);
+    }
+    let sum = values.iter().sum::<f64>();
+    let mean = if sum.is_finite() {
+        sum / values.len() as f64
+    } else {
+        let scale = values.iter().fold(0.0_f64, |largest, value| {
+            libm::fmax(largest, libm::fabs(*value))
+        });
+        if scale == 0.0 {
+            0.0
+        } else {
+            values.iter().map(|value| value / scale).sum::<f64>() / values.len() as f64 * scale
+        }
+    };
+    if !mean.is_finite() {
+        return Err(SampleError::InvalidScale);
+    }
+    Ok(mean)
+}
+
+fn angular_distance(a: Dir, b: Dir) -> Result<f64, SampleError> {
+    let (ax, ay, az) = (a.x(), a.y(), a.z());
+    let (bx, by, bz) = (b.x(), b.y(), b.z());
+    let norm_a = libm::sqrt(ax * ax + ay * ay + az * az);
+    let norm_b = libm::sqrt(bx * bx + by * by + bz * bz);
+    let normalization = norm_a * norm_b;
+    if !normalization.is_finite() || normalization <= 0.0 {
+        return Err(SampleError::InvalidScale);
+    }
+    let dot = ((ax * bx + ay * by + az * bz) / normalization).clamp(-1.0, 1.0);
+    let cross_x = ay * bz - az * by;
+    let cross_y = az * bx - ax * bz;
+    let cross_z = ax * by - ay * bx;
+    let sine = libm::sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z)
+        / normalization;
+    let angle = libm::atan2(sine, dot);
+    if !angle.is_finite() || angle <= 0.0 {
+        return Err(SampleError::InvalidScale);
+    }
+    Ok(angle)
+}
+
+fn slope_from_cardinal_samples(values: &[f64], distances: &[f64]) -> Result<f64, SampleError> {
+    if values.len() != 4
+        || distances.len() != 4
+        || values.iter().any(|value| !value.is_finite())
+        || distances.iter().any(|distance| !distance.is_finite() || *distance <= 0.0)
+    {
+        return Err(SampleError::InvalidScale);
+    }
+    let u_span = distances[0] + distances[1];
+    let v_span = distances[2] + distances[3];
+    if !u_span.is_finite() || !v_span.is_finite() || u_span <= 0.0 || v_span <= 0.0 {
+        return Err(SampleError::InvalidScale);
+    }
+    let u_gradient = (values[1] - values[0]) / u_span;
+    let v_gradient = (values[3] - values[2]) / v_span;
+    let slope = libm::atan(libm::sqrt(u_gradient * u_gradient + v_gradient * v_gradient));
+    if !slope.is_finite() {
+        return Err(SampleError::InvalidScale);
+    }
+    Ok(slope)
+}
+
 fn decimal_property(object: &Value, name: &str, default: f64) -> Result<f64, SampleError> {
     let Some(value) = object.get(name) else {
         return Ok(default);
@@ -1354,7 +1416,10 @@ fn query_level_is_pyramid(field: &FieldDescriptor, selection: LevelSel, level: u
 
 #[cfg(test)]
 mod tests {
-    use super::{LevelSel, Position, SampleQuery, TimeSel};
+    use super::{
+        LevelSel, Position, SampleQuery, TimeSel, angular_distance, slope_from_cardinal_samples,
+        temporal_mean,
+    };
     use crate::body::FieldId;
     use crate::canon::blob::{BlobKind, CanonicalBlob, DType};
     use crate::canon::hash;
@@ -1444,5 +1509,37 @@ mod tests {
         assert_eq!(body.sample(&query).unwrap().value, Some(42.0));
         let tile_key = DirCube.tile_key(cell, 0).unwrap();
         assert_eq!(tile_key, TileKey { level: 0, address: cell });
+    }
+
+    #[test]
+    fn angular_distance_and_slope_remain_stable_at_level_thirty() {
+        let key = DirCube::key(0, 1 << 29, 1 << 29, 30).unwrap();
+        let neighbor = DirCube.neighbor(key, crate::spatial::FaceEdge::UPlus).unwrap();
+        let center = DirCube.cell_center(key).unwrap();
+        let adjacent = DirCube.cell_center(neighbor).unwrap();
+        let dot = center.x() * adjacent.x()
+            + center.y() * adjacent.y()
+            + center.z() * adjacent.z();
+        assert_eq!(libm::acos(dot), 0.0, "the old acos path loses this separation");
+
+        let angle = angular_distance(center, adjacent).unwrap();
+        assert!(angle.is_finite() && angle > 0.0);
+        let constant = slope_from_cardinal_samples(&[17.0; 4], &[angle; 4]).unwrap();
+        assert_eq!(constant, 0.0);
+        let gradient =
+            slope_from_cardinal_samples(&[0.0, 2.0, 0.0, 2.0], &[angle; 4]).unwrap();
+        assert!(gradient.is_finite() && gradient > 0.0);
+    }
+
+    #[test]
+    fn temporal_mean_handles_large_finite_values_and_rejects_invalid_inputs() {
+        assert_eq!(temporal_mean(&[1.0e308, 1.0e308]).unwrap(), 1.0e308);
+        assert_eq!(temporal_mean(&[-1.0e308, -1.0e308]).unwrap(), -1.0e308);
+        let mixed = temporal_mean(&[1.0e308, 1.0e308, -1.0e308]).unwrap();
+        assert!(libm::fabs(mixed - (1.0e308 / 3.0)) < 1.0e292);
+        assert_eq!(temporal_mean(&[1.0, 2.0, 3.0]).unwrap(), 2.0);
+        assert!(temporal_mean(&[]).is_err());
+        assert!(temporal_mean(&[f64::NAN]).is_err());
+        assert!(temporal_mean(&[f64::INFINITY]).is_err());
     }
 }

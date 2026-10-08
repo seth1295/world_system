@@ -1365,12 +1365,29 @@ fn verify_stage4(world_root: &Path) -> Result<Vec<FixtureResult>, ConformanceErr
         ));
     }
     verify_cb7_halo(&cb7)?;
-    if !cb7.views().iter().any(|view| view.group == "Stellar structure")
-        || cb7.views().iter().any(|view| {
+    let cb7_views = cb7.views();
+    let stellar_views: Vec<_> = cb7_views
+        .iter()
+        .filter(|view| view.capability.as_deref() == Some("veyra.cap.stellar_structure/1"))
+        .collect();
+    if !cb7_views.iter().any(|view| view.group == "Stellar structure")
+        || cb7_views.iter().any(|view| {
             matches!(view.group.as_str(), "Topography" | "Tectonics" | "Ocean" | "Climate")
         })
+        || stellar_views.is_empty()
+        || stellar_views.iter().any(|view| view.display_order != Some(80))
+        || cb7_views
+            .iter()
+            .position(|view| view.display_order.is_none())
+            .is_some_and(|first_unordered| {
+                cb7_views[first_unordered..]
+                    .iter()
+                    .any(|view| view.display_order.is_some())
+            })
     {
-        return Err(ConformanceError::Assertion("cb7 view catalog is not capability driven"));
+        return Err(ConformanceError::Assertion(
+            "cb7 view catalog is not capability driven or ordered",
+        ));
     }
     let cb8 = open_directory(world_root.join("cb8-rock")).map_err(ConformanceError::Writer)?;
     if cb8.figure().kind != "star_convex_radial"

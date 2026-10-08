@@ -281,27 +281,29 @@ mod tests {
 
     #[test]
     fn capability_display_order_is_preserved_and_drives_catalog_order() {
-        let definitions = crate::capability::definitions().unwrap();
-        let climate = definitions.contracts.get("veyra.cap.climate/1").unwrap();
-        let ocean = definitions.contracts.get("veyra.cap.ocean/1").unwrap();
-        let climate_order = capability_display_order(climate).unwrap();
-        let ocean_order = capability_display_order(ocean).unwrap();
-        assert_eq!(climate_order, 50);
-        assert_eq!(ocean_order, 40);
+        let later_contract = json!({"display":{"order":20}});
+        let earlier_contract = json!({"display":{"order":10}});
+        let later_order = capability_display_order(&later_contract).unwrap();
+        let earlier_order = capability_display_order(&earlier_contract).unwrap();
 
         let mut views = vec![
             descriptor(
-                "field.climate",
-                Some("veyra.cap.climate/1"),
-                "Climate",
-                Some(climate_order),
+                "field.later",
+                Some("cap.later/1"),
+                "A group",
+                Some(later_order),
             ),
-            descriptor("derived.ocean", Some("veyra.cap.ocean/1"), "Ocean", Some(ocean_order)),
+            descriptor(
+                "derived.earlier",
+                Some("cap.earlier/1"),
+                "Z group",
+                Some(earlier_order),
+            ),
         ];
         sort_views(&mut views);
-        assert_eq!(views[0].id, "derived.ocean");
-        assert_eq!(views[1].id, "field.climate");
-        assert_eq!(serde_json::to_value(&views[0]).unwrap()["display_order"], 40);
+        assert_eq!(views[0].id, "derived.earlier");
+        assert_eq!(views[1].id, "field.later");
+        assert_eq!(serde_json::to_value(&views[0]).unwrap()["display_order"], 10);
     }
 
     #[test]

@@ -108,6 +108,7 @@ export class InspectorApp {
   private snapshotExplain: ExplainSnapshot | null = null;
   private pendingExplain: ExplainContext | null = null;
   private explainFailure: ExplainFailure | null = null;
+  private destroyed = false;
 
   constructor(private readonly root: HTMLDivElement, private readonly bodyCatalog: BodyCatalog) {
     this.fixtures = bodyCatalog.fixtures();
@@ -122,6 +123,7 @@ export class InspectorApp {
   }
 
   async start(): Promise<void> {
+    if (this.destroyed) return;
     if (this.fixtures.length === 0) {
       this.loadState = 'ready';
       this.renderAll();
@@ -132,11 +134,21 @@ export class InspectorApp {
   }
 
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.requestVersion += 1;
+    this.inspectionRequestVersion += 1;
+    this.explainRequestVersion += 1;
+    this.pendingExplain = null;
     this.root.removeEventListener('click', this.handleClick);
     this.root.removeEventListener('change', this.handleChange);
     this.root.removeEventListener('input', this.handleInput);
     this.root.removeEventListener('keydown', this.handleKeydown);
     this.viewport.destroy();
+  }
+
+  private isCurrentRequest(version: number): boolean {
+    return !this.destroyed && version === this.requestVersion;
   }
 
   private shell(): string {
@@ -227,15 +239,15 @@ export class InspectorApp {
       try {
         provider = await this.bodyCatalog.open(progress.fixtureId);
       } catch (error) {
-        if (version === this.requestVersion) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'open' });
+        if (this.isCurrentRequest(version)) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'open' });
         return;
       }
-      if (version !== this.requestVersion) return;
+      if (!this.isCurrentRequest(version)) return;
       progress.provider = provider;
       this.provider = provider;
     }
 
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     this.loadState = 'metadata';
     this.renderStatus();
 
@@ -244,31 +256,31 @@ export class InspectorApp {
         switch (retryOperation) {
           case 'summary': {
             const value = await provider.summary();
-            if (version !== this.requestVersion) return;
+            if (!this.isCurrentRequest(version)) return;
             progress.summary = value;
             break;
           }
           case 'domains': {
             const value = await provider.domains();
-            if (version !== this.requestVersion) return;
+            if (!this.isCurrentRequest(version)) return;
             progress.domains = value;
             break;
           }
           case 'diagnostics': {
             const value = await provider.diagnostics();
-            if (version !== this.requestVersion) return;
+            if (!this.isCurrentRequest(version)) return;
             progress.diagnostics = value;
             break;
           }
           case 'features': {
             const value = await provider.features();
-            if (version !== this.requestVersion) return;
+            if (!this.isCurrentRequest(version)) return;
             progress.featureCatalog = value;
             break;
           }
         }
       } catch (error) {
-        if (version === this.requestVersion) this.showFailure(error, { kind: 'fixture-load', progress, operation: retryOperation });
+        if (this.isCurrentRequest(version)) this.showFailure(error, { kind: 'fixture-load', progress, operation: retryOperation });
         return;
       }
       return this.continueFixtureLoad(progress, version);
@@ -280,7 +292,7 @@ export class InspectorApp {
       settle(progress.diagnostics ? Promise.resolve(progress.diagnostics) : provider.diagnostics()),
       settle(progress.featureCatalog ? Promise.resolve(progress.featureCatalog) : provider.features()),
     ]);
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     if (summaryResult.ok) progress.summary = summaryResult.value;
     if (domainsResult.ok) progress.domains = domainsResult.value;
     if (diagnosticsResult.ok) progress.diagnostics = diagnosticsResult.value;
@@ -310,10 +322,10 @@ export class InspectorApp {
       if (!progress.catalog) {
         try {
           const catalog = await provider.views(domain.id);
-          if (version !== this.requestVersion) return;
+          if (!this.isCurrentRequest(version)) return;
           progress.catalog = catalog;
         } catch (error) {
-          if (version === this.requestVersion) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'views' });
+          if (this.isCurrentRequest(version)) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'views' });
           return;
         }
       }
@@ -323,16 +335,16 @@ export class InspectorApp {
       if (!progress.geometry) {
         try {
           const geometry = await provider.domainGeometry(domain.id);
-          if (version !== this.requestVersion) return;
+          if (!this.isCurrentRequest(version)) return;
           progress.geometry = geometry;
         } catch (error) {
-          if (version === this.requestVersion) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'geometry' });
+          if (this.isCurrentRequest(version)) this.showFailure(error, { kind: 'fixture-load', progress, operation: 'geometry' });
           return;
         }
       }
       this.geometry = progress.geometry;
     }
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     this.loadState = 'ready';
     this.renderAll();
     if (this.activeView) await this.loadActiveView(version);
@@ -365,11 +377,11 @@ export class InspectorApp {
     try {
       [catalog, geometry] = await Promise.all([provider.views(domain.id), provider.domainGeometry(domain.id)]);
     } catch (error) {
-      if (version !== this.requestVersion) return;
+      if (!this.isCurrentRequest(version)) return;
       this.showFailure(error, { kind: 'domain-load', fixtureId: this.fixtureId, provider, domainId: domain.id });
       return;
     }
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     this.catalog = catalog;
     this.geometry = geometry;
     this.activeView = catalog.views[0] ?? null;
@@ -377,7 +389,7 @@ export class InspectorApp {
     this.loadState = 'ready';
     this.renderAll();
     if (this.activeView) await this.loadActiveView(version);
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     this.element<HTMLSelectElement>('#domain-selector').focus();
   }
 
@@ -399,6 +411,7 @@ export class InspectorApp {
   }
 
   private async loadActiveView(version: number): Promise<void> {
+    if (this.destroyed) return;
     const provider = this.provider;
     const view = this.activeView;
     const domain = this.activeDomain;
@@ -411,20 +424,22 @@ export class InspectorApp {
     const stageId = this.activeStageId;
     this.retireIncompleteInspection();
     this.clearFailure();
+    this.stats = undefined;
     this.loadState = 'view';
     this.renderStatus();
     this.renderLegend();
+    const statsPromise = Promise.resolve()
+      .then(() => this.isCurrentRequest(version) ? provider.stats(view.id) : undefined)
+      .then((value) => ({ ok: true as const, value }), () => ({ ok: false as const }));
     let geometry: RenderGeometry;
     let tile: Awaited<ReturnType<BodyProvider['tile']>>;
-    let stats: ViewStats | undefined;
     try {
-      [geometry, tile, stats] = await Promise.all([
+      [geometry, tile] = await Promise.all([
         this.geometry ? Promise.resolve(this.geometry) : provider.domainGeometry(domain.id),
         provider.tile(view.id, timeId, stageId),
-        provider.stats(view.id),
       ]);
     } catch (error) {
-      if (version !== this.requestVersion) return;
+      if (!this.isCurrentRequest(version)) return;
       this.viewport.clearData();
       this.showFailure(error, {
         kind: 'view-load',
@@ -437,17 +452,22 @@ export class InspectorApp {
       });
       return;
     }
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     this.geometry = geometry;
-    this.stats = stats;
     this.loadState = 'ready';
     this.viewport.setData(geometry, view, tile);
     this.viewport.setOverlays(this.featureCatalog.tables.filter((table) => this.selectedOverlays.has(table.id)));
-    this.renderAll(tile.missingResources ?? []);
+    const missingResources = tile.missingResources ?? [];
+    this.renderAll(missingResources);
+    void statsPromise.then((statsResult) => {
+      if (!this.isCurrentRequest(version) || !statsResult.ok || statsResult.value === undefined) return;
+      this.stats = statsResult.value;
+      this.renderLegend(missingResources);
+    }).catch(() => undefined);
   }
 
   private async inspect(position: PickPosition): Promise<void> {
-    if (!this.provider) return;
+    if (this.destroyed || !this.provider) return;
     const provider = this.provider;
     const fixtureId = this.fixtureId;
     const domainId = this.activeDomain?.id;
@@ -483,7 +503,8 @@ export class InspectorApp {
     domainId: string | undefined,
     position: PickPosition,
   ): boolean {
-    return version === this.inspectionRequestVersion
+    return !this.destroyed
+      && version === this.inspectionRequestVersion
       && this.provider === provider
       && this.fixtureId === fixtureId
       && this.activeDomain?.id === domainId
@@ -536,7 +557,7 @@ export class InspectorApp {
     try {
       snapshot = await provider.diagnosticStage(stageId);
     } catch (error) {
-      if (version === this.requestVersion) {
+      if (this.isCurrentRequest(version)) {
         this.showFailure(error, {
           kind: 'diagnostic-stage',
           fixtureId: this.fixtureId,
@@ -547,12 +568,12 @@ export class InspectorApp {
       }
       return;
     }
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     this.snapshot = snapshot;
     this.renderDiagnostics();
     this.focusStage(stageId);
     if (this.activeView) await this.loadActiveView(version);
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     this.focusStage(stageId);
   }
 
@@ -566,16 +587,17 @@ export class InspectorApp {
     this.viewport.clearData();
     this.renderStatus();
     await this.loadActiveView(version);
-    if (version !== this.requestVersion) return;
+    if (!this.isCurrentRequest(version)) return;
     this.element<HTMLSelectElement>('#time-selector').focus();
   }
 
   private async copy(text: string): Promise<void> {
+    if (this.destroyed) return;
     try {
       await navigator.clipboard.writeText(text);
-      this.setCopyStatus('Copied');
+      if (!this.destroyed) this.setCopyStatus('Copied');
     } catch {
-      this.setCopyStatus('Clipboard unavailable');
+      if (!this.destroyed) this.setCopyStatus('Clipboard unavailable');
     }
   }
 
@@ -597,6 +619,7 @@ export class InspectorApp {
   }
 
   private showFailure(error: unknown, retryIntent?: RetryIntent): void {
+    if (this.destroyed) return;
     const failure = asProviderFailure(error);
     if (this.debugOpen || this.diagnosticsOpen || this.featuresOpen) this.closePopovers(false);
     if (this.loadState !== 'error') this.loadStateBeforeFailure = this.loadState;
@@ -698,6 +721,7 @@ export class InspectorApp {
   }
 
   private renderAll(missingResources: readonly string[] = []): void {
+    if (this.destroyed) return;
     this.renderFixtureSelector();
     this.renderIdentity();
     if (this.fixtures.length === 0) this.element<HTMLElement>('#body-name').textContent = 'No fixtures available';
@@ -930,6 +954,7 @@ export class InspectorApp {
   }
 
   private async loadExplain(context: ExplainContext): Promise<void> {
+    if (this.destroyed) return;
     if (this.pendingExplain && sameExplainContext(context, this.pendingExplain)) return;
     if (this.snapshotExplain && sameExplainContext(context, this.snapshotExplain.context)) return;
     if (this.explainFailure && sameExplainContext(context, this.explainFailure.context)) return;
@@ -955,7 +980,7 @@ export class InspectorApp {
 
   private isCurrentExplain(version: number, context: ExplainContext): boolean {
     const current = this.currentExplainContext();
-    return version === this.explainRequestVersion && current !== null && sameExplainContext(context, current);
+    return !this.destroyed && version === this.explainRequestVersion && current !== null && sameExplainContext(context, current);
   }
 
   private renderField(field: PointReport['groups'][number]['fields'][number], groupLabel: string): string {

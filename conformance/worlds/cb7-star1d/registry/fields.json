@@ -1,0 +1,121 @@
+{
+  "fields": [
+    {
+      "capability": "veyra.cap.stellar_structure/1",
+      "compat": "critical",
+      "display": {
+        "group": "Stellar structure",
+        "label": "Stellar density",
+        "legend": "continuous"
+      },
+      "domain": "interior",
+      "downsample": "mean",
+      "id": "0x01300001",
+      "name": "stellar.density",
+      "native_level": 4,
+      "persistence": "invariant",
+      "sampling": {
+        "below_native": "pyramid",
+        "interp": "linear"
+      },
+      "semantic": "scalar.density",
+      "storage": {
+        "dtype": "u32",
+        "offset": "0",
+        "scale": "0.01"
+      },
+      "temporal": {
+        "kind": "static"
+      },
+      "unit": "kg/m3"
+    },
+    {
+      "capability": "veyra.cap.stellar_structure/1",
+      "compat": "critical",
+      "display": {
+        "group": "Stellar structure",
+        "label": "Stellar temperature",
+        "legend": "continuous"
+      },
+      "domain": "interior",
+      "downsample": "mean",
+      "id": "0x01300002",
+      "name": "stellar.temperature",
+      "native_level": 4,
+      "persistence": "invariant",
+      "sampling": {
+        "below_native": "pyramid",
+        "interp": "linear"
+      },
+      "semantic": "scalar.temperature",
+      "storage": {
+        "dtype": "u32",
+        "offset": "0",
+        "scale": "0.01"
+      },
+      "temporal": {
+        "kind": "static"
+      },
+      "unit": "K"
+    },
+    {
+      "capability": "veyra.cap.stellar_structure/1",
+      "compat": "critical",
+      "display": {
+        "group": "Stellar structure",
+        "label": "Stellar pressure",
+        "legend": "continuous"
+      },
+      "domain": "interior",
+      "downsample": "mean",
+      "id": "0x01300003",
+      "name": "stellar.pressure",
+      "native_level": 4,
+      "persistence": "invariant",
+      "sampling": {
+        "below_native": "pyramid",
+        "interp": "linear"
+      },
+      "semantic": "scalar.pressure",
+      "storage": {
+        "dtype": "u32",
+        "offset": "0",
+        "scale": "0.01"
+      },
+      "temporal": {
+        "kind": "static"
+      },
+      "unit": "Pa"
+    },
+    {
+      "capability": "veyra.cap.stellar_structure/1",
+      "compat": "critical",
+      "display": {
+        "group": "Stellar structure",
+        "label": "Hydrogen fraction",
+        "legend": "continuous"
+      },
+      "domain": "interior",
+      "downsample": "mean",
+      "id": "0x01300004",
+      "name": "stellar.hydrogen_fraction",
+      "native_level": 4,
+      "persistence": "invariant",
+      "sampling": {
+        "below_native": "pyramid",
+        "interp": "linear"
+      },
+      "semantic": "scalar.fraction",
+      "storage": {
+        "dtype": "u16",
+        "offset": "0",
+        "scale": "0.0001"
+      },
+      "temporal": {
+        "kind": "static"
+      },
+      "unit": "1"
+    }
+  ],
+  "schema": "veyra.field_registry/1"
+}

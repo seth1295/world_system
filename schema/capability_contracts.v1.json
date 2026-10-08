@@ -31,7 +31,13 @@
         },
         "additionalProperties": true
       },
-      "required_reference_surface_kinds": []
+      "required_reference_surface_kinds": [],
+      "derived_views": [],
+      "display": {
+        "group": "Climate",
+        "label": "Climate",
+        "order": 50
+      }
     },
     "veyra.cap.ocean/1": {
       "field_template_ids": [],
@@ -57,7 +63,21 @@
         },
         "additionalProperties": true
       },
-      "required_reference_surface_kinds": []
+      "required_reference_surface_kinds": [],
+      "derived_views": [
+        {
+          "id": "derived.land_ocean",
+          "needs": [
+            "topography.height_m"
+          ],
+          "op": "core.threshold_partition/1"
+        }
+      ],
+      "display": {
+        "group": "Ocean",
+        "label": "Ocean",
+        "order": 40
+      }
     },
     "veyra.cap.solid_surface/1": {
       "field_template_ids": [
@@ -79,7 +99,13 @@
       },
       "required_reference_surface_kinds": [
         "figure_surface"
-      ]
+      ],
+      "derived_views": [],
+      "display": {
+        "group": "Solid surface",
+        "label": "Solid surface",
+        "order": 10
+      }
     },
     "veyra.cap.stellar_structure/1": {
       "field_template_ids": [
@@ -101,7 +127,13 @@
       },
       "required_reference_surface_kinds": [
         "sphere"
-      ]
+      ],
+      "derived_views": [],
+      "display": {
+        "group": "Stellar structure",
+        "label": "Stellar structure",
+        "order": 80
+      }
     },
     "veyra.cap.surface_material/1": {
       "field_template_ids": [
@@ -120,7 +152,13 @@
         },
         "additionalProperties": true
       },
-      "required_reference_surface_kinds": []
+      "required_reference_surface_kinds": [],
+      "derived_views": [],
+      "display": {
+        "group": "Surface material",
+        "label": "Material",
+        "order": 60
+      }
     },
     "veyra.cap.tectonics/1": {
       "field_template_ids": [
@@ -139,7 +177,13 @@
         },
         "additionalProperties": true
       },
-      "required_reference_surface_kinds": []
+      "required_reference_surface_kinds": [],
+      "derived_views": [],
+      "display": {
+        "group": "Tectonics",
+        "label": "Tectonics",
+        "order": 30
+      }
     },
     "veyra.cap.thermal_state/1": {
       "field_template_ids": [
@@ -156,7 +200,13 @@
         },
         "additionalProperties": true
       },
-      "required_reference_surface_kinds": []
+      "required_reference_surface_kinds": [],
+      "derived_views": [],
+      "display": {
+        "group": "Thermal state",
+        "label": "Thermal state",
+        "order": 70
+      }
     },
     "veyra.cap.topography/1": {
       "field_template_ids": [
@@ -184,7 +234,21 @@
         },
         "additionalProperties": true
       },
-      "required_reference_surface_kinds": []
+      "required_reference_surface_kinds": [],
+      "derived_views": [
+        {
+          "id": "derived.slope",
+          "needs": [
+            "topography.height_m"
+          ],
+          "op": "core.slope/1"
+        }
+      ],
+      "display": {
+        "group": "Topography",
+        "label": "Topography",
+        "order": 20
+      }
     }
   }
 }

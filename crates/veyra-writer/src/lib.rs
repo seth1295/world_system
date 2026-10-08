@@ -16,7 +16,9 @@ use veyra_core::canon::jcs;
 use veyra_core::canon::ledger;
 use veyra_core::ids::Hash32;
 use veyra_core::io::{BlobSource, Body, BodyLoader, LoaderError, Need, SourceError};
-use veyra_core::path::validate_artifact_path;
+use veyra_core::path::{
+    artifact_path_collision_key, artifact_path_keys_collide, validate_artifact_path,
+};
 
 /// Writes new body files and refuses to overwrite existing paths.
 pub struct ArtifactWriter {
@@ -50,6 +52,9 @@ impl ArtifactWriter {
     /// Writes a section and returns the hash of its parsed JCS content.
     pub fn write_json_section(&mut self, path: &str, bytes: &[u8]) -> Result<Hash32, WriterError> {
         validate_artifact_path(path).map_err(|_| WriterError::InvalidPath)?;
+        if conflicts_with_root_file(path) {
+            return Err(WriterError::DuplicatePath);
+        }
         if self.sections.contains_key(path) {
             return Err(WriterError::DuplicateSection);
         }
@@ -112,6 +117,9 @@ impl ArtifactWriter {
         expected_head: Hash32,
     ) -> Result<(), WriterError> {
         validate_artifact_path(path).map_err(|_| WriterError::InvalidPath)?;
+        if conflicts_with_root_file(path) {
+            return Err(WriterError::DuplicatePath);
+        }
         let head = ledger::verify(bytes).map_err(|_| WriterError::InvalidLedger)?;
         if name.is_empty()
             || head.hash != expected_head
@@ -131,7 +139,9 @@ impl ArtifactWriter {
         if self.body_written {
             return Err(WriterError::BodyAlreadyWritten);
         }
-        if self.written_paths.contains("body.json") || self.written_paths.contains("body.id") {
+        if path_conflicts(&self.written_paths, "body.json")
+            || path_conflicts(&self.written_paths, "body.id")
+        {
             return Err(WriterError::DuplicatePath);
         }
         let canonical = jcs::canonicalize_json(body_json).map_err(WriterError::Jcs)?;
@@ -190,7 +200,12 @@ impl ArtifactWriter {
 
     fn write_new(&mut self, relative: &str, bytes: &[u8]) -> Result<(), WriterError> {
         validate_artifact_path(relative).map_err(|_| WriterError::InvalidPath)?;
-        if self.written_paths.contains(relative) {
+        let collision_key = artifact_path_collision_key(relative);
+        if self
+            .written_paths
+            .iter()
+            .any(|existing| artifact_path_keys_collide(existing, &collision_key))
+        {
             return Err(WriterError::DuplicatePath);
         }
         let path = safe_join(&self.root, relative)?;
@@ -204,9 +219,22 @@ impl ArtifactWriter {
         use std::io::Write;
         file.write_all(bytes).map_err(WriterError::Io)?;
         file.sync_all().map_err(WriterError::Io)?;
-        self.written_paths.insert(relative.to_owned());
+        self.written_paths.insert(collision_key);
         Ok(())
     }
+}
+
+fn path_conflicts(written_paths: &std::collections::BTreeSet<String>, path: &str) -> bool {
+    let collision_key = artifact_path_collision_key(path);
+    written_paths.iter().any(|existing| artifact_path_keys_collide(existing, &collision_key))
+}
+
+fn conflicts_with_root_file(path: &str) -> bool {
+    let candidate = artifact_path_collision_key(path);
+    ["body.json", "body.id"].iter().any(|root| {
+        let reserved = artifact_path_collision_key(root);
+        artifact_path_keys_collide(&candidate, &reserved)
+    })
 }
 
 /// Opens a body directory through the core's sans-IO need/provide contract.

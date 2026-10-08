@@ -70,7 +70,9 @@ fn core_source_has_no_io_authority_or_terrestrial_vocabulary() {
 fn workspace_dependencies_preserve_the_declared_direction() {
     let root = repository_root();
     let expected_core: BTreeSet<&str> =
-        ["blake3", "libm", "ruzstd", "serde", "serde_json"].into_iter().collect();
+        ["blake3", "libm", "ruzstd", "serde", "serde_json", "unicode-normalization"]
+            .into_iter()
+            .collect();
     let core_manifest: Value =
         toml::from_str(&fs::read_to_string(root.join("crates/veyra-core/Cargo.toml")).unwrap())
             .unwrap();

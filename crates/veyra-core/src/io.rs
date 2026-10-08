@@ -16,7 +16,9 @@ use crate::canon::index::IndexBlob;
 use crate::canon::jcs;
 use crate::canon::ledger;
 use crate::ids::{Hash32, ObjectId};
-use crate::path::validate_artifact_path;
+use crate::path::{
+    artifact_path_collision_key, artifact_path_keys_collide, validate_artifact_path,
+};
 
 /// A specific section or content item the caller must supply.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -53,11 +55,11 @@ pub enum Need {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ArtifactPathOwner {
     Exclusive,
-    Section(Hash32),
-    Blob(Hash32),
+    Section { declared_path: String, hash: Hash32 },
+    Blob { declared_path: String, hash: Hash32 },
 }
 
 /// An abstract source for caller-owned storage.
@@ -106,10 +108,10 @@ impl BodyLoader {
         root.validate().map_err(LoaderError::Model)?;
         let baseline_id = hash::hash(&canonical);
         let mut pending = std::collections::BTreeSet::new();
-        let mut artifact_paths = std::collections::BTreeMap::from([
-            ("body.json".to_owned(), ArtifactPathOwner::Exclusive),
-            ("body.id".to_owned(), ArtifactPathOwner::Exclusive),
-        ]);
+        let mut artifact_paths = std::collections::BTreeMap::new();
+        for path in ["body.json", "body.id"] {
+            artifact_paths.insert(artifact_path_collision_key(path), ArtifactPathOwner::Exclusive);
+        }
 
         add_section_need(&mut pending, &mut artifact_paths, &root.sections.registry)?;
         for section in root.sections.vocab.iter().chain(root.sections.features.iter()) {
@@ -486,16 +488,25 @@ fn add_section_reference(
 ) -> Result<(), LoaderError> {
     validate_artifact_path(path).map_err(|_| LoaderError::InvalidPath)?;
     let hash = parse_hash(hash).map_err(LoaderError::Model)?;
-    match artifact_paths.get(path) {
-        Some(ArtifactPathOwner::Section(existing)) if *existing == hash => {}
-        Some(ArtifactPathOwner::Section(_)) => {
-            return Err(LoaderError::ConflictingSectionReference);
-        }
-        Some(_) => return Err(LoaderError::ArtifactPathConflict),
-        None => {
-            artifact_paths.insert(path.to_owned(), ArtifactPathOwner::Section(hash));
-        }
+    let key = artifact_path_collision_key(path);
+    if let Some(owner) = artifact_paths.get(&key) {
+        return match owner {
+            ArtifactPathOwner::Section { declared_path, hash: existing_hash }
+                if declared_path == path && *existing_hash == hash =>
+            {
+                pending.insert(Need::Section { path: path.to_owned(), hash });
+                Ok(())
+            }
+            ArtifactPathOwner::Section { declared_path, .. } if declared_path == path => {
+                Err(LoaderError::ConflictingSectionReference)
+            }
+            _ => Err(LoaderError::ArtifactPathConflict),
+        };
     }
+    if path_key_conflicts(artifact_paths, &key) {
+        return Err(LoaderError::ArtifactPathConflict);
+    }
+    artifact_paths.insert(key, ArtifactPathOwner::Section { declared_path: path.to_owned(), hash });
     pending.insert(Need::Section { path: path.to_owned(), hash });
     Ok(())
 }
@@ -504,10 +515,11 @@ fn register_exclusive_path(
     artifact_paths: &mut std::collections::BTreeMap<String, ArtifactPathOwner>,
     path: &str,
 ) -> Result<(), LoaderError> {
-    if artifact_paths.contains_key(path) {
+    let key = artifact_path_collision_key(path);
+    if path_key_conflicts(artifact_paths, &key) {
         return Err(LoaderError::ArtifactPathConflict);
     }
-    artifact_paths.insert(path.to_owned(), ArtifactPathOwner::Exclusive);
+    artifact_paths.insert(key, ArtifactPathOwner::Exclusive);
     Ok(())
 }
 
@@ -516,14 +528,29 @@ fn register_blob_path(
     path: &str,
     hash: Hash32,
 ) -> Result<(), LoaderError> {
-    match artifact_paths.get(path) {
-        Some(ArtifactPathOwner::Blob(existing)) if *existing == hash => Ok(()),
-        Some(_) => Err(LoaderError::ArtifactPathConflict),
-        None => {
-            artifact_paths.insert(path.to_owned(), ArtifactPathOwner::Blob(hash));
-            Ok(())
-        }
+    let key = artifact_path_collision_key(path);
+    if let Some(owner) = artifact_paths.get(&key) {
+        return match owner {
+            ArtifactPathOwner::Blob { declared_path, hash: existing_hash }
+                if declared_path == path && *existing_hash == hash =>
+            {
+                Ok(())
+            }
+            _ => Err(LoaderError::ArtifactPathConflict),
+        };
     }
+    if path_key_conflicts(artifact_paths, &key) {
+        return Err(LoaderError::ArtifactPathConflict);
+    }
+    artifact_paths.insert(key, ArtifactPathOwner::Blob { declared_path: path.to_owned(), hash });
+    Ok(())
+}
+
+fn path_key_conflicts(
+    artifact_paths: &std::collections::BTreeMap<String, ArtifactPathOwner>,
+    collision_key: &str,
+) -> bool {
+    artifact_paths.keys().any(|existing| artifact_path_keys_collide(existing, collision_key))
 }
 
 fn blob_artifact_path(hash: Hash32) -> String {
@@ -1155,7 +1182,7 @@ mod tests {
             LoaderError::ArtifactPathConflict
         );
 
-        for reserved_path in ["body.json", "body.id"] {
+        for reserved_path in ["body.json", "body.id", "BODY.JSON", "Body.Id/child.json"] {
             let mut root_path_conflict: Value = serde_json::from_slice(&root).unwrap();
             root_path_conflict["sections"]["registry"]["path"] = json!(reserved_path);
             assert_eq!(
@@ -1166,12 +1193,67 @@ mod tests {
     }
 
     #[test]
+    fn loader_rejects_case_unicode_and_directory_aliases_independent_of_reference_order() {
+        let (root, _) = fixture_root();
+        for (registry_path, descriptor_path) in [
+            ("registry/fields.json", "REGISTRY/FIELDS.JSON"),
+            ("DYNAMICS/DESCRIPTOR.JSON", "dynamics/descriptor.json"),
+            ("caf\u{00e9}/fields.json", "cafe\u{0301}/FIELDS.JSON"),
+            ("Directory", "directory/child.json"),
+        ] {
+            let mut value: Value = serde_json::from_slice(&root).unwrap();
+            value["sections"]["registry"]["path"] = json!(registry_path);
+            value["dynamics"]["descriptor"]["path"] = json!(descriptor_path);
+            assert_eq!(
+                BodyLoader::begin(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+                LoaderError::ArtifactPathConflict,
+                "accepted aliases {registry_path:?} and {descriptor_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn loader_rejects_case_aliases_across_section_index_ledger_and_blob_owners() {
+        let (root, _) = fixture_root();
+
+        let mut section_and_ledger: Value = serde_json::from_slice(&root).unwrap();
+        section_and_ledger["sections"]["registry"]["path"] = json!("EXTENSIONS/LEDGER.JSONL");
+        section_and_ledger["extensions_ledger"] = json!({
+            "path":"extensions/ledger.jsonl",
+            "hash":format!("b3:{}", "a".repeat(64))
+        });
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&section_and_ledger).unwrap()).unwrap_err(),
+            LoaderError::ArtifactPathConflict
+        );
+
+        let mut section_and_index: Value = serde_json::from_slice(&root).unwrap();
+        section_and_index["sections"]["registry"]["path"] = json!("INDEX/0X01010001.IDX");
+        section_and_index["indexes"] = json!({"0x01010001":format!("b3:{}", "b".repeat(64))});
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&section_and_index).unwrap()).unwrap_err(),
+            LoaderError::ArtifactPathConflict
+        );
+
+        let mut ledger_and_index: Value = serde_json::from_slice(&root).unwrap();
+        ledger_and_index["extensions_ledger"] = json!({
+            "path":"INDEX/0X01010001.IDX",
+            "hash":format!("b3:{}", "c".repeat(64))
+        });
+        ledger_and_index["indexes"] = json!({"0x01010001":format!("b3:{}", "d".repeat(64))});
+        assert_eq!(
+            BodyLoader::begin(&serde_json::to_vec(&ledger_and_index).unwrap()).unwrap_err(),
+            LoaderError::ArtifactPathConflict
+        );
+    }
+
+    #[test]
     fn loader_rejects_blob_paths_that_collide_with_sections_before_requesting_the_blob() {
         let (root, _) = fixture_root();
         let blob_hash = Hash32::parse(&format!("b3:{}", "d".repeat(64))).unwrap();
         let blob_path = super::blob_artifact_path(blob_hash);
         let mut value: Value = serde_json::from_slice(&root).unwrap();
-        value["dynamics"]["descriptor"]["path"] = json!(blob_path);
+        value["dynamics"]["descriptor"]["path"] = json!(blob_path.to_ascii_uppercase());
         value["indexes"] = json!({"0x01010001":""});
 
         let tile = DirCube.tile_key(DirCube::key(2, 6, 3, 3).unwrap(), 2).unwrap();

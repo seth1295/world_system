@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use veyra_core::body::FieldId;
+use veyra_core::canon::blob::{BlobKind, CanonicalBlob, DType};
+use veyra_core::canon::hash;
 use veyra_core::canon::index::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
 use veyra_core::ids::{ObjectAddress, ObjectId, UniverseId};
 use veyra_core::spatial::DirCube;
@@ -393,6 +395,89 @@ fn writer_uses_the_shared_literal_artifact_path_grammar() {
         assert!(matches!(writer.write_json_section(invalid, b"{}"), Err(WriterError::InvalidPath)));
     }
     assert!(writer.write_json_section("nested/valid.json", b"{}").is_ok());
+    drop(writer);
+    remove_artifact(&path);
+}
+
+#[test]
+fn writer_rejects_case_unicode_and_directory_aliases_before_writing_again() {
+    for (left, right) in [
+        ("sections/State.json", "sections/state.JSON"),
+        ("Data/one.json", "data/ONE.JSON"),
+        ("caf\u{00e9}/field.json", "cafe\u{0301}/FIELD.JSON"),
+        ("Directory", "directory/child.json"),
+    ] {
+        for (first, second) in [(left, right), (right, left)] {
+            let path = temp_path("path-alias");
+            let mut writer = ArtifactWriter::new(&path).unwrap();
+            writer.write_json_section(first, br#"{"value":1}"#).unwrap();
+            assert!(
+                matches!(
+                    writer.write_json_section(second, br#"{"value":2}"#),
+                    Err(WriterError::DuplicatePath)
+                ),
+                "accepted {first:?} then {second:?}"
+            );
+            assert_eq!(fs::read(path.join(first)).unwrap(), br#"{"value":1}"#);
+            drop(writer);
+            remove_artifact(&path);
+        }
+    }
+}
+
+#[test]
+fn writer_reserves_root_files_and_checks_aliases_across_content_kinds() {
+    let path = temp_path("root-reservation");
+    let mut writer = ArtifactWriter::new(&path).unwrap();
+    for reserved in ["BODY.JSON", "Body.Id/child.json"] {
+        assert!(matches!(
+            writer.write_json_section(reserved, b"{}"),
+            Err(WriterError::DuplicatePath)
+        ));
+    }
+    let (ledger_bytes, ledger_head) = append_extension();
+    assert!(matches!(
+        writer.write_ledger("extensions", "BODY.ID", &ledger_bytes, ledger_head),
+        Err(WriterError::DuplicatePath)
+    ));
+    assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+    drop(writer);
+    remove_artifact(&path);
+
+    let path = temp_path("index-alias");
+    let mut writer = ArtifactWriter::new(&path).unwrap();
+    writer.write_json_section("INDEX/0X01010001.IDX", b"{}").unwrap();
+    let field_id = FieldId::new(0x0101, 1);
+    let index = IndexBlob {
+        field_id: field_id.0,
+        topology: TopologyTag::DirCube,
+        tile_log2: 0,
+        entries: vec![],
+    };
+    assert!(matches!(writer.write_index(field_id, &index), Err(WriterError::DuplicatePath)));
+    drop(writer);
+    remove_artifact(&path);
+
+    let path = temp_path("ledger-alias");
+    let mut writer = ArtifactWriter::new(&path).unwrap();
+    writer.write_json_section("EXTENSIONS/LEDGER.JSONL", b"{}").unwrap();
+    let (ledger_bytes, ledger_head) = append_extension();
+    assert!(matches!(
+        writer.write_ledger("extensions", "extensions/ledger.jsonl", &ledger_bytes, ledger_head),
+        Err(WriterError::DuplicatePath)
+    ));
+    drop(writer);
+    remove_artifact(&path);
+
+    let path = temp_path("blob-alias");
+    let mut writer = ArtifactWriter::new(&path).unwrap();
+    let canonical =
+        CanonicalBlob::new(BlobKind::RasterTile, DType::U8, 1, 1, 1, vec![7]).unwrap().encode();
+    let blob_hash = hash::hash(&canonical);
+    let hex = blob_hash.text().trim_start_matches("b3:").to_owned();
+    let blob_path = format!("BLOBS/{}/{hex}.ZST", &hex[..2]);
+    writer.write_json_section(&blob_path, b"{}").unwrap();
+    assert!(matches!(writer.write_blob(&canonical), Err(WriterError::DuplicatePath)));
     drop(writer);
     remove_artifact(&path);
 }

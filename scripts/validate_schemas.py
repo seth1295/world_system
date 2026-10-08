@@ -500,7 +500,9 @@ def main() -> int:
     section_cases = []
     for path, valid in [
         ("registry/fields.json", True), ("", False), ("/x", False), ("/absolute", False),
-        ("body.json", False), ("body.id", False),
+        ("body.json", False), ("body.id", False), ("BODY.JSON", False),
+        ("Body.Id", False), ("body.JSON/child.json", False),
+        ("nested/body.json", True),
         ("a/./b", False), ("a//b", False), ("../x", False), ("a/../x", False),
         ("a\\b", False), ("C:/x", False), ("a:b", False), ("a/", False),
         ("C:relative", False), ("a/C:/x", False),
@@ -513,10 +515,15 @@ def main() -> int:
         ("NUL", False), ("nul.json", False), ("PRN", False), ("AUX", False),
         ("COM1", False), ("com9.bin", False), ("LPT1", False), ("lpt9.data", False),
         ("registry/NUL", False), ("registry/COM1.txt", False),
+        ("CONIN$", False), ("conin$", False), ("ConIn$", False),
+        ("con\u0131n$", False),
+        ("CONOUT$", False), ("conout$", False), ("folder/conOut$", False),
+        ("folder/CONOUT$", False),
         ("COM¹", False), ("COM².ext", False), ("LPT³", False), ("LPT³.foo", False),
         ("console", True), ("null", True), ("COM0", True), ("COM10", True),
         ("LPT0", True), ("LPT10", True), ("xCON", True), ("CONx", True),
         ("company.txt", True), (".hidden", True), ("café/世界.json", True),
+        ("CONIN$.txt", True), ("CONOUT$.log", True), ("CONIN$device", True),
         ("delete\u007fcharacter", True),
     ]:
         instance = deepcopy(body_fixture)
@@ -539,6 +546,10 @@ def main() -> int:
                 instance["sections"]["registry"]["path"] = basename
                 section_cases.append((f"reserved superscript device path {basename}", instance, False))
     check_cases(body_validator, section_cases, "section path")
+
+    # Pairwise path aliases cannot be compared by JSON Schema; BodyLoader and ArtifactWriter
+    # enforce Unicode-case/NFC collision and file-versus-directory rules. Each individual path
+    # still passes through this shared schema grammar.
 
     # Schema cannot express uniqueBy(domain.id), capability dependencies, or cross-section
     # ObjectId/hash/content checks. Duplicate domain IDs are intentionally Rust-only.

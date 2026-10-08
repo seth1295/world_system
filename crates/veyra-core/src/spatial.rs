@@ -775,10 +775,8 @@ impl Topology for DirCube {
                 Ok(vec![WeightedCell { key: self.neighbor(boundary, edge)?, weight: 1.0 }])
             }
             (true, true) => {
-                let edge_i =
-                    if global_i < 0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
-                let edge_j =
-                    if global_j < 0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                let edge_i = if global_i < 0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                let edge_j = if global_j < 0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
                 let cells = self
                     .corner_stencil_for_edges(boundary, Some(edge_i), Some(edge_j))?
                     .ok_or(SpatialError::InvalidCellKey)?;
@@ -1406,10 +1404,8 @@ mod tests {
                 for z in [-1.0, 1.0] {
                     let direction = Dir::new(x, y, z).unwrap();
                     let (face, u, v) = super::project_direction(direction);
-                    let edge_i =
-                        if u < 0.0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
-                    let edge_j =
-                        if v < 0.0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                    let edge_i = if u < 0.0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                    let edge_j = if v < 0.0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
                     let base = DirCube::key(face, 0, 0, 0).unwrap();
                     let stencil = topology
                         .interpolation_stencil(
@@ -1426,12 +1422,10 @@ mod tests {
                     };
                     assert!((weight(base) - 0.25).abs() < 1.0e-12);
                     assert!(
-                        (weight(topology.neighbor(base, edge_i).unwrap()) - 0.375).abs()
-                            < 1.0e-12
+                        (weight(topology.neighbor(base, edge_i).unwrap()) - 0.375).abs() < 1.0e-12
                     );
                     assert!(
-                        (weight(topology.neighbor(base, edge_j).unwrap()) - 0.375).abs()
-                            < 1.0e-12
+                        (weight(topology.neighbor(base, edge_j).unwrap()) - 0.375).abs() < 1.0e-12
                     );
                 }
             }

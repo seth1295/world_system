@@ -437,9 +437,7 @@ impl Body {
         let valid: Vec<f64> = values.iter().filter_map(|value| *value).collect();
         let value = match reduction {
             Reduction::Single => valid.first().copied(),
-            Reduction::Mean if !valid.is_empty() => {
-                Some(temporal_mean(&valid)?)
-            }
+            Reduction::Mean if !valid.is_empty() => Some(temporal_mean(&valid)?),
             Reduction::Min => valid.iter().copied().reduce(f64::min),
             Reduction::Max => valid.iter().copied().reduce(f64::max),
             _ => None,
@@ -1330,9 +1328,8 @@ fn temporal_mean(values: &[f64]) -> Result<f64, SampleError> {
     let mean = if sum.is_finite() {
         sum / values.len() as f64
     } else {
-        let scale = values.iter().fold(0.0_f64, |largest, value| {
-            libm::fmax(largest, libm::fabs(*value))
-        });
+        let scale =
+            values.iter().fold(0.0_f64, |largest, value| libm::fmax(largest, libm::fabs(*value)));
         if scale == 0.0 {
             0.0
         } else {
@@ -1358,8 +1355,8 @@ fn angular_distance(a: Dir, b: Dir) -> Result<f64, SampleError> {
     let cross_x = ay * bz - az * by;
     let cross_y = az * bx - ax * bz;
     let cross_z = ax * by - ay * bx;
-    let sine = libm::sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z)
-        / normalization;
+    let sine =
+        libm::sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z) / normalization;
     let angle = libm::atan2(sine, dot);
     if !angle.is_finite() || angle <= 0.0 {
         return Err(SampleError::InvalidScale);
@@ -1517,17 +1514,14 @@ mod tests {
         let neighbor = DirCube.neighbor(key, crate::spatial::FaceEdge::UPlus).unwrap();
         let center = DirCube.cell_center(key).unwrap();
         let adjacent = DirCube.cell_center(neighbor).unwrap();
-        let dot = center.x() * adjacent.x()
-            + center.y() * adjacent.y()
-            + center.z() * adjacent.z();
+        let dot = center.x() * adjacent.x() + center.y() * adjacent.y() + center.z() * adjacent.z();
         assert_eq!(libm::acos(dot), 0.0, "the old acos path loses this separation");
 
         let angle = angular_distance(center, adjacent).unwrap();
         assert!(angle.is_finite() && angle > 0.0);
         let constant = slope_from_cardinal_samples(&[17.0; 4], &[angle; 4]).unwrap();
         assert_eq!(constant, 0.0);
-        let gradient =
-            slope_from_cardinal_samples(&[0.0, 2.0, 0.0, 2.0], &[angle; 4]).unwrap();
+        let gradient = slope_from_cardinal_samples(&[0.0, 2.0, 0.0, 2.0], &[angle; 4]).unwrap();
         assert!(gradient.is_finite() && gradient > 0.0);
     }
 

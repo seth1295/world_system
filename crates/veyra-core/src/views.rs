@@ -287,18 +287,8 @@ mod tests {
         let earlier_order = capability_display_order(&earlier_contract).unwrap();
 
         let mut views = vec![
-            descriptor(
-                "field.later",
-                Some("cap.later/1"),
-                "A group",
-                Some(later_order),
-            ),
-            descriptor(
-                "derived.earlier",
-                Some("cap.earlier/1"),
-                "Z group",
-                Some(earlier_order),
-            ),
+            descriptor("field.later", Some("cap.later/1"), "A group", Some(later_order)),
+            descriptor("derived.earlier", Some("cap.earlier/1"), "Z group", Some(earlier_order)),
         ];
         sort_views(&mut views);
         assert_eq!(views[0].id, "derived.earlier");

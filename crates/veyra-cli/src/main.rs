@@ -235,11 +235,14 @@ fn parse_field_id(body: &veyra_core::io::Body, text: &str) -> Result<FieldId, Bo
     if let Ok(field) = FieldId::parse(text) {
         return Ok(field);
     }
-    body.fields()
-        .iter()
-        .find(|field| field.name == text)
-        .map(|field| field.id)
-        .ok_or_else(|| format!("unknown field {text}").into())
+    let mut matches = body.fields().iter().filter(|field| field.name == text);
+    let Some(field) = matches.next() else {
+        return Err(format!("unknown field {text}").into());
+    };
+    if matches.next().is_some() {
+        return Err(format!("field name {text} is ambiguous; select by FieldId").into());
+    }
+    Ok(field.id)
 }
 
 fn parse_position(args: &[String]) -> Result<Position, Box<dyn Error>> {

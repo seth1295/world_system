@@ -160,14 +160,25 @@ impl Body {
                         .find(|item| item.id == *capability_id)
                         .and_then(|item| item.params.get("domain"))
                         .and_then(Value::as_str);
-                    let Some((domain, required_fields)) =
+                    let Some((domain_id, required_fields)) =
                         resolve_required_view_fields(needs, self.fields(), capability_domain)
                     else {
                         continue;
                     };
+                    let Some(domain) = self.domains().iter().find(|domain| domain.id == domain_id)
+                    else {
+                        continue;
+                    };
+                    if !required_fields.iter().all(|field_id| {
+                        self.fields().iter().find(|field| field.id == *field_id).is_some_and(
+                            |field| self.supports_derived_view_field(operator, field, domain),
+                        )
+                    }) {
+                        continue;
+                    }
                     views.push(ViewDescriptor {
                         id: id.to_owned(),
-                        domain,
+                        domain: domain_id,
                         field: None,
                         field_name: None,
                         required_fields,
@@ -244,6 +255,9 @@ mod tests {
         resolve_required_view_fields, sort_views,
     };
     use crate::body::FieldId;
+    use crate::ids::Hash32;
+    use crate::io::Body;
+    use crate::spatial::Topology;
     use serde_json::json;
     use std::collections::BTreeSet;
 
@@ -379,6 +393,95 @@ mod tests {
         };
         assert!(!cross_domain_view.accepts_field(FieldId::new(0x0101, 1)));
         assert!(cross_domain_view.accepts_field(FieldId::new(0x0101, 2)));
+    }
+
+    fn topography_body(semantic: &str, dtype: &str) -> Body {
+        let mut root_value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../conformance/worlds/cb9-minimal-void/body.json"
+        ))
+        .unwrap();
+        root_value["required_features"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("veyra.topo.dir_cube/1"));
+        root_value["domains"] = json!([{
+            "id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed",
+            "vertical":{"kind":"none"},"tile_log2":0,"max_level":0
+        }]);
+        root_value["reference_surfaces"] = json!([
+            {"id":"datum.mean","kind":"sphere","radius_m":"1"},
+            {"id":"figure.boundary","kind":"figure_surface"}
+        ]);
+        root_value["capabilities"] = json!([
+            {"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"},"compat":"critical"},
+            {"id":"veyra.cap.topography/1","params":{"reference_surface":"datum.mean","domain":"surface"},"compat":"critical"}
+        ]);
+        let field_id = FieldId::new(0x0101, 1);
+        let index = crate::canon::index::IndexBlob {
+            field_id: field_id.0,
+            topology: crate::canon::index::TopologyTag::DirCube,
+            tile_log2: 0,
+            entries: vec![crate::canon::index::IndexEntry {
+                level: 0,
+                key: crate::spatial::DirCube::key(0, 0, 0, 0).unwrap().0,
+                value: crate::canon::index::IndexValue::Const(1),
+            }],
+        };
+        let index_hash = crate::canon::hash::hash(&index.encode().unwrap());
+        root_value["indexes"] = json!({field_id.to_string():index_hash.to_string()});
+        let root = serde_json::from_value(root_value.clone()).unwrap();
+        let registry = serde_json::from_value(json!({
+            "schema":"veyra.field_registry/1",
+            "fields":[{
+                "id":field_id.to_string(),"name":"topography.height_m",
+                "capability":"veyra.cap.topography/1","domain":"surface",
+                "semantic":semantic,"persistence":"invariant","unit":"m",
+                "storage":{"dtype":dtype,"scale":"1","offset":"0"},
+                "native_level":0,"temporal":{"kind":"static"},
+                "sampling":{"interp":"bilinear"},"downsample":"mean","compat":"ancillary"
+            }]
+        }))
+        .unwrap();
+        Body {
+            root,
+            root_value,
+            baseline_id: Hash32([0; 32]),
+            registry,
+            sections: std::collections::BTreeMap::new(),
+            indexes: std::collections::BTreeMap::from([(field_id, index)]),
+            blobs: std::collections::BTreeMap::new(),
+            ledgers: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn derived_views_are_only_advertised_for_interpretable_required_fields() {
+        let valid = topography_body("scalar.height", "i16");
+        let valid_view = valid
+            .views()
+            .into_iter()
+            .find(|view| view.id == "derived.slope")
+            .expect("supported topography field exposes its slope view");
+        assert_eq!(valid_view.required_fields, vec![FieldId::new(0x0101, 1)]);
+
+        for (semantic, dtype) in [("future.quantity", "u16"), ("scalar.height", "future_dtype")] {
+            let body = topography_body(semantic, dtype);
+            assert!(body.root.validate().is_ok());
+            assert!(body.root.validate_registry(&body.registry).is_ok());
+            assert!(!body.views().iter().any(|view| view.id == "derived.slope"));
+            assert!(matches!(
+                body.tile(&crate::sample::TileRequest {
+                    field: FieldId::new(0x0101, 1),
+                    key: crate::spatial::DirCube
+                        .tile_key(crate::spatial::DirCube::key(0, 0, 0, 0).unwrap(), 0)
+                        .unwrap(),
+                    time: crate::sample::TimeSel::Static,
+                    halo: 0,
+                    view: crate::sample::TileView::Derived("derived.slope".to_owned()),
+                }),
+                Err(crate::sample::SampleError::UnsupportedSelection)
+            ));
+        }
     }
 
     #[test]

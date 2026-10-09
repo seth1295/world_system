@@ -759,9 +759,7 @@ impl Body {
         level: u8,
         time: TimeSel,
     ) -> Result<Option<f64>, SampleError> {
-        if domain.topology != "veyra.topo.dir_cube/1" || is_discrete_semantic(&field.semantic) {
-            return Err(SampleError::UnsupportedSelection);
-        }
+        validate_derived_view_field("core.slope/1", field, domain)?;
         let center = self.sample(&SampleQuery {
             field: field.id,
             pos: Position::Cell { domain: field.domain.clone(), key: cell },
@@ -808,11 +806,7 @@ impl Body {
         level: u8,
         time: TimeSel,
     ) -> Result<Option<f64>, SampleError> {
-        if is_discrete_semantic(&field.semantic)
-            || field.extra.get("unit").and_then(Value::as_str) != Some("m")
-        {
-            return Err(SampleError::UnsupportedField);
-        }
+        validate_derived_view_field("core.threshold_partition/1", field, domain)?;
         let capability = view.capability.as_deref().ok_or(SampleError::UnsupportedSelection)?;
         let threshold_surface = self
             .capability_reference(capability, "reference_surface")
@@ -1085,6 +1079,27 @@ impl Body {
         self.registry.fields.iter().find(|field| field.id == id).ok_or(SampleError::UnknownField)
     }
 
+    pub(crate) fn supports_derived_view_field(
+        &self,
+        operator: &str,
+        field: &FieldDescriptor,
+        domain: &crate::body::Domain,
+    ) -> bool {
+        if validate_derived_view_field(operator, field, domain).is_err()
+            || !self.indexes.contains_key(&field.id)
+            || self.resolve_level(field, domain, LevelSel::Native).is_err()
+        {
+            return false;
+        }
+        let time = if field.temporal.get("kind").and_then(Value::as_str) == Some("periodic_slices")
+        {
+            TimeSel::Slice(0)
+        } else {
+            TimeSel::Static
+        };
+        select_slices(field, time).is_ok()
+    }
+
     fn domain(&self, id: &str) -> Result<&crate::body::Domain, SampleError> {
         self.root.domains.iter().find(|domain| domain.id == id).ok_or(SampleError::UnknownDomain)
     }
@@ -1311,6 +1326,35 @@ fn ensure_supported_field(field: &FieldDescriptor) -> Result<(), SampleError> {
         return Err(SampleError::UnsupportedField);
     }
     Ok(())
+}
+
+pub(crate) fn validate_derived_view_field(
+    operator: &str,
+    field: &FieldDescriptor,
+    domain: &crate::body::Domain,
+) -> Result<(), SampleError> {
+    ensure_supported_field(field)?;
+    match operator {
+        "core.slope/1"
+            if domain.topology == "veyra.topo.dir_cube/1"
+                && field.semantic.starts_with("scalar.") =>
+        {
+            Ok(())
+        }
+        "core.threshold_partition/1"
+            if domain.topology == "veyra.topo.dir_cube/1"
+                && field.semantic.starts_with("scalar.")
+                && field.extra.get("unit").and_then(Value::as_str) == Some("m") =>
+        {
+            Ok(())
+        }
+        "core.slope/1" => Err(SampleError::UnsupportedSelection),
+        "core.threshold_partition/1" if domain.topology != "veyra.topo.dir_cube/1" => {
+            Err(SampleError::UnsupportedSelection)
+        }
+        "core.threshold_partition/1" => Err(SampleError::UnsupportedField),
+        _ => Err(SampleError::UnsupportedSelection),
+    }
 }
 
 fn is_discrete_semantic(semantic: &str) -> bool {

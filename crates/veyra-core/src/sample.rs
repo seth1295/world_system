@@ -1,6 +1,7 @@
 //! Topology-driven field sampling over verified body content.
 
 use core::fmt;
+use core::mem::size_of;
 
 use serde_json::Value;
 
@@ -15,6 +16,13 @@ use crate::spatial::{
     Topology, TopologyPoint,
 };
 use crate::time::DecimalString;
+
+/// Maximum memory reserved for one materialized [`TileData::values`] result.
+///
+/// This API-only output budget does not restrict canonical tile sizes or body resolutions. A
+/// production 128 × 128 tile with a one-cell halo requires about 264 KiB when represented as
+/// `Option<f64>`, leaving substantial headroom under this 16 MiB per-result cap.
+pub const MAX_MATERIALIZED_TILE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Position accepted by the V1 body sampler.
 #[derive(Clone, Debug, PartialEq)]
@@ -263,6 +271,10 @@ pub enum SampleError {
     UnsupportedSelection,
     /// Different discrete values cannot be averaged at a cube-corner halo.
     UnsupportedDiscreteCornerHalo,
+    /// The requested tile result exceeds the bounded materialization budget.
+    TileOutputLimitExceeded,
+    /// A bounded tile result could not reserve its output buffer.
+    AllocationFailed,
     /// The body does not declare the field's domain.
     UnknownDomain,
     /// A query position does not belong to the field domain.
@@ -295,6 +307,12 @@ impl fmt::Display for SampleError {
             Self::UnsupportedSelection => formatter.write_str("sample selection is unsupported"),
             Self::UnsupportedDiscreteCornerHalo => {
                 formatter.write_str("discrete values cannot be averaged at a cube-corner halo")
+            }
+            Self::TileOutputLimitExceeded => {
+                formatter.write_str("materialized tile exceeds the core output limit")
+            }
+            Self::AllocationFailed => {
+                formatter.write_str("could not reserve the bounded tile output buffer")
             }
             Self::UnknownDomain => formatter.write_str("field domain is not declared"),
             Self::InvalidPosition => {
@@ -631,11 +649,13 @@ impl Body {
             return Err(SampleError::UnsupportedResolution);
         }
         let layout = topology.tile_raster_layout(request.key, domain.tile_log2, request.halo)?;
-        let dim_i = layout.dim_i;
-        let dim_j = layout.dim_j;
-        let dim_i = u16::try_from(dim_i).map_err(|_| SampleError::InvalidRaster)?;
-        let dim_j = u16::try_from(dim_j).map_err(|_| SampleError::InvalidRaster)?;
-        let mut values = Vec::with_capacity(usize::from(dim_i) * usize::from(dim_j));
+        let output_len = materialized_tile_cell_count(layout.dim_i, layout.dim_j)?;
+        let dim_i =
+            u16::try_from(layout.dim_i).map_err(|_| SampleError::TileOutputLimitExceeded)?;
+        let dim_j =
+            u16::try_from(layout.dim_j).map_err(|_| SampleError::TileOutputLimitExceeded)?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(output_len).map_err(|_| SampleError::AllocationFailed)?;
         let mut source = None;
         let discrete_output = is_discrete_tile_output(field, derived_view.as_ref());
         for j in 0..i64::from(dim_j) {
@@ -1495,6 +1515,21 @@ fn query_level_is_pyramid(field: &FieldDescriptor, selection: LevelSel, level: u
     selection != LevelSel::Native && level < field.native_level
 }
 
+fn materialized_tile_cell_count(dim_i: u64, dim_j: u64) -> Result<usize, SampleError> {
+    if dim_i == 0 || dim_j == 0 {
+        return Err(SampleError::InvalidRaster);
+    }
+    let dim_i = usize::try_from(dim_i).map_err(|_| SampleError::TileOutputLimitExceeded)?;
+    let dim_j = usize::try_from(dim_j).map_err(|_| SampleError::TileOutputLimitExceeded)?;
+    let cells = dim_i.checked_mul(dim_j).ok_or(SampleError::TileOutputLimitExceeded)?;
+    let bytes =
+        cells.checked_mul(size_of::<Option<f64>>()).ok_or(SampleError::TileOutputLimitExceeded)?;
+    if bytes > MAX_MATERIALIZED_TILE_BYTES {
+        return Err(SampleError::TileOutputLimitExceeded);
+    }
+    Ok(cells)
+}
+
 fn is_discrete_tile_output(
     field: &FieldDescriptor,
     view: Option<&crate::views::ViewDescriptor>,
@@ -1579,8 +1614,8 @@ fn stable_weighted_mean(values: &[WeightedCell]) -> Result<Option<f64>, SampleEr
 mod tests {
     use super::{
         LevelSel, Position, SampleQuery, TimeSel, angular_distance, is_discrete_tile_output,
-        merge_contributing_source, merge_discrete_corner_value, slope_from_cardinal_samples,
-        stable_weighted_mean, temporal_mean,
+        materialized_tile_cell_count, merge_contributing_source, merge_discrete_corner_value,
+        slope_from_cardinal_samples, stable_weighted_mean, temporal_mean,
     };
     use crate::body::{FieldDescriptor, FieldId};
     use crate::canon::blob::{BlobKind, CanonicalBlob, DType};
@@ -1883,6 +1918,37 @@ mod tests {
         (body, field)
     }
 
+    fn cube_constant_body(tile_log2: u8) -> (Body, FieldId) {
+        let (mut body, field) = radial_const_nodata_body(0, 1, "scalar.value", "mean");
+        let domain = &mut body.root.domains[0];
+        domain.topology = "veyra.topo.dir_cube/1".to_owned();
+        domain.tile_log2 = tile_log2;
+        domain.max_level = tile_log2;
+        domain.vertical = json!({"kind":"none"});
+        body.root.required_features.retain(|feature| feature != "veyra.topo.radial_1d/1");
+        if !body.root.required_features.iter().any(|feature| feature == "veyra.topo.dir_cube/1") {
+            body.root.required_features.push("veyra.topo.dir_cube/1".to_owned());
+        }
+        body.registry.fields[0].native_level = tile_log2;
+        body.registry.fields[0].sampling["interp"] = json!("nearest");
+        let index = body.indexes.get_mut(&field).unwrap();
+        index.topology = TopologyTag::DirCube;
+        index.tile_log2 = tile_log2;
+        index.entries = (0..6_u8)
+            .map(|face| {
+                let cell = DirCube::key(face, 0, 0, tile_log2).unwrap();
+                let tile = DirCube.tile_key(cell, tile_log2).unwrap();
+                IndexEntry { level: tile.level, key: tile.address.0, value: IndexValue::Const(5) }
+            })
+            .collect();
+        let index_hash = hash::hash(&index.encode().unwrap());
+        body.root.indexes.insert(field.to_string(), index_hash.to_string());
+        body.root_value["required_features"] = json!(body.root.required_features);
+        body.root_value["domains"] = json!(body.root.domains);
+        body.root_value["indexes"][field.to_string()] = json!(index_hash.to_string());
+        (body, field)
+    }
+
     #[test]
     fn angular_distance_and_slope_remain_stable_at_level_thirty() {
         let key = DirCube::key(0, 1 << 29, 1 << 29, 30).unwrap();
@@ -1910,6 +1976,82 @@ mod tests {
         assert!(temporal_mean(&[]).is_err());
         assert!(temporal_mean(&[f64::NAN]).is_err());
         assert!(temporal_mean(&[f64::INFINITY]).is_err());
+    }
+
+    #[test]
+    fn tile_materialization_limit_uses_checked_target_sized_arithmetic() {
+        assert_eq!(materialized_tile_cell_count(128, 128).unwrap(), 128 * 128);
+        assert!(matches!(
+            materialized_tile_cell_count(0, 1),
+            Err(super::SampleError::InvalidRaster)
+        ));
+        assert!(matches!(
+            materialized_tile_cell_count(u64::MAX, u64::MAX),
+            Err(super::SampleError::TileOutputLimitExceeded)
+        ));
+    }
+
+    #[test]
+    fn tile_materialization_rejects_massive_valid_requests_and_keeps_production_tiles() {
+        let (production_body, field) = cube_constant_body(7);
+        let production_key = DirCube.tile_key(DirCube::key(0, 0, 0, 7).unwrap(), 7).unwrap();
+        let production = production_body
+            .tile(&super::TileRequest {
+                field,
+                key: production_key,
+                time: TimeSel::Static,
+                halo: 0,
+                view: super::TileView::Raw,
+            })
+            .unwrap();
+        assert_eq!((production.dim_i, production.dim_j), (128, 128));
+        assert_eq!(production.values.len(), 128 * 128);
+        assert!(production.values.iter().all(|value| *value == Some(5.0)));
+
+        let production_halo = production_body
+            .tile(&super::TileRequest {
+                field,
+                key: production_key,
+                time: TimeSel::Static,
+                halo: 1,
+                view: super::TileView::Raw,
+            })
+            .unwrap();
+        assert_eq!((production_halo.dim_i, production_halo.dim_j), (130, 130));
+        assert_eq!(production_halo.values.len(), 130 * 130);
+        assert!(production_halo.values.iter().all(|value| *value == Some(5.0)));
+
+        for tile_log2 in [12, 30] {
+            let (body, field) = cube_constant_body(tile_log2);
+            assert!(body.root.validate().is_ok());
+            assert!(body.root.validate_registry(&body.registry).is_ok());
+            let key =
+                DirCube.tile_key(DirCube::key(0, 0, 0, tile_log2).unwrap(), tile_log2).unwrap();
+            let sample = body
+                .sample(&SampleQuery {
+                    field,
+                    pos: Position::Cell {
+                        domain: "interior".to_owned(),
+                        key: DirCube::key(0, 0, 0, tile_log2).unwrap(),
+                    },
+                    level: LevelSel::Exact(tile_log2),
+                    time: TimeSel::Static,
+                })
+                .unwrap();
+            assert_eq!(sample.value, Some(5.0));
+            for halo in [0, 1] {
+                assert!(matches!(
+                    body.tile(&super::TileRequest {
+                        field,
+                        key,
+                        time: TimeSel::Static,
+                        halo,
+                        view: super::TileView::Raw,
+                    }),
+                    Err(super::SampleError::TileOutputLimitExceeded)
+                ));
+            }
+        }
     }
 
     #[test]

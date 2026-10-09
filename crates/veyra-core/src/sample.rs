@@ -5,7 +5,7 @@ use core::fmt;
 use serde_json::Value;
 
 use crate::body::{FieldDescriptor, FieldId, parse_hash};
-use crate::canon::blob::{BlobKind, CanonicalBlob, DType};
+use crate::canon::blob::{BlobKind, CanonicalBlobView, DType};
 use crate::canon::hash;
 use crate::canon::index::{IndexEntry, IndexValue};
 use crate::ids::Hash32;
@@ -419,7 +419,6 @@ impl Body {
             for (cell_index, weighted_cell) in stencil.iter().enumerate() {
                 let (raw, source) =
                     self.raw_at(field, index, topology.as_topology(), weighted_cell.key, slice)?;
-                all_const &= source == StoredSource::Const;
                 if cell_index == 0 && primary_raw.is_none() {
                     primary_raw = Some(raw);
                     primary_cell = weighted_cell.key;
@@ -427,6 +426,7 @@ impl Body {
                 if is_nodata(field, raw) {
                     continue;
                 }
+                all_const &= source == StoredSource::Const;
                 let physical = decode_physical(field, raw)?;
                 weighted_value += physical * weighted_cell.weight;
                 total_weight += weighted_cell.weight;
@@ -525,7 +525,7 @@ impl Body {
         if hash::hash(canonical) != expected {
             return Err(SampleError::HashMismatch(expected));
         }
-        let blob = CanonicalBlob::decode(canonical).map_err(|_| SampleError::InvalidRaster)?;
+        let blob = CanonicalBlobView::decode(canonical).map_err(|_| SampleError::InvalidRaster)?;
         if blob.kind != BlobKind::RasterTile {
             return Err(SampleError::InvalidRaster);
         }
@@ -1172,7 +1172,7 @@ impl Body {
                 let canonical =
                     self.blobs.get(&hash).ok_or(SampleError::Missing(vec![Need::Blob { hash }]))?;
                 let blob =
-                    CanonicalBlob::decode(canonical).map_err(|_| SampleError::InvalidRaster)?;
+                    CanonicalBlobView::decode(canonical).map_err(|_| SampleError::InvalidRaster)?;
                 if blob.kind != BlobKind::RasterTile
                     || crate::body::field_dtype(field) != Some(blob.dtype)
                 {
@@ -1186,7 +1186,7 @@ impl Body {
                 let pixel = (usize::from(slice) * usize::from(blob.dim_j) + j as usize)
                     * usize::from(blob.dim_i)
                     + i as usize;
-                Ok((decode_raw(blob.dtype, &blob.payload, pixel)?, StoredSource::Blob))
+                Ok((decode_raw(blob.dtype, blob.payload, pixel)?, StoredSource::Blob))
             }
         }
     }
@@ -1601,6 +1601,16 @@ mod tests {
         let tile_key = DirCube.tile_key(cell, 0).unwrap();
         assert_eq!(tile_key, TileKey { level: 0, address: cell });
 
+        let raster_tile = body
+            .tile(&super::TileRequest {
+                field: field_id,
+                key: tile_key,
+                time: TimeSel::Static,
+                halo: 0,
+                view: super::TileView::Raw,
+            })
+            .unwrap();
+        assert_eq!(raster_tile.values, vec![Some(42.0)]);
         let ordinary_stats = body.stats(field_id, LevelSel::Exact(0), TimeSel::Static).unwrap();
         assert_eq!(ordinary_stats.mean, Some(42.0));
         body.indexes.get_mut(&field_id).unwrap().entries[0].value = IndexValue::Const(1);
@@ -1646,6 +1656,89 @@ mod tests {
         assert_eq!(const_first_tile.source, super::SampleSource::Mixed);
     }
 
+    fn radial_const_nodata_body(const_shell: u64, slice_count: u16) -> (Body, FieldId) {
+        let field_id = FieldId::new(0x7ffe, 1);
+        let raster = CanonicalBlob::new(
+            BlobKind::RasterTile,
+            DType::U8,
+            1,
+            1,
+            slice_count,
+            vec![255; usize::from(slice_count)],
+        )
+        .unwrap()
+        .encode();
+        let raster_hash = hash::hash(&raster);
+        let entries = (0..2_u64)
+            .map(|shell| IndexEntry {
+                level: 1,
+                key: crate::spatial::Radial1d::key(1, shell).unwrap().0,
+                value: if shell == const_shell {
+                    IndexValue::Const(5)
+                } else {
+                    IndexValue::Blob(raster_hash)
+                },
+            })
+            .collect();
+        let index = IndexBlob {
+            field_id: field_id.0,
+            topology: TopologyTag::Radial1d,
+            tile_log2: 0,
+            entries,
+        };
+        let index_hash = hash::hash(&index.encode().unwrap());
+        let mut root_value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../conformance/worlds/cb9-minimal-void/body.json"
+        ))
+        .unwrap();
+        root_value["required_features"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("veyra.topo.radial_1d/1"));
+        root_value["domains"] = json!([{
+            "id":"interior","topology":"veyra.topo.radial_1d/1","frame":"body_fixed",
+            "vertical":{"kind":"radius","extent_m":"1"},"tile_log2":0,"max_level":1
+        }]);
+        root_value["capabilities"] =
+            json!([{"id":"veyra.cap.conformance_probe/1","params":{},"compat":"ancillary"}]);
+        root_value["indexes"] = json!({field_id.to_string():index_hash.to_string()});
+        let root = serde_json::from_value(root_value.clone()).unwrap();
+        let temporal = if slice_count == 1 {
+            json!({"kind":"static"})
+        } else {
+            json!({
+                "kind":"periodic_slices","count":slice_count,
+                "period_ref":"rotation.period","origin_ref":"rotation.epoch",
+                "reduce_default":"mean"
+            })
+        };
+        let registry = serde_json::from_value(json!({
+            "schema":"veyra.field_registry/1",
+            "fields":[{
+                "id":field_id.to_string(),"name":"scalar.value",
+                "capability":"veyra.cap.conformance_probe/1","domain":"interior",
+                "semantic":"scalar.value","persistence":"invariant","unit":"K",
+                "storage":{"dtype":"u8","scale":"1","offset":"0","nodata":255},
+                "native_level":1,"temporal":temporal,
+                "sampling":{"interp":"linear"},"downsample":"mean","compat":"ancillary"
+            }]
+        }))
+        .unwrap();
+        (
+            Body {
+                root,
+                root_value,
+                baseline_id: Hash32([0; 32]),
+                registry,
+                sections: std::collections::BTreeMap::new(),
+                indexes: std::collections::BTreeMap::from([(field_id, index)]),
+                blobs: std::collections::BTreeMap::from([(raster_hash, raster)]),
+                ledgers: std::collections::BTreeMap::new(),
+            },
+            field_id,
+        )
+    }
+
     #[test]
     fn angular_distance_and_slope_remain_stable_at_level_thirty() {
         let key = DirCube::key(0, 1 << 29, 1 << 29, 30).unwrap();
@@ -1673,6 +1766,45 @@ mod tests {
         assert!(temporal_mean(&[]).is_err());
         assert!(temporal_mean(&[f64::NAN]).is_err());
         assert!(temporal_mean(&[f64::INFINITY]).is_err());
+    }
+
+    #[test]
+    fn nodata_does_not_change_constant_sample_provenance_in_either_stencil_order() {
+        for const_shell in [0, 1] {
+            let (body, field) = radial_const_nodata_body(const_shell, 1);
+            let sample = body
+                .sample(&SampleQuery {
+                    field,
+                    pos: Position::Radial { r_m: 0.5 },
+                    level: LevelSel::Exact(1),
+                    time: TimeSel::Static,
+                })
+                .unwrap();
+            assert_eq!(sample.value, Some(5.0));
+            assert_eq!(sample.source, super::SampleSource::Const);
+
+            let (body, field) = radial_const_nodata_body(const_shell, 2);
+            let slice = body
+                .sample(&SampleQuery {
+                    field,
+                    pos: Position::Radial { r_m: 0.5 },
+                    level: LevelSel::Exact(1),
+                    time: TimeSel::Slice(0),
+                })
+                .unwrap();
+            assert_eq!(slice.value, Some(5.0));
+            assert_eq!(slice.source, super::SampleSource::Const);
+            let mean = body
+                .sample(&SampleQuery {
+                    field,
+                    pos: Position::Radial { r_m: 0.5 },
+                    level: LevelSel::Exact(1),
+                    time: TimeSel::Mean,
+                })
+                .unwrap();
+            assert_eq!(mean.value, Some(5.0));
+            assert_eq!(mean.source, super::SampleSource::TimeReduced);
+        }
     }
 
     #[test]

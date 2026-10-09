@@ -956,6 +956,15 @@ fn stage4_queries() -> Vec<Value> {
         json!({"fixture":"cb9-minimal-void","op":"views"}),
     ];
     for face in 0..6_u8 {
+        for (i, j) in [(0_u64, 0_u64), (0, 3), (3, 0), (3, 3)] {
+            queries.push(json!({
+                "fixture":"cb1-seams","op":"sample","field":"0x7ffe0001",
+                "position":{"kind":"cell","domain":"surface","key":cell(face,i,j)},
+                "level":2,"time":"static"
+            }));
+        }
+    }
+    for face in 0..6_u8 {
         for (s, t) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.0)] {
             let direction =
                 DirCube.direction_at_face_st(face, s, t).expect("cube edge query direction");
@@ -1034,9 +1043,11 @@ fn verify_stage4(world_root: &Path) -> Result<Vec<FixtureResult>, ConformanceErr
                         time: veyra_core::sample::TimeSel::Static,
                     })
                     .map_err(|_| ConformanceError::Assertion("cb1 analytic center sample"))?;
-                if sample.value.is_none_or(|value| (value - expected).abs() > 1.0e-6) {
+                if sample.raw.is_none()
+                    || sample.value.is_none_or(|value| (value - expected).abs() > 1.0e-6)
+                {
                     return Err(ConformanceError::Assertion(
-                        "cb1 analytic sample differs from its stored function",
+                        "cb1 cell-center bilinear query must return its stored value",
                     ));
                 }
             }

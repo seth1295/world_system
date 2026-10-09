@@ -401,8 +401,13 @@ impl Body {
         let domain = self.domain(&field.domain)?;
         let topology = topology_for(domain)?;
         let (level, _, mode) = self.resolve_level(field, domain, query.level)?;
-        let point = self.topology_point(&query.pos, &field.domain, topology.as_topology())?;
-        let stencil = topology.as_topology().interpolation_stencil(point, level, mode)?;
+        let (_, stencil) = self.stencil_for_position(
+            &query.pos,
+            &field.domain,
+            topology.as_topology(),
+            level,
+            mode,
+        )?;
         let (slices, reduction) = select_slices(field, query.time)?;
         ensure_discrete_reduction(field, reduction)?;
         let index = if let Some(index) = self.indexes.get(&field.id) {
@@ -440,9 +445,13 @@ impl Body {
         let domain = self.domain(&field.domain)?;
         let topology = topology_for(domain)?;
         let (level, source_override, mode) = self.resolve_level(field, domain, query.level)?;
-        let point = self.topology_point(&query.pos, &field.domain, topology.as_topology())?;
-        let primary_cell = topology.as_topology().locate_point(point, level)?;
-        let stencil = topology.as_topology().interpolation_stencil(point, level, mode)?;
+        let (primary_cell, stencil) = self.stencil_for_position(
+            &query.pos,
+            &field.domain,
+            topology.as_topology(),
+            level,
+            mode,
+        )?;
         let needs = self.plan(query)?;
         if !needs.is_empty() {
             return Err(SampleError::Missing(needs));
@@ -1091,7 +1100,7 @@ impl Body {
             .collect();
         for cell in values {
             let Some(value) = cell.value else { continue };
-            let index = numeric_histogram_index(value, minimum, maximum, range, width, &output);
+            let index = numeric_histogram_index(value, minimum, maximum, &output);
             output[index].weight += cell.measure;
             output[index].cells += 1;
         }
@@ -1314,6 +1323,27 @@ impl Body {
             | ("veyra.topo.radial_1d/1", TopologyPoint::RadialFraction(_)) => Ok(point),
             _ => Err(SampleError::InvalidPosition),
         }
+    }
+
+    fn stencil_for_position(
+        &self,
+        position: &Position,
+        domain_id: &str,
+        topology: &dyn Topology,
+        level: u8,
+        mode: InterpolationMode,
+    ) -> Result<(CellKey, Vec<crate::spatial::WeightedCell>), SampleError> {
+        let point = self.topology_point(position, domain_id, topology)?;
+        if let Position::Cell { key, .. } = position
+            && topology.level(*key)? == level
+        {
+            // Position::Cell carries the canonical identity directly. Avoid projecting its
+            // computed center to a direction and back, which can leave tiny bilinear weights.
+            return Ok((*key, vec![crate::spatial::WeightedCell { key: *key, weight: 1.0 }]));
+        }
+        let primary = topology.locate_point(point, level)?;
+        let stencil = topology.interpolation_stencil(point, level, mode)?;
+        Ok((primary, stencil))
     }
 
     fn raw_at(
@@ -1798,26 +1828,15 @@ fn numeric_histogram_edge(
     normalized * scale
 }
 
-fn numeric_histogram_index(
-    value: f64,
-    minimum: f64,
-    maximum: f64,
-    range: f64,
-    width: f64,
-    bins: &[HistogramBin],
-) -> usize {
+fn numeric_histogram_index(value: f64, minimum: f64, maximum: f64, bins: &[HistogramBin]) -> usize {
     if value <= minimum {
         return 0;
     }
     if value >= maximum {
         return bins.len() - 1;
     }
-    if range.is_finite() && width > 0.0 {
-        let index = libm::floor((value - minimum) / width).max(0.0) as usize;
-        return index.min(bins.len() - 1);
-    }
-    // Compare against the represented edges in the overflow/underflow cases so an exact
-    // internal edge remains inclusive in the following bin despite rounded normalization.
+    // Compare against the represented edges so exact internal boundaries always belong to the
+    // following bin, independent of quotient rounding or overflow in the full numeric range.
     bins.partition_point(|bin| bin.upper <= value).min(bins.len() - 1)
 }
 
@@ -2297,6 +2316,32 @@ mod tests {
         (body, field)
     }
 
+    fn cube_bilinear_cell_values_body() -> (Body, FieldId) {
+        let (mut body, field) = cube_constant_body(0);
+        body.root.domains[0].max_level = 1;
+        body.root_value["domains"] = json!(body.root.domains);
+        body.registry.fields[0].native_level = 1;
+        body.registry.fields[0].sampling["interp"] = json!("bilinear");
+        let index = body.indexes.get_mut(&field).unwrap();
+        index.tile_log2 = 0;
+        index.entries = (0..6_u8)
+            .flat_map(|face| {
+                (0..2_u64).flat_map(move |i| {
+                    (0..2_u64).map(move |j| IndexEntry {
+                        level: 1,
+                        key: DirCube::key(face, i, j, 1).unwrap().0,
+                        value: IndexValue::Const(i64::from(face) * 4 + (i * 2 + j) as i64 + 1),
+                    })
+                })
+            })
+            .collect();
+        index.entries.sort_by_key(|entry| (entry.level, entry.key));
+        let index_hash = hash::hash(&index.encode().unwrap());
+        body.root.indexes.insert(field.to_string(), index_hash.to_string());
+        body.root_value["indexes"][field.to_string()] = json!(index_hash.to_string());
+        (body, field)
+    }
+
     #[test]
     fn angular_distance_and_slope_remain_stable_at_level_thirty() {
         let key = DirCube::key(0, 1 << 29, 1 << 29, 30).unwrap();
@@ -2443,6 +2488,69 @@ mod tests {
         assert_eq!(discrete_sample.cell, DirCube.locate(edge, 2).unwrap());
         assert_eq!(discrete_sample.raw, Some(super::RawValue::Integer(1)));
         assert_eq!(discrete_sample.category, Some(1));
+    }
+
+    #[test]
+    fn cell_center_bilinear_reads_preserve_raw_values_across_faces_and_stats() {
+        let (body, field) = cube_bilinear_cell_values_body();
+        let mut expected_weighted_sum = 0.0;
+        let mut total_measure = 0.0;
+        for face in 0..6_u8 {
+            for i in 0..2_u64 {
+                for j in 0..2_u64 {
+                    let key = DirCube::key(face, i, j, 1).unwrap();
+                    let raw = i64::from(face) * 4 + (i * 2 + j) as i64 + 1;
+                    let query = SampleQuery {
+                        field,
+                        pos: Position::Cell { domain: "interior".to_owned(), key },
+                        level: LevelSel::Exact(1),
+                        time: TimeSel::Static,
+                    };
+                    assert!(body.plan(&query).unwrap().is_empty());
+                    let sample = body.sample(&query).unwrap();
+                    assert_eq!(sample.cell, key);
+                    assert_eq!(sample.raw, Some(super::RawValue::Integer(raw)));
+                    assert_eq!(sample.value, Some(raw as f64));
+
+                    let report =
+                        body.inspect(&query.pos, LevelSel::Exact(1), TimeSel::Static).unwrap();
+                    assert_eq!(report.fields[0].sample.as_ref().unwrap().raw, sample.raw);
+
+                    let tile_key = DirCube.tile_key(key, 0).unwrap();
+                    let tile = body
+                        .tile(&super::TileRequest {
+                            field,
+                            key: tile_key,
+                            time: TimeSel::Static,
+                            halo: 0,
+                            view: super::TileView::Raw,
+                        })
+                        .unwrap();
+                    assert_eq!(tile.values, vec![Some(raw as f64)]);
+
+                    let measure = DirCube.cell_measure(key).unwrap();
+                    expected_weighted_sum += raw as f64 * measure;
+                    total_measure += measure;
+                }
+            }
+        }
+        let stats = body.stats(field, LevelSel::Exact(1), TimeSel::Static).unwrap();
+        assert_eq!(stats.cells, 24);
+        assert_eq!(stats.minimum, Some(1.0));
+        assert_eq!(stats.maximum, Some(24.0));
+        assert!((stats.mean.unwrap() - expected_weighted_sum / total_measure).abs() < 1.0e-12);
+
+        let off_center = DirCube.direction_at_face_st(0, 0.625, 0.25).unwrap();
+        let mixed = body
+            .sample(&SampleQuery {
+                field,
+                pos: Position::Direction(off_center),
+                level: LevelSel::Exact(1),
+                time: TimeSel::Static,
+            })
+            .unwrap();
+        assert!((mixed.value.unwrap() - 2.5).abs() < 1.0e-12);
+        assert_eq!(mixed.raw, None);
     }
 
     #[test]
@@ -2905,17 +3013,8 @@ mod tests {
         assert_eq!(wide.bins.last().unwrap().upper, 1.0e308);
         assert_eq!(wide.bins[1].upper, 0.0);
         assert_eq!(wide.bins[2].lower, 0.0);
-        let wide_range = 1.0e308 - (-1.0e308);
-        assert_eq!(
-            super::numeric_histogram_index(0.0, -1.0e308, 1.0e308, wide_range, 0.0, &wide.bins),
-            2
-        );
-        assert_eq!(
-            super::numeric_histogram_index(
-                -5.0e307, -1.0e308, 1.0e308, wide_range, 0.0, &wide.bins
-            ),
-            1
-        );
+        assert_eq!(super::numeric_histogram_index(0.0, -1.0e308, 1.0e308, &wide.bins), 2);
+        assert_eq!(super::numeric_histogram_index(-5.0e307, -1.0e308, 1.0e308, &wide.bins), 1);
         assert_eq!(wide.bins.iter().map(|bin| bin.cells).collect::<Vec<_>>(), vec![1, 0, 0, 1]);
 
         let (nearby_body, nearby_field) = radial_scalar_values_body([100, 101], "1");
@@ -2955,5 +3054,46 @@ mod tests {
         );
         assert_eq!(ordinary.bins.last().unwrap().upper, 4.0);
         assert_eq!(ordinary.bins.iter().map(|bin| bin.cells).sum::<u64>(), 2);
+    }
+
+    #[test]
+    fn internal_histogram_edges_are_inclusive_in_the_following_bin() {
+        let minimum = 0.1;
+        let maximum = 0.4;
+        let bins = 3;
+        let range = maximum - minimum;
+        let width = range / bins as f64;
+        let edges: Vec<_> = (0..=bins)
+            .map(|edge| super::numeric_histogram_edge(minimum, maximum, range, width, bins, edge))
+            .collect();
+        let histogram_bins: Vec<_> = (0..bins)
+            .map(|index| super::HistogramBin {
+                lower: edges[index],
+                upper: edges[index + 1],
+                weight: 0.0,
+                cells: 0,
+            })
+            .collect();
+        let represented_edge = histogram_bins[0].upper;
+        assert_eq!(represented_edge, 0.2);
+        assert_eq!(super::numeric_histogram_index(0.2, minimum, maximum, &histogram_bins), 1);
+        assert_eq!(
+            super::numeric_histogram_index(
+                f64::from_bits(represented_edge.to_bits() - 1),
+                minimum,
+                maximum,
+                &histogram_bins
+            ),
+            0
+        );
+        assert_eq!(
+            super::numeric_histogram_index(
+                f64::from_bits(represented_edge.to_bits() + 1),
+                minimum,
+                maximum,
+                &histogram_bins
+            ),
+            1
+        );
     }
 }

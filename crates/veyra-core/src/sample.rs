@@ -428,6 +428,7 @@ impl Body {
         let topology = topology_for(domain)?;
         let (level, source_override, mode) = self.resolve_level(field, domain, query.level)?;
         let point = self.topology_point(&query.pos, &field.domain, topology.as_topology())?;
+        let primary_cell = topology.as_topology().locate_point(point, level)?;
         let stencil = topology.as_topology().interpolation_stencil(point, level, mode)?;
         let needs = self.plan(query)?;
         if !needs.is_empty() {
@@ -439,16 +440,14 @@ impl Body {
         let mut values = Vec::new();
         let mut all_const = true;
         let mut primary_raw = None;
-        let mut primary_cell = stencil.first().ok_or(SampleError::MissingTile)?.key;
         for slice in slices {
             let mut weighted_value = 0.0;
             let mut total_weight = 0.0;
-            for (cell_index, weighted_cell) in stencil.iter().enumerate() {
+            for weighted_cell in &stencil {
                 let (raw, source) =
                     self.raw_at(field, index, topology.as_topology(), weighted_cell.key, slice)?;
-                if cell_index == 0 && primary_raw.is_none() {
+                if weighted_cell.key == primary_cell && primary_raw.is_none() {
                     primary_raw = Some(raw);
-                    primary_cell = weighted_cell.key;
                 }
                 if is_nodata(field, raw) {
                     continue;
@@ -2024,8 +2023,8 @@ mod tests {
         (body, field)
     }
 
-    fn cube_face_value_body() -> (Body, FieldId) {
-        let (mut body, field) = cube_constant_body(30);
+    fn cube_face_value_body(tile_log2: u8) -> (Body, FieldId) {
+        let (mut body, field) = cube_constant_body(tile_log2);
         let index = body.indexes.get_mut(&field).unwrap();
         for entry in &mut index.entries {
             let (face, _, _, _) = DirCube::decode(crate::spatial::CellKey(entry.key)).unwrap();
@@ -2143,6 +2142,44 @@ mod tests {
     }
 
     #[test]
+    fn sample_reports_the_containing_cell_for_bilinear_stencils() {
+        let (mut body, field) = cube_face_value_body(2);
+        body.registry.fields[0].sampling["interp"] = json!("bilinear");
+        let edge = Dir::new(1.0, 1.0, 0.0).unwrap();
+        assert_eq!(DirCube.locate(edge, 2).unwrap(), crate::spatial::CellKey(0x1d00000000000000));
+        let interior = DirCube.direction_at_face_st(0, 0.37, 0.61).unwrap();
+        for direction in [edge, interior] {
+            let expected_cell = DirCube.locate(direction, 2).unwrap();
+            let sample = body
+                .sample(&SampleQuery {
+                    field,
+                    pos: Position::Direction(direction),
+                    level: LevelSel::Exact(2),
+                    time: TimeSel::Static,
+                })
+                .unwrap();
+            assert_eq!(sample.cell, expected_cell);
+            assert_eq!(sample.raw, None);
+            assert_eq!(sample.category, None);
+        }
+
+        let mut discrete_body = cube_face_value_body(2).0;
+        discrete_body.registry.fields[0].semantic = "category".to_owned();
+        discrete_body.registry.fields[0].sampling["interp"] = json!("bilinear");
+        let discrete_sample = discrete_body
+            .sample(&SampleQuery {
+                field,
+                pos: Position::Direction(edge),
+                level: LevelSel::Exact(2),
+                time: TimeSel::Static,
+            })
+            .unwrap();
+        assert_eq!(discrete_sample.cell, DirCube.locate(edge, 2).unwrap());
+        assert_eq!(discrete_sample.raw, Some(super::RawValue::Integer(1)));
+        assert_eq!(discrete_sample.category, Some(1));
+    }
+
+    #[test]
     fn pos30_sampling_preserves_chart_boundaries_interior_and_face_edges() {
         let (body, field) = cube_pos30_boundary_body();
         assert!(body.root.validate().is_ok());
@@ -2158,7 +2195,7 @@ mod tests {
             .unwrap();
         assert_eq!(sample.value, Some(15.0));
 
-        let (body, field) = cube_face_value_body();
+        let (body, field) = cube_face_value_body(30);
         let coordinate_count = f64::from(1_u32 << 30);
         for position in [
             super::Pos30 { face: 0, i30: 123_456_789, j30: 876_543_210 },

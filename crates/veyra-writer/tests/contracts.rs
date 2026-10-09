@@ -8,7 +8,8 @@ use veyra_core::canon::blob::{BlobKind, CanonicalBlob, DType};
 use veyra_core::canon::hash;
 use veyra_core::canon::index::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
 use veyra_core::ids::{ObjectAddress, ObjectId, UniverseId};
-use veyra_core::spatial::DirCube;
+use veyra_core::sample::{SampleSource, TileRequest, TileView, TimeSel};
+use veyra_core::spatial::{DirCube, TileKey};
 use veyra_core::time::UTime;
 use veyra_writer::{ArtifactWriter, WriterError, open_directory, verify_directory};
 
@@ -478,6 +479,111 @@ fn writer_reserves_root_files_and_checks_aliases_across_content_kinds() {
     let blob_path = format!("BLOBS/{}/{hex}.ZST", &hex[..2]);
     writer.write_json_section(&blob_path, b"{}").unwrap();
     assert!(matches!(writer.write_blob(&canonical), Err(WriterError::DuplicatePath)));
+    drop(writer);
+    remove_artifact(&path);
+}
+
+#[test]
+fn capability_declared_slope_and_surface_partition_views_execute_from_their_dependencies() {
+    let path = temp_path("derived-view-contract");
+    let mut writer = ArtifactWriter::new(&path).unwrap();
+    let field_id = FieldId::new(0x0101, 1);
+    let registry = json!({
+        "schema":"veyra.field_registry/1",
+        "fields":[{
+            "id":field_id.to_string(),"name":"topography.height_m","capability":"veyra.cap.topography/1",
+            "domain":"surface","semantic":"scalar.height","persistence":"invariant",
+            "storage":{"dtype":"i16","scale":"1","offset":"0"},"unit":"m",
+            "reference":{"surface":"datum"},"native_level":0,
+            "temporal":{"kind":"static"},"sampling":{"interp":"bilinear"},
+            "downsample":"mean","compat":"critical"
+        },{
+            "id":"0x7ffe0001","name":"x-future.value","capability":"x-veyra.future/1",
+            "domain":"surface","semantic":"x-future.value/1","persistence":"invariant",
+            "storage":{"dtype":"u8"},"compat":"ancillary"
+        }]
+    });
+    let mut body = base_body(&mut writer, "derived-view-contract", registry);
+    body["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.dir_cube/1"));
+    body["figure"] = json!({"kind":"sphere","radius_m":"1000"});
+    body["reference_surfaces"] = json!([
+        {"id":"figure_surface","kind":"figure_surface"},
+        {"id":"datum","kind":"sphere","radius_m":"1000"},
+        {"id":"ocean_level","kind":"sphere","radius_m":"1001"}
+    ]);
+    body["capabilities"] = json!([
+        {"id":"veyra.cap.solid_surface/1","params":{"figure_ref":"figure"}},
+        {"id":"veyra.cap.topography/1","params":{"reference_surface":"datum","domain":"surface"}},
+        {"id":"veyra.cap.ocean/1","params":{"level_surface":"ocean_level","domain":"surface"}}
+    ]);
+    body["domains"] = json!([{
+        "id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed",
+        "vertical":{"kind":"none"},"tile_log2":0,"max_level":0
+    }]);
+    let entries = (0..6_u8)
+        .map(|face| IndexEntry {
+            level: 0,
+            key: DirCube::key(face, 0, 0, 0).unwrap().0,
+            value: IndexValue::Const(0),
+        })
+        .collect();
+    let index =
+        IndexBlob { field_id: field_id.0, topology: TopologyTag::DirCube, tile_log2: 0, entries };
+    let index_hash = writer.write_index(field_id, &index).unwrap();
+    body["indexes"][field_id.to_string()] = json!(index_hash.to_string());
+    writer.write_body_json(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let opened = open_directory(&path).unwrap();
+    let views = opened.views();
+    assert!(views.iter().any(|view| view.id == "derived.slope"));
+    assert!(views.iter().any(|view| view.id == "derived.land_ocean"));
+    let report = opened
+        .inspect(
+            &veyra_core::sample::Position::Direction(
+                veyra_core::spatial::Dir::new(1.0, 0.0, 0.0).unwrap(),
+            ),
+            veyra_core::sample::LevelSel::Native,
+            TimeSel::Static,
+        )
+        .unwrap();
+    assert!(report.fields.iter().any(|field| {
+        field.name == "x-future.value" && field.sample.is_none() && field.issue.is_some()
+    }));
+
+    let key = TileKey { level: 0, address: DirCube::key(0, 0, 0, 0).unwrap() };
+    let slope = opened
+        .tile(&TileRequest {
+            field: field_id,
+            key,
+            time: TimeSel::Static,
+            halo: 0,
+            view: TileView::Derived("derived.slope".to_owned()),
+        })
+        .unwrap();
+    assert_eq!(slope.values, vec![Some(0.0)]);
+    assert_eq!(slope.source, SampleSource::Derived);
+
+    let partition = opened
+        .tile(&TileRequest {
+            field: field_id,
+            key,
+            time: TimeSel::Static,
+            halo: 0,
+            view: TileView::Derived("derived.land_ocean".to_owned()),
+        })
+        .unwrap();
+    assert_eq!(partition.values, vec![Some(0.0)]);
+    assert_eq!(partition.source, SampleSource::Derived);
+
+    assert!(matches!(
+        opened.tile(&TileRequest {
+            field: FieldId::new(0x0100, 1),
+            key,
+            time: TimeSel::Static,
+            halo: 0,
+            view: TileView::Derived("derived.land_ocean".to_owned()),
+        }),
+        Err(veyra_core::sample::SampleError::UnknownField)
+    ));
     drop(writer);
     remove_artifact(&path);
 }

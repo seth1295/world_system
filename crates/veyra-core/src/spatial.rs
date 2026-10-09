@@ -179,6 +179,48 @@ pub struct TileLayout {
     pub edge: u64,
 }
 
+/// Raster dimensions and local origin for a requested tile and halo.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TileRasterLayout {
+    /// Width including horizontal halo.
+    pub dim_i: u64,
+    /// Height including vertical halo when the topology has a second axis.
+    pub dim_j: u64,
+    /// Signed tile-local coordinate of the first output column.
+    pub offset_i: i64,
+    /// Signed tile-local coordinate of the first output row.
+    pub offset_j: i64,
+}
+
+/// A point in the coordinate chart accepted by a topology.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TopologyPoint {
+    /// Unit direction on a direction-sphere chart.
+    Direction(Dir),
+    /// Normalized radial coordinate in the closed interval from zero to one.
+    RadialFraction(f64),
+}
+
+/// V1 interpolation operator accepted by a topology stencil.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterpolationMode {
+    /// Select the containing cell.
+    Nearest,
+    /// Cell-centered bilinear interpolation on a 2D chart.
+    Bilinear,
+    /// Linear interpolation between radial shell centers.
+    Linear,
+}
+
+/// One cell and its nonnegative interpolation weight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeightedCell {
+    /// Addressed topology cell.
+    pub key: CellKey,
+    /// Contribution weight; a complete stencil sums to one.
+    pub weight: f64,
+}
+
 /// A common interface for hierarchical spatial addressing.
 pub trait Topology {
     /// Stable versioned topology ID.
@@ -191,6 +233,46 @@ pub trait Topology {
     fn children(&self, key: CellKey) -> Result<Vec<CellKey>, SpatialError>;
     /// Returns the containing tile key.
     fn tile_key(&self, key: CellKey, tile_log2: u8) -> Result<TileKey, SpatialError>;
+    /// Locates a topology-chart point at an exact level.
+    fn locate_point(&self, point: TopologyPoint, level: u8) -> Result<CellKey, SpatialError>;
+    /// Produces topology-owned interpolation weights at an exact level.
+    fn interpolation_stencil(
+        &self,
+        point: TopologyPoint,
+        level: u8,
+        mode: InterpolationMode,
+    ) -> Result<Vec<WeightedCell>, SpatialError>;
+    /// Returns the topology-chart point at a cell center.
+    fn point_for_cell(&self, key: CellKey) -> Result<TopologyPoint, SpatialError>;
+    /// Returns the data layout and origin for a canonical tile key.
+    fn tile_layout_for(&self, tile: TileKey, tile_log2: u8) -> Result<TileLayout, SpatialError>;
+    /// Returns raster dimensions and halo-local origin for a tile with a zero- or one-cell halo.
+    /// Wider V1 halos return [`SpatialError::InvalidHalo`].
+    fn tile_raster_layout(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        halo: u8,
+    ) -> Result<TileRasterLayout, SpatialError>;
+    /// Returns a cell within a tile using tile-local coordinates.
+    fn tile_cell(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        i: u64,
+        j: u64,
+    ) -> Result<CellKey, SpatialError>;
+    /// Returns halo cells at a tile-local signed coordinate, applying topology boundary rules.
+    /// Coordinates more than one cell outside the tile return [`SpatialError::InvalidHalo`].
+    fn tile_halo_cells(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        i: i64,
+        j: i64,
+    ) -> Result<Vec<WeightedCell>, SpatialError>;
+    /// Returns the tile-local coordinate of a cell.
+    fn tile_offset(&self, key: CellKey, tile_log2: u8) -> Result<(u64, u64), SpatialError>;
     /// Verifies that an encoded tile key is canonical for its topology and field level.
     fn validate_tile_key(&self, tile: TileKey, tile_log2: u8) -> Result<(), SpatialError>;
     /// Returns the cell measure in the topology's declared measure.
@@ -316,6 +398,31 @@ impl DirCube {
         Dir::new(x, y, z)
     }
 
+    /// Returns a body-fixed direction at Q0.32 coordinates within a cell.
+    pub fn direction_at_local(self, key: CellKey, du: u32, dv: u32) -> Result<Dir, SpatialError> {
+        let (face, i, j, level) = Self::decode(key)?;
+        let count = (1_u64 << level) as f64;
+        let unit = 4_294_967_296.0;
+        let s = (i as f64 + f64::from(du) / unit) / count;
+        let t = (j as f64 + f64::from(dv) / unit) / count;
+        let (x, y, z) = face_to_xyz(face, inverse_warp(s), inverse_warp(t))?;
+        Dir::new(x, y, z)
+    }
+
+    /// Returns a direction from continuous warped face coordinates in the closed unit chart.
+    pub fn direction_at_face_st(self, face: u8, s: f64, t: f64) -> Result<Dir, SpatialError> {
+        if face > 5
+            || !s.is_finite()
+            || !t.is_finite()
+            || !(0.0..=1.0).contains(&s)
+            || !(0.0..=1.0).contains(&t)
+        {
+            return Err(SpatialError::InvalidPosition);
+        }
+        let (x, y, z) = face_to_xyz(face, inverse_warp(s), inverse_warp(t))?;
+        Dir::new(x, y, z)
+    }
+
     /// Returns the level-zero through level-thirty cell key for face indices.
     pub fn key(face: u8, i: u64, j: u64, level: u8) -> Result<CellKey, SpatialError> {
         if face > 5 || level > 30 || i >= (1_u64 << level) || j >= (1_u64 << level) {
@@ -410,9 +517,10 @@ impl DirCube {
     /// Returns the two cardinal stencil cells used for an out-of-range corner query.
     pub fn corner_stencil(self, key: CellKey) -> Result<Option<[CellKey; 2]>, SpatialError> {
         let (_, i, j, level) = Self::decode(key)?;
+        let count = 1_u64 << level;
         let edge_i = if i == 0 {
             Some(FaceEdge::UMinus)
-        } else if i + 1 == 1_u64 << level {
+        } else if i + 1 == count {
             Some(FaceEdge::UPlus)
         } else {
             None
@@ -424,6 +532,15 @@ impl DirCube {
         } else {
             None
         };
+        self.corner_stencil_for_edges(key, edge_i, edge_j)
+    }
+
+    fn corner_stencil_for_edges(
+        self,
+        key: CellKey,
+        edge_i: Option<FaceEdge>,
+        edge_j: Option<FaceEdge>,
+    ) -> Result<Option<[CellKey; 2]>, SpatialError> {
         match (edge_i, edge_j) {
             (Some(u), Some(v)) => Ok(Some([self.neighbor(key, u)?, self.neighbor(key, v)?])),
             _ => Ok(None),
@@ -440,6 +557,40 @@ impl DirCube {
         let tile_i = (i / tile_edge) * tile_edge;
         let tile_j = (j / tile_edge) * tile_edge;
         Ok(TileLayout { face, i_start: tile_i, j_start: tile_j, edge: tile_edge })
+    }
+
+    fn direction_stencil_cells(
+        self,
+        face: u8,
+        i: i64,
+        j: i64,
+        level: u8,
+    ) -> Result<Vec<(CellKey, f64)>, SpatialError> {
+        let count = 1_i64 << level;
+        let out_i = i < 0 || i >= count;
+        let out_j = j < 0 || j >= count;
+        let clamped_i = i.clamp(0, count - 1) as u64;
+        let clamped_j = j.clamp(0, count - 1) as u64;
+        let boundary = Self::key(face, clamped_i, clamped_j, level)?;
+        match (out_i, out_j) {
+            (false, false) => Ok(vec![(boundary, 1.0)]),
+            (true, false) => {
+                let edge = if i < 0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                Ok(vec![(self.neighbor(boundary, edge)?, 1.0)])
+            }
+            (false, true) => {
+                let edge = if j < 0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                Ok(vec![(self.neighbor(boundary, edge)?, 1.0)])
+            }
+            (true, true) => {
+                let edge_i = if i < 0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                let edge_j = if j < 0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                let cells = self
+                    .corner_stencil_for_edges(boundary, Some(edge_i), Some(edge_j))?
+                    .ok_or(SpatialError::InvalidCellKey)?;
+                Ok(vec![(cells[0], 0.5), (cells[1], 0.5)])
+            }
+        }
     }
 
     fn key_from_path(face: u8, path: u64, level: u8) -> CellKey {
@@ -503,6 +654,157 @@ impl Topology for DirCube {
         let ancestor_level = level.saturating_sub(tile_log2);
         let shift = level - ancestor_level;
         Ok(TileKey { level, address: Self::key(face, i >> shift, j >> shift, ancestor_level)? })
+    }
+
+    fn locate_point(&self, point: TopologyPoint, level: u8) -> Result<CellKey, SpatialError> {
+        match point {
+            TopologyPoint::Direction(direction) => self.locate(direction, level),
+            TopologyPoint::RadialFraction(_) => Err(SpatialError::InvalidPosition),
+        }
+    }
+
+    fn interpolation_stencil(
+        &self,
+        point: TopologyPoint,
+        level: u8,
+        mode: InterpolationMode,
+    ) -> Result<Vec<WeightedCell>, SpatialError> {
+        if level > 30 {
+            return Err(SpatialError::InvalidLevel);
+        }
+        let TopologyPoint::Direction(direction) = point else {
+            return Err(SpatialError::InvalidPosition);
+        };
+        direction.validate()?;
+        if mode == InterpolationMode::Nearest {
+            return Ok(vec![WeightedCell { key: self.locate(direction, level)?, weight: 1.0 }]);
+        }
+        if mode != InterpolationMode::Bilinear {
+            return Err(SpatialError::InvalidPosition);
+        }
+        let (face, u, v) = project_direction(direction);
+        let count = (1_u64 << level) as f64;
+        let grid_i = warp_uv(u) * count - 0.5;
+        let grid_j = warp_uv(v) * count - 0.5;
+        let i0 = libm::floor(grid_i) as i64;
+        let j0 = libm::floor(grid_j) as i64;
+        let tx = grid_i - i0 as f64;
+        let ty = grid_j - j0 as f64;
+        let mut weights = std::collections::BTreeMap::<CellKey, f64>::new();
+        for (i, wi) in [(i0, 1.0 - tx), (i0 + 1, tx)] {
+            for (j, wj) in [(j0, 1.0 - ty), (j0 + 1, ty)] {
+                let weight = wi * wj;
+                if weight == 0.0 {
+                    continue;
+                }
+                for (key, share) in self.direction_stencil_cells(face, i, j, level)? {
+                    *weights.entry(key).or_default() += weight * share;
+                }
+            }
+        }
+        Ok(weights.into_iter().map(|(key, weight)| WeightedCell { key, weight }).collect())
+    }
+
+    fn point_for_cell(&self, key: CellKey) -> Result<TopologyPoint, SpatialError> {
+        self.cell_center(key).map(TopologyPoint::Direction)
+    }
+
+    fn tile_layout_for(&self, tile: TileKey, tile_log2: u8) -> Result<TileLayout, SpatialError> {
+        self.validate_tile_key(tile, tile_log2)?;
+        let (face, tile_i, tile_j, _) = Self::decode(tile.address)?;
+        let edge = 1_u64 << tile.level.min(tile_log2);
+        Ok(TileLayout { face, i_start: tile_i * edge, j_start: tile_j * edge, edge })
+    }
+
+    fn tile_raster_layout(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        halo: u8,
+    ) -> Result<TileRasterLayout, SpatialError> {
+        if halo > 1 {
+            return Err(SpatialError::InvalidHalo);
+        }
+        let layout = self.tile_layout_for(tile, tile_log2)?;
+        let edge = i64::try_from(layout.edge).map_err(|_| SpatialError::InvalidTileKey)?;
+        let halo = i64::from(halo);
+        Ok(TileRasterLayout {
+            dim_i: u64::try_from(edge + 2 * halo).map_err(|_| SpatialError::InvalidTileKey)?,
+            dim_j: u64::try_from(edge + 2 * halo).map_err(|_| SpatialError::InvalidTileKey)?,
+            offset_i: -halo,
+            offset_j: -halo,
+        })
+    }
+
+    fn tile_cell(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        i: u64,
+        j: u64,
+    ) -> Result<CellKey, SpatialError> {
+        let layout = self.tile_layout_for(tile, tile_log2)?;
+        if i >= layout.edge || j >= layout.edge {
+            return Err(SpatialError::InvalidCellKey);
+        }
+        Self::key(layout.face, layout.i_start + i, layout.j_start + j, tile.level)
+    }
+
+    fn tile_halo_cells(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        i: i64,
+        j: i64,
+    ) -> Result<Vec<WeightedCell>, SpatialError> {
+        let layout = self.tile_layout_for(tile, tile_log2)?;
+        let edge = i64::try_from(layout.edge).map_err(|_| SpatialError::InvalidTileKey)?;
+        if i < -1 || i > edge || j < -1 || j > edge {
+            return Err(SpatialError::InvalidHalo);
+        }
+        let count = 1_i64 << tile.level;
+        let global_i = layout.i_start as i64 + i;
+        let global_j = layout.j_start as i64 + j;
+        let out_i = global_i < 0 || global_i >= count;
+        let out_j = global_j < 0 || global_j >= count;
+        let clamped_i = global_i.clamp(0, count - 1) as u64;
+        let clamped_j = global_j.clamp(0, count - 1) as u64;
+        let boundary = Self::key(layout.face, clamped_i, clamped_j, tile.level)?;
+        match (out_i, out_j) {
+            (false, false) => Ok(vec![WeightedCell {
+                key: Self::key(layout.face, global_i as u64, global_j as u64, tile.level)?,
+                weight: 1.0,
+            }]),
+            (true, false) => {
+                let edge = if global_i < 0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                Ok(vec![WeightedCell { key: self.neighbor(boundary, edge)?, weight: 1.0 }])
+            }
+            (false, true) => {
+                let edge = if global_j < 0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                Ok(vec![WeightedCell { key: self.neighbor(boundary, edge)?, weight: 1.0 }])
+            }
+            (true, true) => {
+                let edge_i = if global_i < 0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                let edge_j = if global_j < 0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                let cells = self
+                    .corner_stencil_for_edges(boundary, Some(edge_i), Some(edge_j))?
+                    .ok_or(SpatialError::InvalidCellKey)?;
+                Ok(vec![
+                    WeightedCell { key: cells[0], weight: 0.5 },
+                    WeightedCell { key: cells[1], weight: 0.5 },
+                ])
+            }
+        }
+    }
+
+    fn tile_offset(&self, key: CellKey, tile_log2: u8) -> Result<(u64, u64), SpatialError> {
+        let tile = self.tile_key(key, tile_log2)?;
+        let layout = self.tile_layout_for(tile, tile_log2)?;
+        let (face, i, j, level) = Self::decode(key)?;
+        if face != layout.face || level != tile.level {
+            return Err(SpatialError::InvalidTileKey);
+        }
+        Ok((i - layout.i_start, j - layout.j_start))
     }
 
     fn validate_tile_key(&self, tile: TileKey, tile_log2: u8) -> Result<(), SpatialError> {
@@ -625,6 +927,135 @@ impl Topology for Radial1d {
         Ok(TileKey { level, address: Self::key(level, index >> tile_log2.min(level))? })
     }
 
+    fn locate_point(&self, point: TopologyPoint, level: u8) -> Result<CellKey, SpatialError> {
+        if level > RADIAL_MAX_LEVEL {
+            return Err(SpatialError::InvalidLevel);
+        }
+        let TopologyPoint::RadialFraction(fraction) = point else {
+            return Err(SpatialError::InvalidPosition);
+        };
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return Err(SpatialError::InvalidPosition);
+        }
+        let count = 1_u64 << level;
+        let index = libm::floor(fraction * count as f64) as u64;
+        Self::key(level, index.min(count - 1))
+    }
+
+    fn interpolation_stencil(
+        &self,
+        point: TopologyPoint,
+        level: u8,
+        mode: InterpolationMode,
+    ) -> Result<Vec<WeightedCell>, SpatialError> {
+        if mode == InterpolationMode::Nearest {
+            return Ok(vec![WeightedCell { key: self.locate_point(point, level)?, weight: 1.0 }]);
+        }
+        if mode != InterpolationMode::Linear || level > RADIAL_MAX_LEVEL {
+            return Err(SpatialError::InvalidPosition);
+        }
+        let TopologyPoint::RadialFraction(fraction) = point else {
+            return Err(SpatialError::InvalidPosition);
+        };
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return Err(SpatialError::InvalidPosition);
+        }
+        let count = (1_u64 << level) as f64;
+        let coordinate = fraction * count - 0.5;
+        if coordinate <= 0.0 {
+            return Ok(vec![WeightedCell { key: Self::key(level, 0)?, weight: 1.0 }]);
+        }
+        if coordinate >= count - 1.0 {
+            return Ok(vec![WeightedCell {
+                key: Self::key(level, (count as u64) - 1)?,
+                weight: 1.0,
+            }]);
+        }
+        let lower = libm::floor(coordinate) as u64;
+        let blend = coordinate - lower as f64;
+        Ok(vec![
+            WeightedCell { key: Self::key(level, lower)?, weight: 1.0 - blend },
+            WeightedCell { key: Self::key(level, lower + 1)?, weight: blend },
+        ])
+    }
+
+    fn point_for_cell(&self, key: CellKey) -> Result<TopologyPoint, SpatialError> {
+        let (level, index) = Self::decode(key)?;
+        let count = (1_u64 << level) as f64;
+        Ok(TopologyPoint::RadialFraction((index as f64 + 0.5) / count))
+    }
+
+    fn tile_layout_for(&self, tile: TileKey, tile_log2: u8) -> Result<TileLayout, SpatialError> {
+        self.validate_tile_key(tile, tile_log2)?;
+        let (_, tile_index) = Self::decode(tile.address)?;
+        let edge = 1_u64 << tile.level.min(tile_log2);
+        Ok(TileLayout { face: 0, i_start: tile_index * edge, j_start: 0, edge })
+    }
+
+    fn tile_raster_layout(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        halo: u8,
+    ) -> Result<TileRasterLayout, SpatialError> {
+        if halo > 1 {
+            return Err(SpatialError::InvalidHalo);
+        }
+        let layout = self.tile_layout_for(tile, tile_log2)?;
+        let edge = i64::try_from(layout.edge).map_err(|_| SpatialError::InvalidTileKey)?;
+        let halo = i64::from(halo);
+        Ok(TileRasterLayout {
+            dim_i: u64::try_from(edge + 2 * halo).map_err(|_| SpatialError::InvalidTileKey)?,
+            dim_j: 1,
+            offset_i: -halo,
+            offset_j: 0,
+        })
+    }
+
+    fn tile_cell(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        i: u64,
+        j: u64,
+    ) -> Result<CellKey, SpatialError> {
+        let layout = self.tile_layout_for(tile, tile_log2)?;
+        if i >= layout.edge || j != 0 {
+            return Err(SpatialError::InvalidCellKey);
+        }
+        Self::key(tile.level, layout.i_start + i)
+    }
+
+    fn tile_halo_cells(
+        &self,
+        tile: TileKey,
+        tile_log2: u8,
+        i: i64,
+        j: i64,
+    ) -> Result<Vec<WeightedCell>, SpatialError> {
+        if j != 0 {
+            return Err(SpatialError::InvalidCellKey);
+        }
+        let layout = self.tile_layout_for(tile, tile_log2)?;
+        let edge = i64::try_from(layout.edge).map_err(|_| SpatialError::InvalidTileKey)?;
+        if i < -1 || i > edge {
+            return Err(SpatialError::InvalidHalo);
+        }
+        let count = 1_i64 << tile.level;
+        let index = (layout.i_start as i64 + i).clamp(0, count - 1) as u64;
+        Ok(vec![WeightedCell { key: Self::key(tile.level, index)?, weight: 1.0 }])
+    }
+
+    fn tile_offset(&self, key: CellKey, tile_log2: u8) -> Result<(u64, u64), SpatialError> {
+        let tile = self.tile_key(key, tile_log2)?;
+        let layout = self.tile_layout_for(tile, tile_log2)?;
+        let (level, index) = Self::decode(key)?;
+        if level != tile.level {
+            return Err(SpatialError::InvalidTileKey);
+        }
+        Ok((index - layout.i_start, 0))
+    }
+
     fn validate_tile_key(&self, tile: TileKey, tile_log2: u8) -> Result<(), SpatialError> {
         if tile_log2 > RADIAL_MAX_LEVEL {
             return Err(SpatialError::InvalidTileLog2);
@@ -738,6 +1169,8 @@ fn edge_index(edge: FaceEdge) -> usize {
 pub enum SpatialError {
     /// Direction components must be finite and nonzero.
     InvalidDirection,
+    /// Point does not belong to the topology coordinate chart or declared range.
+    InvalidPosition,
     /// Quaternion is nonfinite or not unit length.
     InvalidQuaternion,
     /// Cell level is outside the V1 range.
@@ -750,6 +1183,8 @@ pub enum SpatialError {
     InvalidTileLog2,
     /// Tile address is not the canonical tile ancestor for its level.
     InvalidTileKey,
+    /// Requested V1 halo width or tile-local coordinate exceeds one cell.
+    InvalidHalo,
     /// Radial extent is nonpositive, nonfinite, or yields unrepresentable V1 shell measures.
     InvalidExtent,
 }
@@ -758,12 +1193,14 @@ impl fmt::Display for SpatialError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidDirection => "direction must be finite and nonzero",
+            Self::InvalidPosition => "position is invalid for this topology",
             Self::InvalidQuaternion => "frame orientation must be a finite unit quaternion",
             Self::InvalidLevel => "topology level is outside the V1 range",
             Self::InvalidCellKey => "cell key is malformed for its topology",
             Self::InvalidFace => "face number is outside the V1 range",
             Self::InvalidTileLog2 => "tile_log2 is outside the V1 range",
             Self::InvalidTileKey => "tile key is not canonical for its topology",
+            Self::InvalidHalo => "V1 topology halos may be at most one cell wide",
             Self::InvalidExtent => {
                 "radial extent must yield finite positive measures for all V1 shells"
             }
@@ -776,8 +1213,8 @@ impl std::error::Error for SpatialError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        CellKey, Dir, DirCube, FACE_ADJACENCY, FaceEdge, RADIAL_MAX_LEVEL, Radial1d, SpatialError,
-        Topology,
+        CellKey, Dir, DirCube, FACE_ADJACENCY, FaceEdge, InterpolationMode, RADIAL_MAX_LEVEL,
+        Radial1d, SpatialError, Topology, TopologyPoint,
     };
 
     #[test]
@@ -797,6 +1234,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn topology_interpolation_stencils_cover_all_cube_edges_and_corners() {
+        let topology = DirCube;
+        for face in 0..6 {
+            for edge_position in [-1.0, 0.0, 1.0] {
+                for (u, v) in [
+                    (-1.0, edge_position),
+                    (1.0, edge_position),
+                    (edge_position, -1.0),
+                    (edge_position, 1.0),
+                ] {
+                    let (x, y, z) = super::face_to_xyz(face, u, v).unwrap();
+                    let point = TopologyPoint::Direction(Dir::new(x, y, z).unwrap());
+                    let stencil = topology
+                        .interpolation_stencil(point, 4, InterpolationMode::Bilinear)
+                        .unwrap();
+                    assert!(!stencil.is_empty());
+                    assert!(stencil.iter().all(|cell| cell.weight >= 0.0 && cell.weight <= 1.0));
+                    assert!(
+                        (stencil.iter().map(|cell| cell.weight).sum::<f64>() - 1.0).abs() < 1.0e-12
+                    );
+                    for cell in stencil {
+                        assert_eq!(topology.level(cell.key).unwrap(), 4);
+                    }
+                }
+            }
+        }
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                for z in [-1.0, 1.0] {
+                    let point = TopologyPoint::Direction(Dir::new(x, y, z).unwrap());
+                    let stencil = topology
+                        .interpolation_stencil(point, 5, InterpolationMode::Bilinear)
+                        .unwrap();
+                    assert!(
+                        (stencil.iter().map(|cell| cell.weight).sum::<f64>() - 1.0).abs() < 1.0e-12
+                    );
+                    assert!(stencil.len() >= 2, "corner stencil applies the two-edge rule");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn topology_radial_linear_stencils_and_tile_offsets_are_canonical() {
+        let radial = Radial1d::with_extent(8.0).unwrap();
+        let point = TopologyPoint::RadialFraction(0.25);
+        let stencil = radial.interpolation_stencil(point, 2, InterpolationMode::Linear).unwrap();
+        assert_eq!(stencil.len(), 2);
+        assert_eq!(stencil[0].weight, 0.5);
+        assert_eq!(stencil[1].weight, 0.5);
+        assert_eq!(
+            radial
+                .interpolation_stencil(
+                    TopologyPoint::RadialFraction(0.0),
+                    2,
+                    InterpolationMode::Linear
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+
+        for face in 0..6 {
+            for i in 0..16 {
+                for j in 0..16 {
+                    let key = DirCube::key(face, i, j, 4).unwrap();
+                    let cube_tile = DirCube.tile_key(key, 2).unwrap();
+                    let layout = DirCube.tile_layout_for(cube_tile, 2).unwrap();
+                    let (offset_i, offset_j) = DirCube.tile_offset(key, 2).unwrap();
+                    assert!(offset_i < layout.edge && offset_j < layout.edge);
+                    assert_eq!(DirCube.tile_cell(cube_tile, 2, offset_i, offset_j).unwrap(), key);
+                }
+            }
+        }
+        for i in 0..32 {
+            let key = Radial1d::key(5, i).unwrap();
+            let radial_tile = radial.tile_key(key, 2).unwrap();
+            let layout = radial.tile_layout_for(radial_tile, 2).unwrap();
+            let (offset, column) = radial.tile_offset(key, 2).unwrap();
+            assert_eq!(column, 0);
+            assert!(offset < layout.edge);
+            assert_eq!(radial.tile_cell(radial_tile, 2, offset, 0).unwrap(), key);
+        }
+        let cube_tile = DirCube.tile_key(DirCube::key(0, 0, 0, 4).unwrap(), 2).unwrap();
+        let cube_raster = DirCube.tile_raster_layout(cube_tile, 2, 1).unwrap();
+        assert_eq!((cube_raster.dim_i, cube_raster.dim_j), (6, 6));
+        assert_eq!((cube_raster.offset_i, cube_raster.offset_j), (-1, -1));
+        let radial_tile = radial.tile_key(Radial1d::key(5, 0).unwrap(), 2).unwrap();
+        let radial_raster = radial.tile_raster_layout(radial_tile, 2, 1).unwrap();
+        assert_eq!((radial_raster.dim_i, radial_raster.dim_j), (6, 1));
+        assert_eq!((radial_raster.offset_i, radial_raster.offset_j), (-1, 0));
     }
 
     #[test]
@@ -885,6 +1416,193 @@ mod tests {
     }
 
     #[test]
+    fn level_zero_bilinear_and_halo_corners_preserve_crossed_sides() {
+        let topology = DirCube;
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                for z in [-1.0, 1.0] {
+                    let direction = Dir::new(x, y, z).unwrap();
+                    let (face, u, v) = super::project_direction(direction);
+                    let edge_i = if u < 0.0 { FaceEdge::UMinus } else { FaceEdge::UPlus };
+                    let edge_j = if v < 0.0 { FaceEdge::VMinus } else { FaceEdge::VPlus };
+                    let base = DirCube::key(face, 0, 0, 0).unwrap();
+                    let stencil = topology
+                        .interpolation_stencil(
+                            TopologyPoint::Direction(direction),
+                            0,
+                            InterpolationMode::Bilinear,
+                        )
+                        .unwrap();
+                    let weight = |key| {
+                        stencil
+                            .iter()
+                            .find(|entry| entry.key == key)
+                            .map_or(0.0, |entry| entry.weight)
+                    };
+                    assert!((weight(base) - 0.25).abs() < 1.0e-12);
+                    assert!(
+                        (weight(topology.neighbor(base, edge_i).unwrap()) - 0.375).abs() < 1.0e-12
+                    );
+                    assert!(
+                        (weight(topology.neighbor(base, edge_j).unwrap()) - 0.375).abs() < 1.0e-12
+                    );
+                }
+            }
+        }
+
+        for face in 0..6 {
+            let base = DirCube::key(face, 0, 0, 0).unwrap();
+            let tile = topology.tile_key(base, 0).unwrap();
+            for (i, j, edge_i, edge_j) in [
+                (-1, -1, FaceEdge::UMinus, FaceEdge::VMinus),
+                (-1, 1, FaceEdge::UMinus, FaceEdge::VPlus),
+                (1, -1, FaceEdge::UPlus, FaceEdge::VMinus),
+                (1, 1, FaceEdge::UPlus, FaceEdge::VPlus),
+            ] {
+                let halo = topology.tile_halo_cells(tile, 0, i, j).unwrap();
+                assert_eq!(halo.len(), 2);
+                assert_eq!(halo[0].key, topology.neighbor(base, edge_i).unwrap());
+                assert_eq!(halo[1].key, topology.neighbor(base, edge_j).unwrap());
+                assert_eq!(halo[0].weight, 0.5);
+                assert_eq!(halo[1].weight, 0.5);
+            }
+        }
+    }
+
+    #[test]
+    fn cube_tile_halos_are_consistently_limited_to_one_cell() {
+        let topology = DirCube;
+        let level = 2;
+        let tile_log2 = 2;
+        for face in 0..6_u8 {
+            let base = DirCube::key(face, 0, 0, level).unwrap();
+            let tile = topology.tile_key(base, tile_log2).unwrap();
+            let no_halo = topology.tile_raster_layout(tile, tile_log2, 0).unwrap();
+            assert_eq!((no_halo.dim_i, no_halo.dim_j), (4, 4));
+            assert_eq!((no_halo.offset_i, no_halo.offset_j), (0, 0));
+            let halo = topology.tile_raster_layout(tile, tile_log2, 1).unwrap();
+            assert_eq!((halo.dim_i, halo.dim_j), (6, 6));
+            assert_eq!((halo.offset_i, halo.offset_j), (-1, -1));
+
+            for out_j in 0..no_halo.dim_j {
+                for out_i in 0..no_halo.dim_i {
+                    let cells = topology
+                        .tile_halo_cells(tile, tile_log2, out_i as i64, out_j as i64)
+                        .unwrap();
+                    assert_eq!(cells.len(), 1);
+                    assert_eq!(
+                        cells[0].key,
+                        topology.tile_cell(tile, tile_log2, out_i, out_j).unwrap()
+                    );
+                }
+            }
+            for out_j in 0..halo.dim_j {
+                for out_i in 0..halo.dim_i {
+                    let local_i = out_i as i64 + halo.offset_i;
+                    let local_j = out_j as i64 + halo.offset_j;
+                    let cells =
+                        topology.tile_halo_cells(tile, tile_log2, local_i, local_j).unwrap();
+                    assert!(!cells.is_empty());
+                    assert!(cells.iter().all(|cell| topology.level(cell.key).unwrap() == level));
+                    assert!(
+                        (cells.iter().map(|cell| cell.weight).sum::<f64>() - 1.0).abs() < 1e-12
+                    );
+                    if (0..4).contains(&local_i) && (0..4).contains(&local_j) {
+                        assert_eq!(cells.len(), 1);
+                        assert_eq!(
+                            cells[0].key,
+                            topology
+                                .tile_cell(tile, tile_log2, local_i as u64, local_j as u64)
+                                .unwrap()
+                        );
+                    }
+                }
+            }
+
+            for index in 0..4_u64 {
+                for (local_i, local_j, boundary, edge) in [
+                    (
+                        -1,
+                        index as i64,
+                        DirCube::key(face, 0, index, level).unwrap(),
+                        FaceEdge::UMinus,
+                    ),
+                    (
+                        4,
+                        index as i64,
+                        DirCube::key(face, 3, index, level).unwrap(),
+                        FaceEdge::UPlus,
+                    ),
+                    (
+                        index as i64,
+                        -1,
+                        DirCube::key(face, index, 0, level).unwrap(),
+                        FaceEdge::VMinus,
+                    ),
+                    (
+                        index as i64,
+                        4,
+                        DirCube::key(face, index, 3, level).unwrap(),
+                        FaceEdge::VPlus,
+                    ),
+                ] {
+                    let cells =
+                        topology.tile_halo_cells(tile, tile_log2, local_i, local_j).unwrap();
+                    assert_eq!(
+                        cells,
+                        vec![super::WeightedCell {
+                            key: topology.neighbor(boundary, edge).unwrap(),
+                            weight: 1.0,
+                        }]
+                    );
+                }
+            }
+
+            for (local_i, local_j, boundary, edge_i, edge_j) in [
+                (
+                    -1,
+                    -1,
+                    DirCube::key(face, 0, 0, level).unwrap(),
+                    FaceEdge::UMinus,
+                    FaceEdge::VMinus,
+                ),
+                (
+                    -1,
+                    4,
+                    DirCube::key(face, 0, 3, level).unwrap(),
+                    FaceEdge::UMinus,
+                    FaceEdge::VPlus,
+                ),
+                (
+                    4,
+                    -1,
+                    DirCube::key(face, 3, 0, level).unwrap(),
+                    FaceEdge::UPlus,
+                    FaceEdge::VMinus,
+                ),
+                (4, 4, DirCube::key(face, 3, 3, level).unwrap(), FaceEdge::UPlus, FaceEdge::VPlus),
+            ] {
+                let cells = topology.tile_halo_cells(tile, tile_log2, local_i, local_j).unwrap();
+                assert_eq!(cells.len(), 2);
+                assert_eq!(cells[0].key, topology.neighbor(boundary, edge_i).unwrap());
+                assert_eq!(cells[1].key, topology.neighbor(boundary, edge_j).unwrap());
+                assert_eq!((cells[0].weight, cells[1].weight), (0.5, 0.5));
+            }
+
+            assert_eq!(
+                topology.tile_raster_layout(tile, tile_log2, 2),
+                Err(SpatialError::InvalidHalo)
+            );
+            for (local_i, local_j) in [(-2, 0), (5, 0), (0, -2), (0, 5), (-2, -2), (5, 5)] {
+                assert_eq!(
+                    topology.tile_halo_cells(tile, tile_log2, local_i, local_j),
+                    Err(SpatialError::InvalidHalo)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn radial_heap_keys_parent_children_measure_and_clamped_halo() {
         let topology = Radial1d::default();
         for level in 0..=10 {
@@ -918,6 +1636,33 @@ mod tests {
         let whole_shell = doubled.cell_measure(Radial1d::key(0, 0).unwrap()).unwrap();
         assert!((whole_shell - 8.0 * 4.0 * core::f64::consts::PI / 3.0).abs() < 1.0e-12);
         assert!(Radial1d::with_extent(1.0).is_ok());
+    }
+
+    #[test]
+    fn radial_tile_halos_reject_widths_beyond_one_shell() {
+        let topology = Radial1d::default();
+        let tile = topology.tile_key(Radial1d::key(3, 0).unwrap(), 2).unwrap();
+        let no_halo = topology.tile_raster_layout(tile, 2, 0).unwrap();
+        let one_shell = topology.tile_raster_layout(tile, 2, 1).unwrap();
+        assert_eq!((no_halo.dim_i, no_halo.dim_j), (4, 1));
+        assert_eq!((one_shell.dim_i, one_shell.dim_j), (6, 1));
+        assert_eq!(one_shell.offset_i, -1);
+        assert!(matches!(topology.tile_raster_layout(tile, 2, 2), Err(SpatialError::InvalidHalo)));
+
+        assert_eq!(
+            topology.tile_halo_cells(tile, 2, -1, 0).unwrap()[0].key,
+            Radial1d::key(3, 0).unwrap()
+        );
+        assert_eq!(
+            topology.tile_halo_cells(tile, 2, 4, 0).unwrap()[0].key,
+            Radial1d::key(3, 4).unwrap()
+        );
+        for index in [-2, 5] {
+            assert!(matches!(
+                topology.tile_halo_cells(tile, 2, index, 0),
+                Err(SpatialError::InvalidHalo)
+            ));
+        }
     }
 
     #[test]

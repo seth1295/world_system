@@ -1,0 +1,102 @@
+{
+  "capabilities": [
+    {
+      "id": "veyra.cap.stellar_structure/1",
+      "params": {
+        "domain": "interior"
+      }
+    }
+  ],
+  "classification": {
+    "class": "star",
+    "fixture": "radial stellar interior"
+  },
+  "codec": "zstd+shuffle2",
+  "domains": [
+    {
+      "frame": "body_fixed",
+      "id": "interior",
+      "max_level": 4,
+      "tile_log2": 2,
+      "topology": "veyra.topo.radial_1d/1",
+      "vertical": {
+        "extent_m": "10",
+        "kind": "radius"
+      }
+    }
+  ],
+  "dynamics": {
+    "descriptor": {
+      "hash": "b3:b01078c32ea4667e403820fa46815b2b7263622b8a68007c2d99dafa7743b401",
+      "path": "dynamics/descriptor.json"
+    },
+    "origin_keyframe": {
+      "hash": "b3:fc1bdd45418ef243d05ba74121f44aa207eef579ade34df14cbbaf6fc41276a9",
+      "path": "dynamics/origin.json"
+    }
+  },
+  "figure": {
+    "extent_m": "10",
+    "kind": "radial_profile_sphere"
+  },
+  "format_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "frames": {
+    "body_fixed": {
+      "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed",
+      "rotation": {
+        "epoch": "0",
+        "kind": "uniform",
+        "orientation_q_at_epoch": [
+          "1",
+          "0",
+          "0",
+          "0"
+        ],
+        "period_s": "86400",
+        "relative_to": "universe_inertial"
+      }
+    }
+  },
+  "identity": {
+    "object_id": "obj:b303102d1027a19940a8fc45ef703786",
+    "origin": {
+      "kind": "fixture",
+      "name": "cb7-star1d"
+    }
+  },
+  "indexes": {
+    "0x01300001": "b3:541211b973427fe706cfe5f8272d059f509fbcab29c055eb169d0f4b71fb90fd",
+    "0x01300002": "b3:d01a03b040145086c8b5b29eb3c18c3064885fc0b269dcab6b1b827e97fd787a",
+    "0x01300003": "b3:473b67ac7ed89a2a41c34692087c87ba59d2bf741a15fc80e22f9a9c3d82f6c6",
+    "0x01300004": "b3:5f7df1452d675ca49829312bb04a12606a187b2ceaef982451af8f3e10f2ad2c"
+  },
+  "physical": {
+    "gm_m3_s2": "1",
+    "gravity_model": "point_mass"
+  },
+  "reference_surfaces": [
+    {
+      "id": "photosphere",
+      "kind": "sphere",
+      "radius_m": "10"
+    }
+  ],
+  "required_features": [
+    "veyra.body/1",
+    "veyra.canon.jcs/1",
+    "veyra.cap.stellar_structure/1",
+    "veyra.codec.zstd-shuffle2/1",
+    "veyra.topo.radial_1d/1"
+  ],
+  "schema": "veyra.body/1",
+  "sections": {
+    "registry": {
+      "hash": "b3:713345f1b4be94f30d6f78120a645158608288065de78a943e7fd52328cfee75",
+      "path": "registry/fields.json"
+    },
+    "vocab": []
+  }
+}

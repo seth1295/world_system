@@ -1,0 +1,119 @@
+{
+  "capabilities": [
+    {
+      "id": "veyra.cap.solid_surface/1",
+      "params": {
+        "figure_ref": "figure"
+      }
+    },
+    {
+      "id": "veyra.cap.surface_material/1",
+      "params": {
+        "domain": "surface"
+      }
+    },
+    {
+      "id": "veyra.cap.thermal_state/1",
+      "params": {
+        "domain": "surface"
+      }
+    }
+  ],
+  "classification": {
+    "class": "irregular_rock",
+    "fixture": "star-convex non-spherical surface"
+  },
+  "codec": "zstd+shuffle2",
+  "domains": [
+    {
+      "frame": "body_fixed",
+      "id": "surface",
+      "max_level": 2,
+      "tile_log2": 2,
+      "topology": "veyra.topo.dir_cube/1",
+      "vertical": {
+        "kind": "none"
+      }
+    }
+  ],
+  "dynamics": {
+    "descriptor": {
+      "hash": "b3:b01078c32ea4667e403820fa46815b2b7263622b8a68007c2d99dafa7743b401",
+      "path": "dynamics/descriptor.json"
+    },
+    "origin_keyframe": {
+      "hash": "b3:fc1bdd45418ef243d05ba74121f44aa207eef579ade34df14cbbaf6fc41276a9",
+      "path": "dynamics/origin.json"
+    }
+  },
+  "figure": {
+    "kind": "star_convex_radial",
+    "radius_field": "figure.radius_m"
+  },
+  "format_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "frames": {
+    "body_fixed": {
+      "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed",
+      "rotation": {
+        "epoch": "0",
+        "kind": "uniform",
+        "orientation_q_at_epoch": [
+          "1",
+          "0",
+          "0",
+          "0"
+        ],
+        "period_s": "86400",
+        "relative_to": "universe_inertial"
+      }
+    }
+  },
+  "identity": {
+    "object_id": "obj:6d2133877c9db13f0a0e3fa255c27672",
+    "origin": {
+      "kind": "fixture",
+      "name": "cb8-rock"
+    }
+  },
+  "indexes": {
+    "0x01000001": "b3:b03968058bac2491317a3566b49081afeadc0db63350da16f878284658b038f9",
+    "0x01050001": "b3:d67fd1363722b03d507a8fe584a06b29efe06030bc129746387d7677ac1a302d",
+    "0x01060001": "b3:f617333d9af74c691c98e71900d3ec83a11d30d8c4bbc464a39ce9abc6d6b694"
+  },
+  "physical": {
+    "gm_m3_s2": "1",
+    "gravity_model": "point_mass"
+  },
+  "reference_surfaces": [
+    {
+      "id": "figure_surface",
+      "kind": "figure_surface"
+    }
+  ],
+  "required_features": [
+    "veyra.body/1",
+    "veyra.canon.jcs/1",
+    "veyra.cap.solid_surface/1",
+    "veyra.cap.surface_material/1",
+    "veyra.cap.thermal_state/1",
+    "veyra.codec.zstd-shuffle2/1",
+    "veyra.topo.dir_cube/1"
+  ],
+  "schema": "veyra.body/1",
+  "sections": {
+    "registry": {
+      "hash": "b3:2bbd87945b6ace0cb77c194b0e8359d67e502011d4d88aec73a1eabaeb8e4b8a",
+      "path": "registry/fields.json"
+    },
+    "vocab": [
+      {
+        "hash": "b3:ef44be3d91891a8d87a8e45ad7552aa670d443e5f6e383a94a1388b89321acfc",
+        "name": "surface_material.class/1",
+        "path": "vocab/surface_material.class.json"
+      }
+    ]
+  }
+}

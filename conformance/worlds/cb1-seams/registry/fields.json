@@ -1,0 +1,99 @@
+{
+  "fields": [
+    {
+      "capability": "veyra.cap.conformance_probe/1",
+      "compat": "ancillary",
+      "display": {
+        "group": "Conformance",
+        "label": "Analytic seam field",
+        "legend": "continuous"
+      },
+      "domain": "surface",
+      "downsample": "mean",
+      "id": "0x7ffe0001",
+      "name": "conformance.seam_scalar",
+      "native_level": 2,
+      "persistence": "invariant",
+      "sampling": {
+        "above_native": "refine",
+        "below_native": "pyramid",
+        "interp": "bilinear"
+      },
+      "semantic": "scalar.temperature",
+      "storage": {
+        "dtype": "f32",
+        "offset": "0",
+        "scale": "1"
+      },
+      "temporal": {
+        "kind": "static"
+      },
+      "unit": "K"
+    },
+    {
+      "capability": "veyra.cap.conformance_probe/1",
+      "compat": "ancillary",
+      "display": {
+        "group": "Conformance",
+        "label": "Face checker",
+        "legend": "vocab_counts"
+      },
+      "domain": "surface",
+      "downsample": "mode_lowest_tiebreak",
+      "id": "0x7ffe0002",
+      "name": "conformance.face_checker",
+      "native_level": 2,
+      "persistence": "invariant",
+      "sampling": {
+        "above_native": "inherit",
+        "below_native": "pyramid",
+        "interp": "nearest"
+      },
+      "semantic": "category",
+      "storage": {
+        "dtype": "u8",
+        "nodata": 255,
+        "offset": "0",
+        "scale": "1"
+      },
+      "temporal": {
+        "kind": "static"
+      }
+    },
+    {
+      "capability": "veyra.cap.conformance_probe/1",
+      "compat": "ancillary",
+      "display": {
+        "group": "Conformance",
+        "label": "Periodic signal",
+        "legend": "continuous"
+      },
+      "domain": "surface",
+      "downsample": "mean",
+      "id": "0x7ffe0003",
+      "name": "conformance.periodic_signal",
+      "native_level": 2,
+      "persistence": "invariant",
+      "sampling": {
+        "above_native": "smooth_only",
+        "below_native": "pyramid",
+        "interp": "bilinear"
+      },
+      "semantic": "scalar.temperature",
+      "storage": {
+        "dtype": "u16",
+        "offset": "0",
+        "scale": "1"
+      },
+      "temporal": {
+        "count": 3,
+        "kind": "periodic_slices",
+        "origin_ref": "rotation.epoch",
+        "period_ref": "rotation.period",
+        "reduce_default": "mean"
+      },
+      "unit": "K"
+    }
+  ],
+  "schema": "veyra.field_registry/1"
+}

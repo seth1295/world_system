@@ -1,0 +1,91 @@
+{
+  "capabilities": [
+    {
+      "compat": "ancillary",
+      "id": "veyra.cap.conformance_probe/1",
+      "params": {}
+    }
+  ],
+  "classification": {
+    "fixture": "cube seams and corners"
+  },
+  "codec": "zstd+shuffle2",
+  "domains": [
+    {
+      "frame": "body_fixed",
+      "id": "surface",
+      "max_level": 3,
+      "tile_log2": 2,
+      "topology": "veyra.topo.dir_cube/1",
+      "vertical": {
+        "kind": "none"
+      }
+    }
+  ],
+  "dynamics": {
+    "descriptor": {
+      "hash": "b3:b01078c32ea4667e403820fa46815b2b7263622b8a68007c2d99dafa7743b401",
+      "path": "dynamics/descriptor.json"
+    },
+    "origin_keyframe": {
+      "hash": "b3:fc1bdd45418ef243d05ba74121f44aa207eef579ade34df14cbbaf6fc41276a9",
+      "path": "dynamics/origin.json"
+    }
+  },
+  "figure": {
+    "kind": "sphere",
+    "radius_m": "1"
+  },
+  "format_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "frames": {
+    "body_fixed": {
+      "axes": "+Z is the positive rotation pole; +X is the prime meridian; right-handed",
+      "rotation": {
+        "epoch": "0",
+        "kind": "uniform",
+        "orientation_q_at_epoch": [
+          "1",
+          "0",
+          "0",
+          "0"
+        ],
+        "period_s": "86400",
+        "relative_to": "universe_inertial"
+      }
+    }
+  },
+  "identity": {
+    "object_id": "obj:1ae814c445cafe17c573e2bf8ee8bef8",
+    "origin": {
+      "kind": "fixture",
+      "name": "cb1-seams"
+    }
+  },
+  "indexes": {
+    "0x7ffe0001": "b3:45194277af785071aeecf085d83a07fee5a6fa69d7835424c665b8bd9582d8c2",
+    "0x7ffe0002": "b3:1a083ea73ef63262f44aae3d97a0b040bb4849c2b20bbd08e04ca9289e4c4536",
+    "0x7ffe0003": "b3:dc3f65ecf29079bc9ad8cb648097dccbdd552b51b560122df29eed8e12f5a764"
+  },
+  "physical": {
+    "gm_m3_s2": "1",
+    "gravity_model": "point_mass"
+  },
+  "reference_surfaces": [],
+  "required_features": [
+    "veyra.body/1",
+    "veyra.canon.jcs/1",
+    "veyra.codec.zstd-shuffle2/1",
+    "veyra.topo.dir_cube/1"
+  ],
+  "schema": "veyra.body/1",
+  "sections": {
+    "registry": {
+      "hash": "b3:9a7d16574ade9411a6bc9152df6b7797c11909d5f3c6dea623050a5143ae815b",
+      "path": "registry/fields.json"
+    },
+    "vocab": []
+  }
+}

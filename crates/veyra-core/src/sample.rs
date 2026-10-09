@@ -51,11 +51,11 @@ pub enum TimeSel {
     Static,
     /// One periodic slice.
     Slice(u16),
-    /// Arithmetic mean of available periodic slices.
+    /// Arithmetic mean of available scalar periodic slices; discrete fields reject reductions.
     Mean,
-    /// Minimum of available periodic slices.
+    /// Minimum of available scalar periodic slices; discrete fields reject reductions.
     Min,
-    /// Maximum of available periodic slices.
+    /// Maximum of available scalar periodic slices; discrete fields reject reductions.
     Max,
     /// Normalized phase; periodic values wrap at whole cycles.
     Phase(f64),
@@ -194,9 +194,9 @@ pub struct FieldStats {
 /// One measure-weighted histogram bin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistogramBin {
-    /// Inclusive lower edge.
+    /// Inclusive lower edge, or the exact discrete label when `lower == upper`.
     pub lower: f64,
-    /// Exclusive upper edge, except for the final bin which includes its upper edge.
+    /// Exclusive upper edge, except for the final numeric bin; discrete bins use a singleton label.
     pub upper: f64,
     /// Sum of cell measures in the bin.
     pub weight: f64,
@@ -207,12 +207,19 @@ pub struct HistogramBin {
 /// Measure-weighted histogram of a field view.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Histogram {
-    /// Minimum observed value.
+    /// Minimum observed numeric value; absent for nominal discrete fields.
     pub minimum: Option<f64>,
-    /// Maximum observed value.
+    /// Maximum observed numeric value; absent for nominal discrete fields.
     pub maximum: Option<f64>,
-    /// Equal-width bins.
+    /// Equal-width numeric bins or one exact-label bin per discrete value.
     pub bins: Vec<HistogramBin>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WeightedCell {
+    value: Option<f64>,
+    raw: Option<RawValue>,
+    measure: f64,
 }
 
 /// One field's actual value at an inspection point.
@@ -365,7 +372,8 @@ impl Body {
         let (level, _, mode) = self.resolve_level(field, domain, query.level)?;
         let point = self.topology_point(&query.pos, &field.domain, topology.as_topology())?;
         let stencil = topology.as_topology().interpolation_stencil(point, level, mode)?;
-        let (slices, _) = select_slices(field, query.time)?;
+        let (slices, reduction) = select_slices(field, query.time)?;
+        ensure_discrete_reduction(field, reduction)?;
         let index = if let Some(index) = self.indexes.get(&field.id) {
             index
         } else {
@@ -409,6 +417,7 @@ impl Body {
         }
         let index = self.indexes.get(&field.id).ok_or(SampleError::MissingTile)?;
         let (slices, reduction) = select_slices(field, query.time)?;
+        ensure_discrete_reduction(field, reduction)?;
         let mut values = Vec::new();
         let mut all_const = true;
         let mut primary_raw = None;
@@ -464,11 +473,12 @@ impl Body {
         } else {
             SampleSource::Stored
         };
-        let category = if field.semantic == "category" || field.semantic == "feature_ref" {
-            primary_raw.and_then(raw_to_i64)
-        } else {
-            None
-        };
+        let category =
+            if value.is_some() && matches!(field.semantic.as_str(), "category" | "feature_ref") {
+                primary_raw.and_then(raw_to_i64)
+            } else {
+                None
+            };
         let raw =
             if stencil.len() == 1 && reduction == Reduction::Single { primary_raw } else { None };
         Ok(Sample { value, raw, category, level_used: level, source, cell: primary_cell })
@@ -612,6 +622,10 @@ impl Body {
             ) => {}
             _ => return Err(SampleError::UnsupportedSelection),
         }
+        if !topology_view {
+            let (_, reduction) = select_slices(field, request.time)?;
+            ensure_discrete_reduction(field, reduction)?;
+        }
         topology.validate_tile_key(request.key, domain.tile_log2)?;
         if request.key.level > domain.max_level {
             return Err(SampleError::UnsupportedResolution);
@@ -725,7 +739,7 @@ impl Body {
         level: u8,
         time: TimeSel,
     ) -> Result<Option<f64>, SampleError> {
-        if domain.topology != "veyra.topo.dir_cube/1" {
+        if domain.topology != "veyra.topo.dir_cube/1" || is_discrete_semantic(&field.semantic) {
             return Err(SampleError::UnsupportedSelection);
         }
         let center = self.sample(&SampleQuery {
@@ -774,7 +788,9 @@ impl Body {
         level: u8,
         time: TimeSel,
     ) -> Result<Option<f64>, SampleError> {
-        if field.extra.get("unit").and_then(Value::as_str) != Some("m") {
+        if is_discrete_semantic(&field.semantic)
+            || field.extra.get("unit").and_then(Value::as_str) != Some("m")
+        {
             return Err(SampleError::UnsupportedField);
         }
         let capability = view.capability.as_deref().ok_or(SampleError::UnsupportedSelection)?;
@@ -892,6 +908,9 @@ impl Body {
         level: LevelSel,
         time: TimeSel,
     ) -> Result<FieldStats, SampleError> {
+        if is_discrete_semantic(&self.field(field_id)?.semantic) {
+            return Err(SampleError::UnsupportedSelection);
+        }
         let values = self.weighted_cells(field_id, level, time)?;
         let mut stats = FieldStats {
             cells: u64::try_from(values.len()).unwrap_or(u64::MAX),
@@ -902,13 +921,13 @@ impl Body {
             mean: None,
         };
         let mut weighted_sum = 0.0;
-        for &(value, measure) in &values {
-            let Some(value) = value else {
+        for cell in &values {
+            let Some(value) = cell.value else {
                 stats.nodata_cells += 1;
                 continue;
             };
-            stats.valid_measure += measure;
-            weighted_sum += value * measure;
+            stats.valid_measure += cell.measure;
+            weighted_sum += value * cell.measure;
             stats.minimum = Some(stats.minimum.map_or(value, |minimum| minimum.min(value)));
             stats.maximum = Some(stats.maximum.map_or(value, |maximum| maximum.max(value)));
         }
@@ -922,7 +941,11 @@ impl Body {
         Ok(stats)
     }
 
-    /// Builds an equal-width histogram weighted by the topology's cell measure.
+    /// Builds a topology-measure-weighted histogram.
+    ///
+    /// Continuous fields use equal-width numeric bins. Discrete fields use one exact raw-code bin
+    /// per observed label in canonical cell traversal order; `bins` is their maximum category
+    /// count, so labels are never combined or numerically ordered.
     pub fn histogram(
         &self,
         field_id: FieldId,
@@ -933,9 +956,46 @@ impl Body {
         if bins == 0 || bins > 65_536 {
             return Err(SampleError::UnsupportedSelection);
         }
+        let field = self.field(field_id)?;
         let values = self.weighted_cells(field_id, level, time)?;
-        let minimum = values.iter().filter_map(|(value, _)| *value).reduce(f64::min);
-        let maximum = values.iter().filter_map(|(value, _)| *value).reduce(f64::max);
+        if is_discrete_semantic(&field.semantic) {
+            // The map only resolves exact labels to their first-seen output slot. Iteration and
+            // emitted order remain the canonical cell traversal order, not numeric code order.
+            let mut category_indices = std::collections::BTreeMap::new();
+            let mut counts: Vec<(i64, f64, u64)> = Vec::new();
+            for cell in values {
+                if cell.value.is_none() {
+                    continue;
+                }
+                let Some(RawValue::Integer(code)) = cell.raw else {
+                    return Err(SampleError::UnsupportedField);
+                };
+                let index = if let Some(index) = category_indices.get(&code) {
+                    *index
+                } else {
+                    if counts.len() == bins {
+                        return Err(SampleError::UnsupportedSelection);
+                    }
+                    let index = counts.len();
+                    category_indices.insert(code, index);
+                    counts.push((code, 0.0, 0));
+                    index
+                };
+                let (_, weight, cells) = &mut counts[index];
+                *weight += cell.measure;
+                *cells += 1;
+            }
+            let bins = counts
+                .into_iter()
+                .map(|(code, weight, cells)| {
+                    let label = code as f64;
+                    HistogramBin { lower: label, upper: label, weight, cells }
+                })
+                .collect();
+            return Ok(Histogram { minimum: None, maximum: None, bins });
+        }
+        let minimum = values.iter().filter_map(|cell| cell.value).reduce(f64::min);
+        let maximum = values.iter().filter_map(|cell| cell.value).reduce(f64::max);
         let (Some(minimum), Some(maximum)) = (minimum, maximum) else {
             return Ok(Histogram { minimum: None, maximum: None, bins: Vec::new() });
         };
@@ -955,15 +1015,15 @@ impl Body {
                 cells: 0,
             })
             .collect();
-        for (value, measure) in values {
-            let Some(value) = value else { continue };
+        for cell in values {
+            let Some(value) = cell.value else { continue };
             let index = if width == 0.0 {
                 0
             } else {
                 libm::floor((value - minimum) / width).max(0.0) as usize
             }
             .min(bins - 1);
-            output[index].weight += measure;
+            output[index].weight += cell.measure;
             output[index].cells += 1;
         }
         Ok(Histogram { minimum: Some(minimum), maximum: Some(maximum), bins: output })
@@ -974,7 +1034,7 @@ impl Body {
         field_id: FieldId,
         selection: LevelSel,
         time: TimeSel,
-    ) -> Result<Vec<(Option<f64>, f64)>, SampleError> {
+    ) -> Result<Vec<WeightedCell>, SampleError> {
         let field = self.field(field_id)?;
         let domain = self.domain(&field.domain)?;
         let topology = topology_for(domain)?;
@@ -994,7 +1054,7 @@ impl Body {
                         time,
                     })?;
                     let measure = topology.as_topology().cell_measure(key)?;
-                    output.push((sample.value, measure));
+                    output.push(WeightedCell { value: sample.value, raw: sample.raw, measure });
                 }
             }
         }
@@ -1027,7 +1087,7 @@ impl Body {
             ("veyra.topo.radial_1d/1", "linear") => InterpolationMode::Linear,
             _ => return Err(SampleError::UnsupportedSelection),
         };
-        if matches!(field.semantic.as_str(), "category" | "feature_ref" | "flags") {
+        if is_discrete_semantic(&field.semantic) {
             mode = InterpolationMode::Nearest;
         }
         let target = match selection {
@@ -1216,11 +1276,27 @@ fn find_entry(entries: &[IndexEntry], tile: TileKey) -> Option<&IndexEntry> {
 }
 
 fn ensure_supported_field(field: &FieldDescriptor) -> Result<(), SampleError> {
-    if crate::body::field_dtype(field).is_none()
-        || !(field.semantic.starts_with("scalar.")
-            || matches!(field.semantic.as_str(), "category" | "feature_ref" | "flags"))
+    let Some(dtype) = crate::body::field_dtype(field) else {
+        return Err(SampleError::UnsupportedField);
+    };
+    if !(field.semantic.starts_with("scalar.") || is_discrete_semantic(&field.semantic))
+        || (is_discrete_semantic(&field.semantic) && dtype == DType::F32)
     {
         return Err(SampleError::UnsupportedField);
+    }
+    Ok(())
+}
+
+fn is_discrete_semantic(semantic: &str) -> bool {
+    matches!(semantic, "category" | "feature_ref" | "flags")
+}
+
+fn ensure_discrete_reduction(
+    field: &FieldDescriptor,
+    reduction: Reduction,
+) -> Result<(), SampleError> {
+    if is_discrete_semantic(&field.semantic) && reduction != Reduction::Single {
+        return Err(SampleError::UnsupportedSelection);
     }
     Ok(())
 }
@@ -1423,7 +1499,7 @@ fn is_discrete_tile_output(
     field: &FieldDescriptor,
     view: Option<&crate::views::ViewDescriptor>,
 ) -> bool {
-    matches!(field.semantic.as_str(), "category" | "feature_ref" | "flags")
+    is_discrete_semantic(&field.semantic)
         || view.and_then(|descriptor| descriptor.operator.as_deref()).is_some_and(|operator| {
             matches!(
                 operator,
@@ -1466,22 +1542,22 @@ fn merge_contributing_source(
     }
 }
 
-fn stable_weighted_mean(values: &[(Option<f64>, f64)]) -> Result<Option<f64>, SampleError> {
+fn stable_weighted_mean(values: &[WeightedCell]) -> Result<Option<f64>, SampleError> {
     let mut total_measure = 0.0;
     let mut mean: Option<f64> = None;
-    for &(value, measure) in values {
-        let Some(value) = value else { continue };
-        if !value.is_finite() || !measure.is_finite() || measure <= 0.0 {
+    for cell in values {
+        let Some(value) = cell.value else { continue };
+        if !value.is_finite() || !cell.measure.is_finite() || cell.measure <= 0.0 {
             return Err(SampleError::InvalidScale);
         }
-        let next_measure = total_measure + measure;
+        let next_measure = total_measure + cell.measure;
         if !next_measure.is_finite() || next_measure <= 0.0 {
             return Err(SampleError::InvalidScale);
         }
         mean = Some(match mean {
             None => value,
             Some(previous) => {
-                let share = measure / next_measure;
+                let share = cell.measure / next_measure;
                 let updated =
                     if (previous >= 0.0 && value >= 0.0) || (previous <= 0.0 && value <= 0.0) {
                         previous + (value - previous) * share
@@ -1512,8 +1588,12 @@ mod tests {
     use crate::canon::index::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
     use crate::ids::Hash32;
     use crate::io::{Body, Need};
-    use crate::spatial::{Dir, DirCube, TileKey, Topology};
+    use crate::spatial::{Dir, DirCube, Radial1d, TileKey, Topology};
     use serde_json::json;
+
+    fn weighted_cell(value: Option<f64>, measure: f64) -> super::WeightedCell {
+        super::WeightedCell { value, raw: None, measure }
+    }
 
     #[test]
     fn query_types_keep_topology_and_time_selection_explicit() {
@@ -1651,7 +1731,12 @@ mod tests {
         assert_eq!(const_first_tile.source, super::SampleSource::Mixed);
     }
 
-    fn radial_const_nodata_body(const_shell: u64, slice_count: u16) -> (Body, FieldId) {
+    fn radial_const_nodata_body(
+        const_shell: u64,
+        slice_count: u16,
+        semantic: &str,
+        reduce_default: &str,
+    ) -> (Body, FieldId) {
         let field_id = FieldId::new(0x7ffe, 1);
         let raster = CanonicalBlob::new(
             BlobKind::RasterTile,
@@ -1704,7 +1789,7 @@ mod tests {
             json!({
                 "kind":"periodic_slices","count":slice_count,
                 "period_ref":"rotation.period","origin_ref":"rotation.epoch",
-                "reduce_default":"mean"
+                "reduce_default":reduce_default
             })
         };
         let registry = serde_json::from_value(json!({
@@ -1712,7 +1797,7 @@ mod tests {
             "fields":[{
                 "id":field_id.to_string(),"name":"scalar.value",
                 "capability":"veyra.cap.conformance_probe/1","domain":"interior",
-                "semantic":"scalar.value","persistence":"invariant","unit":"K",
+                "semantic":semantic,"persistence":"invariant","unit":"K",
                 "storage":{"dtype":"u8","scale":"1","offset":"0","nodata":255},
                 "native_level":1,"temporal":temporal,
                 "sampling":{"interp":"linear"},"downsample":"mean","compat":"ancillary"
@@ -1732,6 +1817,70 @@ mod tests {
             },
             field_id,
         )
+    }
+
+    fn replace_radial_entry_with_values(
+        body: &mut Body,
+        field: FieldId,
+        shell: u64,
+        values: &[u8],
+    ) {
+        let bytes = CanonicalBlob::new(
+            BlobKind::RasterTile,
+            DType::U8,
+            1,
+            1,
+            u16::try_from(values.len()).unwrap(),
+            values.to_vec(),
+        )
+        .unwrap()
+        .encode();
+        let hash = hash::hash(&bytes);
+        body.blobs.insert(hash, bytes);
+        let entry = body
+            .indexes
+            .get_mut(&field)
+            .unwrap()
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == Radial1d::key(1, shell).unwrap().0)
+            .unwrap();
+        entry.value = IndexValue::Blob(hash);
+    }
+
+    fn radial_categories_with_nodata() -> (Body, FieldId) {
+        let (mut body, field) = radial_const_nodata_body(0, 1, "category", "mean");
+        body.root.domains[0].max_level = 2;
+        body.registry.fields[0].native_level = 2;
+        let nodata = CanonicalBlob::new(BlobKind::RasterTile, DType::U8, 1, 1, 1, vec![255])
+            .unwrap()
+            .encode();
+        let nodata_hash = hash::hash(&nodata);
+        body.blobs.clear();
+        body.blobs.insert(nodata_hash, nodata);
+        body.indexes.get_mut(&field).unwrap().entries = vec![
+            IndexEntry {
+                level: 2,
+                key: Radial1d::key(2, 0).unwrap().0,
+                value: IndexValue::Const(100),
+            },
+            IndexEntry {
+                level: 2,
+                key: Radial1d::key(2, 1).unwrap().0,
+                value: IndexValue::Const(1),
+            },
+            IndexEntry {
+                level: 2,
+                key: Radial1d::key(2, 2).unwrap().0,
+                value: IndexValue::Const(2),
+            },
+            IndexEntry {
+                level: 2,
+                key: Radial1d::key(2, 3).unwrap().0,
+                value: IndexValue::Blob(nodata_hash),
+            },
+        ];
+        (body, field)
     }
 
     #[test]
@@ -1766,7 +1915,7 @@ mod tests {
     #[test]
     fn nodata_does_not_change_constant_sample_provenance_in_either_stencil_order() {
         for const_shell in [0, 1] {
-            let (body, field) = radial_const_nodata_body(const_shell, 1);
+            let (body, field) = radial_const_nodata_body(const_shell, 1, "scalar.value", "mean");
             let sample = body
                 .sample(&SampleQuery {
                     field,
@@ -1778,7 +1927,7 @@ mod tests {
             assert_eq!(sample.value, Some(5.0));
             assert_eq!(sample.source, super::SampleSource::Const);
 
-            let (body, field) = radial_const_nodata_body(const_shell, 2);
+            let (body, field) = radial_const_nodata_body(const_shell, 2, "scalar.value", "mean");
             let slice = body
                 .sample(&SampleQuery {
                     field,
@@ -1800,6 +1949,203 @@ mod tests {
             assert_eq!(mean.value, Some(5.0));
             assert_eq!(mean.source, super::SampleSource::TimeReduced);
         }
+    }
+
+    #[test]
+    fn discrete_periodic_semantics_allow_single_slice_queries_only() {
+        let invalid_reductions = [TimeSel::Static, TimeSel::Mean, TimeSel::Min, TimeSel::Max];
+        let single_slices = [TimeSel::Slice(0), TimeSel::Slice(1), TimeSel::Phase(0.75)];
+        for semantic in ["category", "feature_ref", "flags"] {
+            let (mut body, field) = radial_const_nodata_body(0, 2, semantic, "mean");
+            replace_radial_entry_with_values(&mut body, field, 0, &[1, 2]);
+            let query_position = Position::Radial { r_m: 0.25 };
+            let tile_key = Radial1d::default().tile_key(Radial1d::key(1, 0).unwrap(), 0).unwrap();
+
+            for time in invalid_reductions {
+                let query = SampleQuery {
+                    field,
+                    pos: query_position.clone(),
+                    level: LevelSel::Exact(1),
+                    time,
+                };
+                assert!(matches!(body.plan(&query), Err(super::SampleError::UnsupportedSelection)));
+                assert!(matches!(
+                    body.sample(&query),
+                    Err(super::SampleError::UnsupportedSelection)
+                ));
+                assert!(matches!(
+                    body.stats(field, LevelSel::Exact(1), time),
+                    Err(super::SampleError::UnsupportedSelection)
+                ));
+                assert!(matches!(
+                    body.histogram(field, 2, LevelSel::Exact(1), time),
+                    Err(super::SampleError::UnsupportedSelection)
+                ));
+                for view in [super::TileView::Raw, super::TileView::TimeReduce] {
+                    assert!(matches!(
+                        body.tile(&super::TileRequest {
+                            field,
+                            key: tile_key,
+                            time,
+                            halo: 0,
+                            view: view.clone(),
+                        }),
+                        Err(super::SampleError::UnsupportedSelection)
+                    ));
+                }
+                let report = body.inspect(&query_position, LevelSel::Exact(1), time).unwrap();
+                assert!(report.fields[0].sample.is_none());
+                assert!(report.fields[0].issue.is_some());
+            }
+
+            for (time, expected) in
+                [(single_slices[0], 1.0), (single_slices[1], 2.0), (single_slices[2], 2.0)]
+            {
+                let query = SampleQuery {
+                    field,
+                    pos: query_position.clone(),
+                    level: LevelSel::Exact(1),
+                    time,
+                };
+                assert!(body.plan(&query).unwrap().is_empty());
+                let sample = body.sample(&query).unwrap();
+                assert_eq!(sample.value, Some(expected));
+                assert_eq!(
+                    sample.category,
+                    matches!(semantic, "category" | "feature_ref").then_some(expected as i64)
+                );
+                assert_eq!(sample.raw, Some(super::RawValue::Integer(expected as i64)));
+                let inspected = body.inspect(&query_position, LevelSel::Exact(1), time).unwrap();
+                assert_eq!(inspected.fields[0].sample.as_ref(), Some(&sample));
+                let tile = body
+                    .tile(&super::TileRequest {
+                        field,
+                        key: tile_key,
+                        time,
+                        halo: 0,
+                        view: super::TileView::Raw,
+                    })
+                    .unwrap();
+                assert_eq!(tile.values, vec![Some(expected)]);
+                assert_eq!(tile.source, super::SampleSource::Stored);
+                let histogram = body.histogram(field, 2, LevelSel::Exact(1), time).unwrap();
+                assert_eq!(histogram.minimum, None);
+                assert_eq!(histogram.maximum, None);
+                assert_eq!(histogram.bins.len(), 1);
+                assert_eq!(histogram.bins[0].lower, expected);
+                assert_eq!(histogram.bins[0].upper, expected);
+                assert_eq!(histogram.bins[0].cells, 1);
+            }
+
+            assert!(matches!(
+                body.stats(field, LevelSel::Exact(1), TimeSel::Slice(0)),
+                Err(super::SampleError::UnsupportedSelection)
+            ));
+
+            let nodata_position = Position::Radial { r_m: 0.75 };
+            let nodata = body
+                .sample(&SampleQuery {
+                    field,
+                    pos: nodata_position.clone(),
+                    level: LevelSel::Exact(1),
+                    time: TimeSel::Slice(0),
+                })
+                .unwrap();
+            assert_eq!(nodata.value, None);
+            assert_eq!(nodata.raw, Some(super::RawValue::Integer(255)));
+            assert_eq!(nodata.category, None);
+            assert_eq!(nodata.source, super::SampleSource::Nodata);
+            let inspected =
+                body.inspect(&nodata_position, LevelSel::Exact(1), TimeSel::Slice(0)).unwrap();
+            assert_eq!(inspected.fields[0].sample.as_ref(), Some(&nodata));
+            let nodata_tile = body
+                .tile(&super::TileRequest {
+                    field,
+                    key: Radial1d::default().tile_key(Radial1d::key(1, 1).unwrap(), 0).unwrap(),
+                    time: TimeSel::Slice(0),
+                    halo: 0,
+                    view: super::TileView::Raw,
+                })
+                .unwrap();
+            assert_eq!(nodata_tile.values, vec![None]);
+            assert_eq!(nodata_tile.source, super::SampleSource::Nodata);
+
+            let static_body = radial_const_nodata_body(0, 1, semantic, "mean").0;
+            let static_position = Position::Radial { r_m: 0.25 };
+            for time in [TimeSel::Static, TimeSel::Mean, TimeSel::Min, TimeSel::Max] {
+                let query = SampleQuery {
+                    field,
+                    pos: static_position.clone(),
+                    level: LevelSel::Exact(1),
+                    time,
+                };
+                assert!(static_body.plan(&query).unwrap().is_empty());
+                let sample = static_body.sample(&query).unwrap();
+                assert_eq!(sample.value, Some(5.0));
+                assert_eq!(
+                    sample.category,
+                    matches!(semantic, "category" | "feature_ref").then_some(5)
+                );
+                assert!(matches!(
+                    static_body.stats(field, LevelSel::Exact(1), time),
+                    Err(super::SampleError::UnsupportedSelection)
+                ));
+            }
+            for default in ["min", "max"] {
+                let (default_body, default_field) =
+                    radial_const_nodata_body(0, 2, semantic, default);
+                let query = SampleQuery {
+                    field: default_field,
+                    pos: static_position.clone(),
+                    level: LevelSel::Exact(1),
+                    time: TimeSel::Static,
+                };
+                assert!(matches!(
+                    default_body.plan(&query),
+                    Err(super::SampleError::UnsupportedSelection)
+                ));
+            }
+        }
+
+        let (category_body, category_field) = radial_categories_with_nodata();
+        let histogram = category_body
+            .histogram(category_field, 3, LevelSel::Exact(2), TimeSel::Static)
+            .unwrap();
+        assert_eq!(histogram.minimum, None);
+        assert_eq!(histogram.maximum, None);
+        assert_eq!(
+            histogram.bins.iter().map(|bin| bin.lower).collect::<Vec<_>>(),
+            vec![100.0, 1.0, 2.0]
+        );
+        assert!(histogram.bins.iter().all(|bin| bin.lower == bin.upper && bin.cells == 1));
+        for (bin, shell) in histogram.bins.iter().zip(0..3) {
+            assert_eq!(
+                bin.weight,
+                Radial1d::default().cell_measure(Radial1d::key(2, shell).unwrap()).unwrap()
+            );
+        }
+        assert!(matches!(
+            category_body.histogram(category_field, 2, LevelSel::Exact(2), TimeSel::Static),
+            Err(super::SampleError::UnsupportedSelection)
+        ));
+
+        let (mut malformed_category, malformed_field) =
+            radial_const_nodata_body(0, 1, "category", "mean");
+        malformed_category.registry.fields[0].storage["dtype"] = json!("f32");
+        let malformed_query = SampleQuery {
+            field: malformed_field,
+            pos: Position::Radial { r_m: 0.25 },
+            level: LevelSel::Exact(1),
+            time: TimeSel::Static,
+        };
+        assert!(matches!(
+            malformed_category.sample(&malformed_query),
+            Err(super::SampleError::UnsupportedField)
+        ));
+        assert!(matches!(
+            malformed_category.histogram(malformed_field, 1, LevelSel::Exact(1), TimeSel::Static),
+            Err(super::SampleError::UnsupportedField)
+        ));
     }
 
     #[test]
@@ -1837,6 +2183,40 @@ mod tests {
         assert!(matches!(
             merge_discrete_corner_value(Some(2.0), 4.0),
             Err(super::SampleError::UnsupportedDiscreteCornerHalo)
+        ));
+    }
+
+    #[test]
+    fn scalar_derived_views_refuse_discrete_sources() {
+        let (body, field_id) = radial_const_nodata_body(0, 1, "category", "mean");
+        let mut field = body.registry.fields[0].clone();
+        field.semantic = "category".to_owned();
+        let domain: crate::body::Domain = serde_json::from_value(json!({
+            "id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed",
+            "tile_log2":0,"max_level":0,"vertical":{"kind":"none"}
+        }))
+        .unwrap();
+        let cell = DirCube::key(0, 0, 0, 0).unwrap();
+        assert!(matches!(
+            body.slope_at(&field, &domain, &DirCube, cell, 0, TimeSel::Static),
+            Err(super::SampleError::UnsupportedSelection)
+        ));
+        let view = crate::views::ViewDescriptor {
+            id: "derived.test".to_owned(),
+            domain: "surface".to_owned(),
+            field: Some(field_id),
+            field_name: Some(field.name.clone()),
+            required_fields: vec![field_id],
+            capability: Some(field.capability.clone()),
+            operator: Some("core.threshold_partition/1".to_owned()),
+            group: "test".to_owned(),
+            display_order: None,
+            label: "test".to_owned(),
+            display: None,
+        };
+        assert!(matches!(
+            body.threshold_partition_at(&view, &field, &domain, cell, 0, TimeSel::Static),
+            Err(super::SampleError::UnsupportedField)
         ));
     }
 
@@ -1890,17 +2270,28 @@ mod tests {
 
     #[test]
     fn weighted_mean_stays_finite_for_extreme_values_and_ignores_nodata() {
-        let ordinary = stable_weighted_mean(&[(Some(1.0), 1.0), (Some(3.0), 3.0)]).unwrap();
+        let ordinary =
+            stable_weighted_mean(&[weighted_cell(Some(1.0), 1.0), weighted_cell(Some(3.0), 3.0)])
+                .unwrap();
         assert_eq!(ordinary, Some(2.5));
 
-        let extreme = stable_weighted_mean(&[(Some(1.0e308), 1.0), (Some(1.0e308), 2.0)]).unwrap();
+        let extreme = stable_weighted_mean(&[
+            weighted_cell(Some(1.0e308), 1.0),
+            weighted_cell(Some(1.0e308), 2.0),
+        ])
+        .unwrap();
         assert_eq!(extreme, Some(1.0e308));
-        let mixed_signs =
-            stable_weighted_mean(&[(Some(-1.0e308), 1.0), (Some(1.0e308), 1.0)]).unwrap();
+        let mixed_signs = stable_weighted_mean(&[
+            weighted_cell(Some(-1.0e308), 1.0),
+            weighted_cell(Some(1.0e308), 1.0),
+        ])
+        .unwrap();
         assert_eq!(mixed_signs, Some(0.0));
 
-        let with_nodata = stable_weighted_mean(&[(None, 100.0), (Some(7.0), 2.0)]).unwrap();
+        let with_nodata =
+            stable_weighted_mean(&[weighted_cell(None, 100.0), weighted_cell(Some(7.0), 2.0)])
+                .unwrap();
         assert_eq!(with_nodata, Some(7.0));
-        assert_eq!(stable_weighted_mean(&[(None, 1.0)]).unwrap(), None);
+        assert_eq!(stable_weighted_mean(&[weighted_cell(None, 1.0)]).unwrap(), None);
     }
 }

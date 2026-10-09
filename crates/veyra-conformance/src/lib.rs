@@ -1316,6 +1316,15 @@ fn verify_stage4(world_root: &Path) -> Result<Vec<FixtureResult>, ConformanceErr
             "cb2 sphere geometry does not preserve its declared radius",
         ));
     }
+    let over_limit_sphere_tile = DirCube.tile_key(DirCube::key(0, 0, 0, 3).unwrap(), 2).unwrap();
+    if !matches!(
+        cb2.domain_geometry("surface", over_limit_sphere_tile, 2),
+        Err(veyra_core::sample::SampleError::UnsupportedResolution)
+    ) {
+        return Err(ConformanceError::Assertion(
+            "sphere geometry must respect the domain maximum level",
+        ));
+    }
     let cb7 = open_directory(world_root.join("cb7-star1d")).map_err(ConformanceError::Writer)?;
     if cb7.figure().kind != "radial_profile_sphere"
         || cb7.capabilities().iter().any(|capability| {
@@ -1437,6 +1446,18 @@ fn verify_stage4(world_root: &Path) -> Result<Vec<FixtureResult>, ConformanceErr
     if maximum <= minimum {
         return Err(ConformanceError::Assertion(
             "cb8 geometry must use a non-spherical radius field",
+        ));
+    }
+    if !matches!(
+        cb8.domain_geometry(
+            "surface",
+            DirCube.tile_key(DirCube::key(0, 0, 0, 3).unwrap(), 2).unwrap(),
+            2,
+        ),
+        Err(veyra_core::sample::SampleError::UnsupportedResolution)
+    ) {
+        return Err(ConformanceError::Assertion(
+            "star-convex geometry must respect the domain maximum level",
         ));
     }
     let inspection = cb8

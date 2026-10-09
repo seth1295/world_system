@@ -8,6 +8,16 @@ use crate::WriterError;
 /// Builds below-native tiles using the descriptor's integer downsample operator.
 pub struct PyramidBuilder;
 
+#[derive(Clone, Copy)]
+enum DownsampleOperator {
+    Mean,
+    Rms,
+    Min,
+    Max,
+    Sum,
+    ModeLowestTiebreak,
+}
+
 impl PyramidBuilder {
     /// Reduces one child group. Integer means use rounded half-up division, and mode ties select
     /// the lowest raw value. RMS is the floor of the integer square root of mean squared input.
@@ -17,39 +27,8 @@ impl PyramidBuilder {
         nodata: Option<i64>,
         values: &[i64],
     ) -> Result<i64, WriterError> {
-        if dtype == DType::F32 || dtype == DType::Raw {
-            return Err(WriterError::UnsupportedPyramidDType(dtype));
-        }
-        if values.is_empty() {
-            return Err(WriterError::InvalidPyramid);
-        }
-        let valid: Vec<i64> =
-            values.iter().copied().filter(|value| Some(*value) != nodata).collect();
-        let result = if valid.is_empty() {
-            nodata.ok_or(WriterError::InvalidPyramid)?
-        } else {
-            match operator {
-                "mean" => {
-                    round_half_up(valid.iter().map(|value| i128::from(*value)).sum(), valid.len())?
-                }
-                "rms" => {
-                    let squares: u128 =
-                        valid.iter().map(|value| i128::from(*value).unsigned_abs().pow(2)).sum();
-                    i64::try_from(integer_sqrt(squares / valid.len() as u128))
-                        .map_err(|_| WriterError::InvalidPyramid)?
-                }
-                "min" => *valid.iter().min().ok_or(WriterError::InvalidPyramid)?,
-                "max" => *valid.iter().max().ok_or(WriterError::InvalidPyramid)?,
-                "sum" => i64::try_from(valid.iter().map(|value| i128::from(*value)).sum::<i128>())
-                    .map_err(|_| WriterError::InvalidPyramid)?,
-                "mode_lowest_tiebreak" => mode_lowest(&valid),
-                _ => return Err(WriterError::InvalidPyramid),
-            }
-        };
-        if !fits(dtype, result) {
-            return Err(WriterError::InvalidPyramid);
-        }
-        Ok(result)
+        let operator = prepare_reduction(dtype, operator, nodata)?;
+        reduce_values(dtype, operator, nodata, values)
     }
 
     /// Reduces four direction-cube child tiles or two radial child tiles into a parent tile.
@@ -61,10 +40,11 @@ impl PyramidBuilder {
         nodata: Option<i64>,
         children: &[CanonicalBlob],
     ) -> Result<CanonicalBlob, WriterError> {
-        if dtype == DType::F32 {
-            return Err(WriterError::UnsupportedPyramidDType(dtype));
+        if dtype == DType::Raw {
+            return Err(WriterError::InvalidPyramid);
         }
-        if dtype == DType::Raw || children.is_empty() {
+        let operator = prepare_reduction(dtype, operator, nodata)?;
+        if children.is_empty() {
             return Err(WriterError::InvalidPyramid);
         }
         let slices = children[0].slices;
@@ -109,7 +89,7 @@ impl PyramidBuilder {
                             group.push(read_integer(dtype, &assembled_bytes, index)?);
                         }
                     }
-                    let value = Self::reduce_group(dtype, operator, nodata, &group)?;
+                    let value = reduce_values(dtype, operator, nodata, &group)?;
                     write_integer(dtype, value, &mut payload)?;
                 }
             }
@@ -168,6 +148,75 @@ impl PyramidBuilder {
             _ => Err(WriterError::InvalidPyramid),
         }
     }
+}
+
+fn prepare_reduction(
+    dtype: DType,
+    operator: &str,
+    nodata: Option<i64>,
+) -> Result<DownsampleOperator, WriterError> {
+    let operator = match operator {
+        "mean" => DownsampleOperator::Mean,
+        "rms" => DownsampleOperator::Rms,
+        "min" => DownsampleOperator::Min,
+        "max" => DownsampleOperator::Max,
+        "sum" => DownsampleOperator::Sum,
+        "mode_lowest_tiebreak" => DownsampleOperator::ModeLowestTiebreak,
+        _ => return Err(WriterError::InvalidPyramid),
+    };
+    if dtype == DType::F32 || dtype == DType::Raw {
+        return Err(WriterError::UnsupportedPyramidDType(dtype));
+    }
+    if nodata.is_some_and(|value| !fits(dtype, value)) {
+        return Err(WriterError::InvalidPyramid);
+    }
+    Ok(operator)
+}
+
+fn reduce_values(
+    dtype: DType,
+    operator: DownsampleOperator,
+    nodata: Option<i64>,
+    values: &[i64],
+) -> Result<i64, WriterError> {
+    if values.is_empty() || values.iter().any(|value| !fits(dtype, *value)) {
+        return Err(WriterError::InvalidPyramid);
+    }
+    let valid: Vec<i64> = values.iter().copied().filter(|value| Some(*value) != nodata).collect();
+    let result = if valid.is_empty() {
+        nodata.ok_or(WriterError::InvalidPyramid)?
+    } else {
+        match operator {
+            DownsampleOperator::Mean => round_half_up(checked_sum(&valid)?, valid.len())?,
+            DownsampleOperator::Rms => {
+                let squares = valid.iter().try_fold(0_u128, |sum, value| {
+                    let magnitude = u128::from(value.unsigned_abs());
+                    let square =
+                        magnitude.checked_mul(magnitude).ok_or(WriterError::InvalidPyramid)?;
+                    sum.checked_add(square).ok_or(WriterError::InvalidPyramid)
+                })?;
+                let count = u128::try_from(valid.len()).map_err(|_| WriterError::InvalidPyramid)?;
+                i64::try_from(integer_sqrt(squares / count))
+                    .map_err(|_| WriterError::InvalidPyramid)?
+            }
+            DownsampleOperator::Min => *valid.iter().min().ok_or(WriterError::InvalidPyramid)?,
+            DownsampleOperator::Max => *valid.iter().max().ok_or(WriterError::InvalidPyramid)?,
+            DownsampleOperator::Sum => {
+                i64::try_from(checked_sum(&valid)?).map_err(|_| WriterError::InvalidPyramid)?
+            }
+            DownsampleOperator::ModeLowestTiebreak => mode_lowest(&valid),
+        }
+    };
+    if !fits(dtype, result) {
+        return Err(WriterError::InvalidPyramid);
+    }
+    Ok(result)
+}
+
+fn checked_sum(values: &[i64]) -> Result<i128, WriterError> {
+    values.iter().try_fold(0_i128, |sum, value| {
+        sum.checked_add(i128::from(*value)).ok_or(WriterError::InvalidPyramid)
+    })
 }
 
 fn assemble_cube_bytes(children: &[CanonicalBlob], dtype: DType) -> Result<Vec<u8>, WriterError> {
@@ -409,6 +458,110 @@ mod tests {
                     .unwrap()]
             ),
             Err(WriterError::UnsupportedPyramidDType(DType::F32))
+        ));
+    }
+
+    #[test]
+    fn reduce_group_validates_operator_values_and_nodata_before_reduction() {
+        assert!(matches!(
+            PyramidBuilder::reduce_group(DType::U8, "unknown", Some(255), &[255, 255]),
+            Err(WriterError::InvalidPyramid)
+        ));
+        assert!(matches!(
+            PyramidBuilder::reduce_group(DType::U8, "mean", None, &[300, 0]),
+            Err(WriterError::InvalidPyramid)
+        ));
+        assert!(matches!(
+            PyramidBuilder::reduce_group(DType::U8, "mean", Some(256), &[0, 0]),
+            Err(WriterError::InvalidPyramid)
+        ));
+        assert!(matches!(
+            PyramidBuilder::reduce_group(DType::U8, "mean", Some(-1), &[0, 0]),
+            Err(WriterError::InvalidPyramid)
+        ));
+        assert_eq!(
+            PyramidBuilder::reduce_group(DType::U8, "mean", Some(255), &[255, 255]).unwrap(),
+            255
+        );
+        assert_eq!(
+            PyramidBuilder::reduce_group(DType::I8, "min", Some(i64::from(i8::MIN)), &[-128, -128])
+                .unwrap(),
+            -128
+        );
+    }
+
+    #[test]
+    fn reductions_reject_extreme_invalid_inputs_and_keep_valid_integer_arithmetic() {
+        for operator in ["mean", "rms"] {
+            assert!(matches!(
+                PyramidBuilder::reduce_group(DType::I32, operator, None, &[i64::MAX, 0]),
+                Err(WriterError::InvalidPyramid)
+            ));
+            assert!(matches!(
+                PyramidBuilder::reduce_group(DType::U32, operator, None, &[i64::MIN, 0]),
+                Err(WriterError::InvalidPyramid)
+            ));
+        }
+        assert_eq!(
+            PyramidBuilder::reduce_group(
+                DType::I32,
+                "mean",
+                None,
+                &[i64::from(i32::MIN), i64::from(i32::MAX)]
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            PyramidBuilder::reduce_group(DType::I32, "rms", None, &[i64::from(i32::MIN), 0])
+                .unwrap(),
+            1_518_500_249
+        );
+        assert_eq!(
+            PyramidBuilder::reduce_group(
+                DType::U32,
+                "mean",
+                None,
+                &[i64::from(u32::MAX), i64::from(u32::MAX)]
+            )
+            .unwrap(),
+            i64::from(u32::MAX)
+        );
+        assert_eq!(
+            PyramidBuilder::reduce_group(
+                DType::U32,
+                "rms",
+                None,
+                &[i64::from(u32::MAX), i64::from(u32::MAX)]
+            )
+            .unwrap(),
+            i64::from(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn downsample_tile_rejects_unknown_operator_for_all_nodata_groups() {
+        let child = u8_blob(2, 2, &[255, 255, 255, 255]);
+        assert!(matches!(
+            PyramidBuilder::downsample_tile(
+                TopologyTag::DirCube,
+                DType::U8,
+                "unknown",
+                Some(255),
+                &[child]
+            ),
+            Err(WriterError::InvalidPyramid)
+        ));
+
+        assert!(matches!(
+            PyramidBuilder::downsample_tile(
+                TopologyTag::DirCube,
+                DType::U8,
+                "mean",
+                Some(256),
+                &[u8_blob(2, 2, &[1, 2, 3, 4])]
+            ),
+            Err(WriterError::InvalidPyramid)
         ));
     }
 

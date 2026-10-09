@@ -255,7 +255,6 @@ mod tests {
         resolve_required_view_fields, sort_views,
     };
     use crate::body::FieldId;
-    use crate::ids::Hash32;
     use crate::io::Body;
     use crate::spatial::Topology;
     use serde_json::json;
@@ -429,8 +428,7 @@ mod tests {
         };
         let index_hash = crate::canon::hash::hash(&index.encode().unwrap());
         root_value["indexes"] = json!({field_id.to_string():index_hash.to_string()});
-        let root = serde_json::from_value(root_value.clone()).unwrap();
-        let registry = serde_json::from_value(json!({
+        let registry_value = json!({
             "schema":"veyra.field_registry/1",
             "fields":[{
                 "id":field_id.to_string(),"name":"topography.height_m",
@@ -440,12 +438,22 @@ mod tests {
                 "native_level":0,"temporal":{"kind":"static"},
                 "sampling":{"interp":"bilinear"},"downsample":"mean","compat":"ancillary"
             }]
-        }))
-        .unwrap();
+        });
+        let canonical_registry =
+            crate::canon::jcs::canonicalize_json(&serde_json::to_vec(&registry_value).unwrap())
+                .unwrap();
+        root_value["sections"]["registry"]["hash"] =
+            json!(crate::canon::hash::hash(&canonical_registry).to_string());
+        let canonical_body =
+            crate::canon::jcs::canonicalize_json(&serde_json::to_vec(&root_value).unwrap())
+                .unwrap();
+        let baseline_id = crate::canon::hash::hash(&canonical_body);
+        let root = serde_json::from_value(root_value.clone()).unwrap();
+        let registry = serde_json::from_value(registry_value).unwrap();
         Body {
             root,
             root_value,
-            baseline_id: Hash32([0; 32]),
+            baseline_id,
             registry,
             sections: std::collections::BTreeMap::new(),
             indexes: std::collections::BTreeMap::from([(field_id, index)]),
@@ -457,6 +465,8 @@ mod tests {
     #[test]
     fn derived_views_are_only_advertised_for_interpretable_required_fields() {
         let valid = topography_body("scalar.height", "i16");
+        assert!(valid.root.validate().is_ok());
+        assert!(valid.root.validate_registry(&valid.registry).is_ok());
         let valid_view = valid
             .views()
             .into_iter()
@@ -482,6 +492,20 @@ mod tests {
                 Err(crate::sample::SampleError::UnsupportedSelection)
             ));
         }
+
+        let mut malformed_storage = topography_body("scalar.height", "i16");
+        malformed_storage.registry.fields[0].storage["scale"] = json!(2);
+        assert!(malformed_storage.root.validate().is_ok());
+        assert!(malformed_storage.root.validate_registry(&malformed_storage.registry).is_ok());
+        assert!(!malformed_storage.views().iter().any(|view| view.id == "derived.slope"));
+
+        let mut malformed_reference = topography_body("scalar.height", "i16");
+        malformed_reference.registry.fields[0]
+            .extra
+            .insert("reference".to_owned(), json!({"surface":"missing"}));
+        assert!(malformed_reference.root.validate().is_ok());
+        assert!(malformed_reference.root.validate_registry(&malformed_reference.registry).is_ok());
+        assert!(!malformed_reference.views().iter().any(|view| view.id == "derived.land_ocean"));
     }
 
     #[test]

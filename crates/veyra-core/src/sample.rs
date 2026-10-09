@@ -1085,10 +1085,27 @@ impl Body {
         domain: &crate::body::Domain,
     ) -> bool {
         if validate_derived_view_field(operator, field, domain).is_err()
-            || !self.indexes.contains_key(&field.id)
+            || !self.indexes.get(&field.id).is_some_and(|index| !index.entries.is_empty())
             || self.resolve_level(field, domain, LevelSel::Native).is_err()
         {
             return false;
+        }
+        if operator == "core.threshold_partition/1" {
+            let field_surface = field
+                .extra
+                .get("reference")
+                .and_then(|reference| reference.get("surface"))
+                .and_then(Value::as_str)
+                .or_else(|| self.capability_reference(&field.capability, "reference_surface"));
+            if field_surface.is_none_or(|surface_id| {
+                !self
+                    .root
+                    .reference_surfaces
+                    .iter()
+                    .any(|surface| surface.get("id").and_then(Value::as_str) == Some(surface_id))
+            }) {
+                return false;
+            }
         }
         let time = if field.temporal.get("kind").and_then(Value::as_str) == Some("periodic_slices")
         {
@@ -1333,21 +1350,35 @@ pub(crate) fn validate_derived_view_field(
     domain: &crate::body::Domain,
 ) -> Result<(), SampleError> {
     ensure_supported_field(field)?;
+    let dtype = crate::body::field_dtype(field).ok_or(SampleError::UnsupportedField)?;
+    crate::body::validate_decimal_storage(&field.storage)
+        .map_err(|_| SampleError::UnsupportedField)?;
+    if crate::body::field_nodata(field)
+        .map_err(|_| SampleError::UnsupportedField)?
+        .is_some_and(|raw| !crate::body::raw_storage_value_fits(dtype, raw))
+    {
+        return Err(SampleError::UnsupportedField);
+    }
+    decode_physical(field, RawValue::Integer(0))?;
     match operator {
         "core.slope/1"
             if domain.topology == "veyra.topo.dir_cube/1"
-                && field.semantic.starts_with("scalar.") =>
+                && field.semantic == "scalar.height"
+                && field.extra.get("unit").and_then(Value::as_str) == Some("m") =>
         {
             Ok(())
         }
         "core.threshold_partition/1"
             if domain.topology == "veyra.topo.dir_cube/1"
-                && field.semantic.starts_with("scalar.")
+                && field.semantic == "scalar.height"
                 && field.extra.get("unit").and_then(Value::as_str) == Some("m") =>
         {
             Ok(())
         }
-        "core.slope/1" => Err(SampleError::UnsupportedSelection),
+        "core.slope/1" if domain.topology != "veyra.topo.dir_cube/1" => {
+            Err(SampleError::UnsupportedSelection)
+        }
+        "core.slope/1" => Err(SampleError::UnsupportedField),
         "core.threshold_partition/1" if domain.topology != "veyra.topo.dir_cube/1" => {
             Err(SampleError::UnsupportedSelection)
         }
@@ -2161,6 +2192,11 @@ mod tests {
             assert_eq!(sample.cell, expected_cell);
             assert_eq!(sample.raw, None);
             assert_eq!(sample.category, None);
+
+            let report = body
+                .inspect(&Position::Direction(direction), LevelSel::Exact(2), TimeSel::Static)
+                .unwrap();
+            assert_eq!(report.fields[0].sample.as_ref().unwrap().cell, expected_cell);
         }
 
         let mut discrete_body = cube_face_value_body(2).0;
@@ -2533,7 +2569,7 @@ mod tests {
         let cell = DirCube::key(0, 0, 0, 0).unwrap();
         assert!(matches!(
             body.slope_at(&field, &domain, &DirCube, cell, 0, TimeSel::Static),
-            Err(super::SampleError::UnsupportedSelection)
+            Err(super::SampleError::UnsupportedField)
         ));
         let view = crate::views::ViewDescriptor {
             id: "derived.test".to_owned(),

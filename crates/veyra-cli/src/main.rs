@@ -7,7 +7,9 @@ use std::str::FromStr;
 use veyra_core::body::FieldId;
 use veyra_core::canon::{hash, jcs};
 use veyra_core::ids::{ObjectAddress, ObjectId, UniverseId};
-use veyra_core::sample::{LevelSel, Position, SampleQuery, TileRequest, TileView, TimeSel};
+use veyra_core::sample::{
+    LevelSel, Position, SampleQuery, TileRequest, TileView, TimeSel, TopologyTileRequest,
+};
 use veyra_core::spatial::{CellKey, Dir, DirCube, Radial1d, TileKey, Topology};
 use veyra_writer::{open_directory, verify_directory};
 
@@ -172,35 +174,55 @@ fn command_body(args: &[String]) -> Result<(), Box<dyn Error>> {
         "tile" => {
             let path = args.get(1).ok_or("missing body directory")?;
             let body = open_directory(path)?;
-            let field = parse_field_id(&body, &option_value(&args[2..], "--field")?)?;
             let (level, address) = parse_tile_key(&option_value(&args[2..], "--key")?)?;
             let key = TileKey { level, address };
             let halo = option_value_optional(&args[2..], "--halo")?
                 .map(|value| value.parse::<u8>())
                 .transpose()?
                 .unwrap_or(0);
-            let time = parse_time(&args[2..])?;
-            let periodic =
-                body.fields().iter().find(|descriptor| descriptor.id == field).is_some_and(
-                    |descriptor| {
-                        descriptor.temporal.get("kind").and_then(serde_json::Value::as_str)
-                            == Some("periodic_slices")
-                    },
-                );
-            let view = match option_value_optional(&args[2..], "--view")?.as_deref() {
-                Some("raw") => TileView::Raw,
-                Some("time_reduce") => TileView::TimeReduce,
-                Some(view) if view.starts_with("derived:") => {
-                    TileView::Derived(view[8..].to_owned())
+            let view_text = option_value_optional(&args[2..], "--view")?;
+            let tile = if let Some(field_text) = option_value_optional(&args[2..], "--field")? {
+                let field = parse_field_id(&body, &field_text)?;
+                let time = parse_time(&args[2..])?;
+                let periodic =
+                    body.fields().iter().find(|descriptor| descriptor.id == field).is_some_and(
+                        |descriptor| {
+                            descriptor.temporal.get("kind").and_then(serde_json::Value::as_str)
+                                == Some("periodic_slices")
+                        },
+                    );
+                let view = match view_text.as_deref() {
+                    Some("raw") => TileView::Raw,
+                    Some("time_reduce") => TileView::TimeReduce,
+                    Some(view) if view.starts_with("derived:") => {
+                        TileView::Derived(view[8..].to_owned())
+                    }
+                    Some(_) => return Err("--view must be raw, time_reduce, or derived:ID".into()),
+                    None if periodic && !matches!(time, TimeSel::Slice(_) | TimeSel::Phase(_)) => {
+                        TileView::TimeReduce
+                    }
+                    None => TileView::Raw,
+                };
+                body.tile(&TileRequest { field, key, time, halo, view })?
+            } else {
+                let Some(view) =
+                    view_text.as_deref().and_then(|view| view.strip_prefix("derived:"))
+                else {
+                    return Err(
+                        "--field is required unless requesting a topology-derived view".into()
+                    );
+                };
+                let time = parse_time(&args[2..])?;
+                if time != TimeSel::Static {
+                    return Err("topology-derived views do not accept time selectors".into());
                 }
-                Some(_) => return Err("--view must be raw, time_reduce, or derived:ID".into()),
-                None if periodic && !matches!(time, TimeSel::Slice(_) | TimeSel::Phase(_)) => {
-                    TileView::TimeReduce
-                }
-                None => TileView::Raw,
+                body.topology_tile(&TopologyTileRequest {
+                    domain: option_value(&args[2..], "--domain")?,
+                    key,
+                    halo,
+                    view: view.to_owned(),
+                })?
             };
-            let request = TileRequest { field, key, time, halo, view };
-            let tile = body.tile(&request)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -402,6 +424,7 @@ fn print_help() {
            body verify|info|fields|views <artifact-directory>\n\
            body sample|inspect <artifact-directory> --field <id|name> <position> [--level native|canonical|N] [--slice K|--time mean|min|max|phase:N]\n\
            body tile <artifact-directory> --field <id|name> --key LEVEL:KEY [--halo 0|1] [--time selection] [--view raw|time_reduce|derived:ID]\n\
+           body tile <artifact-directory> --domain <id> --key LEVEL:KEY --view derived:topology.ID [--halo 0|1]\n\
            conformance gen|verify [world-root] [vector-root]"
     );
 }

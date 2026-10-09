@@ -182,6 +182,19 @@ pub struct TileRequest {
     pub view: TileView,
 }
 
+/// One field-independent request for a topology-derived view tile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TopologyTileRequest {
+    /// Spatial domain that owns the topology view.
+    pub domain: String,
+    /// Canonical tile address in the domain.
+    pub key: TileKey,
+    /// Number of assembled halo cells; V1 currently permits zero or one.
+    pub halo: u8,
+    /// Topology-derived view ID from [`Body::views`].
+    pub view: String,
+}
+
 /// Measure-weighted summary of values in one field view.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldStats {
@@ -717,30 +730,84 @@ impl Body {
         Ok(TileData { key: request.key, dim_i, dim_j, slices: 1, values, source: final_source })
     }
 
+    /// Returns a topology-derived view tile without requiring a registered field.
+    pub fn topology_tile(&self, request: &TopologyTileRequest) -> Result<TileData, SampleError> {
+        if request.halo > 1 {
+            return Err(SampleError::UnsupportedSelection);
+        }
+        let domain = self.domain(&request.domain)?;
+        let topology = topology_for(domain)?;
+        let topology = topology.as_topology();
+        let view = self
+            .views()
+            .into_iter()
+            .find(|view| {
+                view.domain == request.domain
+                    && view.id == request.view
+                    && view.field.is_none()
+                    && view.capability.is_none()
+                    && view.operator.as_deref() == Some(request.view.as_str())
+            })
+            .ok_or(SampleError::UnsupportedSelection)?;
+        let operator = view.operator.as_deref().ok_or(SampleError::UnsupportedSelection)?;
+        topology.validate_tile_key(request.key, domain.tile_log2)?;
+        if request.key.level > domain.max_level {
+            return Err(SampleError::UnsupportedResolution);
+        }
+        let layout = topology.tile_raster_layout(request.key, domain.tile_log2, request.halo)?;
+        let output_len = materialized_tile_cell_count(layout.dim_i, layout.dim_j)?;
+        let dim_i =
+            u16::try_from(layout.dim_i).map_err(|_| SampleError::TileOutputLimitExceeded)?;
+        let dim_j =
+            u16::try_from(layout.dim_j).map_err(|_| SampleError::TileOutputLimitExceeded)?;
+        let discrete_output = is_discrete_topology_view(operator);
+        let mut values = Vec::new();
+        values.try_reserve_exact(output_len).map_err(|_| SampleError::AllocationFailed)?;
+        for j in 0..i64::from(dim_j) {
+            for i in 0..i64::from(dim_i) {
+                let cells = topology.tile_halo_cells(
+                    request.key,
+                    domain.tile_log2,
+                    i + layout.offset_i,
+                    j + layout.offset_j,
+                )?;
+                let mut sum = 0.0;
+                let mut weight = 0.0;
+                let mut discrete_value = None;
+                for cell in cells {
+                    let value =
+                        topology_derived_value(operator, topology, cell.key, request.key.level)?;
+                    if discrete_output {
+                        discrete_value = merge_discrete_corner_value(discrete_value, value)?;
+                    } else {
+                        sum += value * cell.weight;
+                        weight += cell.weight;
+                    }
+                }
+                values.push(if discrete_output {
+                    discrete_value
+                } else {
+                    (weight > 0.0).then_some(sum / weight)
+                });
+            }
+        }
+        Ok(TileData {
+            key: request.key,
+            dim_i,
+            dim_j,
+            slices: 1,
+            values,
+            source: SampleSource::Derived,
+        })
+    }
+
     fn derived_value(&self, query: DerivedTileQuery<'_>) -> Result<Option<f64>, SampleError> {
         let DerivedTileQuery { view, field, domain, topology, cell, level, time } = query;
-        match view.operator.as_deref().ok_or(SampleError::UnsupportedSelection)? {
-            "topology.cube_face" => {
-                let (face, _, _, _) = DirCube::decode(cell)?;
-                Ok(Some(f64::from(face)))
-            }
-            "topology.tile_level" => Ok(Some(f64::from(level))),
-            "topology.axial_latitude" => {
-                let TopologyPoint::Direction(direction) = topology.point_for_cell(cell)? else {
-                    return Err(SampleError::UnsupportedSelection);
-                };
-                let (latitude, _) = direction.axial_lat_lon();
-                Ok(Some(
-                    libm::floor(
-                        (latitude + core::f64::consts::FRAC_PI_2) / (core::f64::consts::PI / 12.0),
-                    )
-                    .clamp(0.0, 11.0),
-                ))
-            }
-            "topology.radial_profile" => match topology.point_for_cell(cell)? {
-                TopologyPoint::RadialFraction(fraction) => Ok(Some(fraction)),
-                TopologyPoint::Direction(_) => Err(SampleError::UnsupportedSelection),
-            },
+        let operator = view.operator.as_deref().ok_or(SampleError::UnsupportedSelection)?;
+        if operator.starts_with("topology.") {
+            return topology_derived_value(operator, topology, cell, level).map(Some);
+        }
+        match operator {
             "core.slope/1" => self.slope_at(field, domain, topology, cell, level, time),
             "core.threshold_partition/1" => {
                 self.threshold_partition_at(view, field, domain, cell, level, time)
@@ -1012,30 +1079,19 @@ impl Body {
         let (Some(minimum), Some(maximum)) = (minimum, maximum) else {
             return Ok(Histogram { minimum: None, maximum: None, bins: Vec::new() });
         };
-        let width = if minimum == maximum { 0.0 } else { (maximum - minimum) / bins as f64 };
-        if !width.is_finite() {
-            return Err(SampleError::InvalidScale);
-        }
+        let range = maximum - minimum;
+        let width = if range.is_finite() { range / bins as f64 } else { 0.0 };
         let mut output: Vec<HistogramBin> = (0..bins)
             .map(|index| HistogramBin {
-                lower: minimum + index as f64 * width,
-                upper: if index + 1 == bins {
-                    maximum
-                } else {
-                    minimum + (index + 1) as f64 * width
-                },
+                lower: numeric_histogram_edge(minimum, maximum, range, width, bins, index),
+                upper: numeric_histogram_edge(minimum, maximum, range, width, bins, index + 1),
                 weight: 0.0,
                 cells: 0,
             })
             .collect();
         for cell in values {
             let Some(value) = cell.value else { continue };
-            let index = if width == 0.0 {
-                0
-            } else {
-                libm::floor((value - minimum) / width).max(0.0) as usize
-            }
-            .min(bins - 1);
+            let index = numeric_histogram_index(value, minimum, maximum, range, width, &output);
             output[index].weight += cell.measure;
             output[index].cells += 1;
         }
@@ -1616,14 +1672,42 @@ fn is_discrete_tile_output(
 ) -> bool {
     is_discrete_semantic(&field.semantic)
         || view.and_then(|descriptor| descriptor.operator.as_deref()).is_some_and(|operator| {
-            matches!(
-                operator,
-                "topology.cube_face"
-                    | "topology.tile_level"
-                    | "topology.axial_latitude"
-                    | "core.threshold_partition/1"
-            )
+            is_discrete_topology_view(operator) || operator == "core.threshold_partition/1"
         })
+}
+
+fn is_discrete_topology_view(operator: &str) -> bool {
+    matches!(operator, "topology.cube_face" | "topology.tile_level" | "topology.axial_latitude")
+}
+
+fn topology_derived_value(
+    operator: &str,
+    topology: &dyn Topology,
+    cell: CellKey,
+    level: u8,
+) -> Result<f64, SampleError> {
+    match operator {
+        "topology.cube_face" => {
+            let (face, _, _, _) = DirCube::decode(cell)?;
+            Ok(f64::from(face))
+        }
+        "topology.tile_level" => Ok(f64::from(level)),
+        "topology.axial_latitude" => {
+            let TopologyPoint::Direction(direction) = topology.point_for_cell(cell)? else {
+                return Err(SampleError::UnsupportedSelection);
+            };
+            let (latitude, _) = direction.axial_lat_lon();
+            Ok(libm::floor(
+                (latitude + core::f64::consts::FRAC_PI_2) / (core::f64::consts::PI / 12.0),
+            )
+            .clamp(0.0, 11.0))
+        }
+        "topology.radial_profile" => match topology.point_for_cell(cell)? {
+            TopologyPoint::RadialFraction(fraction) => Ok(fraction),
+            TopologyPoint::Direction(_) => Err(SampleError::UnsupportedSelection),
+        },
+        _ => Err(SampleError::UnsupportedSelection),
+    }
 }
 
 // V1 defines a mean for corner contributors, but category-like codes have no
@@ -1688,6 +1772,53 @@ fn stable_weighted_mean(values: &[WeightedCell]) -> Result<Option<f64>, SampleEr
         total_measure = next_measure;
     }
     Ok(mean)
+}
+
+fn numeric_histogram_edge(
+    minimum: f64,
+    maximum: f64,
+    range: f64,
+    width: f64,
+    bins: usize,
+    edge: usize,
+) -> f64 {
+    if edge == 0 {
+        return minimum;
+    }
+    if edge == bins {
+        return maximum;
+    }
+    if range.is_finite() {
+        return minimum + edge as f64 * width;
+    }
+
+    let scale = (-minimum).max(maximum);
+    let fraction = edge as f64 / bins as f64;
+    let normalized = (minimum / scale) * (1.0 - fraction) + (maximum / scale) * fraction;
+    normalized * scale
+}
+
+fn numeric_histogram_index(
+    value: f64,
+    minimum: f64,
+    maximum: f64,
+    range: f64,
+    width: f64,
+    bins: &[HistogramBin],
+) -> usize {
+    if value <= minimum {
+        return 0;
+    }
+    if value >= maximum {
+        return bins.len() - 1;
+    }
+    if range.is_finite() && width > 0.0 {
+        let index = libm::floor((value - minimum) / width).max(0.0) as usize;
+        return index.min(bins.len() - 1);
+    }
+    // Compare against the represented edges in the overflow/underflow cases so an exact
+    // internal edge remains inclusive in the following bin despite rounded normalization.
+    bins.partition_point(|bin| bin.upper <= value).min(bins.len() - 1)
 }
 
 #[cfg(test)]
@@ -1846,6 +1977,93 @@ mod tests {
         assert_eq!(const_first_tile.source, super::SampleSource::Mixed);
     }
 
+    fn fieldless_topology_body(topology: &str) -> Body {
+        let topology_id = match topology {
+            "dir_cube" => "veyra.topo.dir_cube/1",
+            "radial_1d" => "veyra.topo.radial_1d/1",
+            _ => panic!("unknown topology fixture"),
+        };
+        let vertical = if topology == "dir_cube" {
+            json!({"kind":"none"})
+        } else {
+            json!({"kind":"radius","extent_m":"1"})
+        };
+        let mut root_value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../conformance/worlds/cb9-minimal-void/body.json"
+        ))
+        .unwrap();
+        root_value["required_features"].as_array_mut().unwrap().push(json!(topology_id));
+        root_value["domains"] = json!([{
+            "id":"empty-domain","topology":topology_id,"frame":"body_fixed",
+            "vertical":vertical,"tile_log2":0,"max_level":2
+        }]);
+        let root = serde_json::from_value(root_value.clone()).unwrap();
+        let registry = serde_json::from_value(json!({
+            "schema":"veyra.field_registry/1","fields":[]
+        }))
+        .unwrap();
+        let body = Body {
+            root,
+            root_value,
+            baseline_id: Hash32([0; 32]),
+            registry,
+            sections: std::collections::BTreeMap::new(),
+            indexes: std::collections::BTreeMap::new(),
+            blobs: std::collections::BTreeMap::new(),
+            ledgers: std::collections::BTreeMap::new(),
+        };
+        assert!(body.root.validate().is_ok());
+        assert!(body.root.validate_registry(&body.registry).is_ok());
+        body
+    }
+
+    #[test]
+    fn fieldless_topology_views_are_addressable_by_domain() {
+        let cube = fieldless_topology_body("dir_cube");
+        assert!(cube.fields().is_empty());
+        for view in ["topology.cube_face", "topology.tile_level", "topology.axial_latitude"] {
+            assert!(cube.views().iter().any(|descriptor| descriptor.id == view));
+        }
+        let cube_cell = DirCube::key(4, 0, 0, 1).unwrap();
+        let cube_tile = DirCube.tile_key(cube_cell, 0).unwrap();
+        for (view, expected) in [("topology.cube_face", 4.0), ("topology.tile_level", 1.0)] {
+            let tile = cube
+                .topology_tile(&super::TopologyTileRequest {
+                    domain: "empty-domain".to_owned(),
+                    key: cube_tile,
+                    halo: 0,
+                    view: view.to_owned(),
+                })
+                .unwrap();
+            assert_eq!(tile.values, vec![Some(expected)]);
+            assert_eq!(tile.source, super::SampleSource::Derived);
+        }
+        let latitude = cube
+            .topology_tile(&super::TopologyTileRequest {
+                domain: "empty-domain".to_owned(),
+                key: cube_tile,
+                halo: 0,
+                view: "topology.axial_latitude".to_owned(),
+            })
+            .unwrap();
+        assert!(latitude.values[0].is_some_and(|value| (0.0..=11.0).contains(&value)));
+
+        let radial = fieldless_topology_body("radial_1d");
+        assert!(radial.fields().is_empty());
+        assert!(radial.views().iter().any(|view| view.id == "topology.radial_profile"));
+        let radial_tile = Radial1d::default().tile_key(Radial1d::key(1, 1).unwrap(), 0).unwrap();
+        let profile = radial
+            .topology_tile(&super::TopologyTileRequest {
+                domain: "empty-domain".to_owned(),
+                key: radial_tile,
+                halo: 0,
+                view: "topology.radial_profile".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(profile.values, vec![Some(0.75)]);
+        assert_eq!(profile.source, super::SampleSource::Derived);
+    }
+
     fn radial_const_nodata_body(
         const_shell: u64,
         slice_count: u16,
@@ -1932,6 +2150,18 @@ mod tests {
             },
             field_id,
         )
+    }
+
+    fn radial_scalar_values_body(values: [i64; 2], scale: &str) -> (Body, FieldId) {
+        let (mut body, field) = radial_const_nodata_body(0, 1, "scalar.value", "mean");
+        body.registry.fields[0].storage["dtype"] = json!("i8");
+        body.registry.fields[0].storage["scale"] = json!(scale);
+        body.registry.fields[0].storage["offset"] = json!("0");
+        body.registry.fields[0].storage["nodata"] = serde_json::Value::Null;
+        let index = body.indexes.get_mut(&field).unwrap();
+        index.entries[0].value = IndexValue::Const(values[0]);
+        index.entries[1].value = IndexValue::Const(values[1]);
+        (body, field)
     }
 
     fn replace_radial_entry_with_values(
@@ -2663,5 +2893,67 @@ mod tests {
                 .unwrap();
         assert_eq!(with_nodata, Some(7.0));
         assert_eq!(stable_weighted_mean(&[weighted_cell(None, 1.0)]).unwrap(), None);
+    }
+
+    #[test]
+    fn numeric_histograms_handle_wide_nearby_negative_uniform_and_ordinary_ranges() {
+        let (wide_body, wide_field) = radial_scalar_values_body([-1, 1], "1e308");
+        let wide = wide_body.histogram(wide_field, 4, LevelSel::Exact(1), TimeSel::Static).unwrap();
+        assert_eq!(wide.minimum, Some(-1.0e308));
+        assert_eq!(wide.maximum, Some(1.0e308));
+        assert_eq!(wide.bins.first().unwrap().lower, -1.0e308);
+        assert_eq!(wide.bins.last().unwrap().upper, 1.0e308);
+        assert_eq!(wide.bins[1].upper, 0.0);
+        assert_eq!(wide.bins[2].lower, 0.0);
+        let wide_range = 1.0e308 - (-1.0e308);
+        assert_eq!(
+            super::numeric_histogram_index(0.0, -1.0e308, 1.0e308, wide_range, 0.0, &wide.bins),
+            2
+        );
+        assert_eq!(
+            super::numeric_histogram_index(
+                -5.0e307, -1.0e308, 1.0e308, wide_range, 0.0, &wide.bins
+            ),
+            1
+        );
+        assert_eq!(wide.bins.iter().map(|bin| bin.cells).collect::<Vec<_>>(), vec![1, 0, 0, 1]);
+
+        let (nearby_body, nearby_field) = radial_scalar_values_body([100, 101], "1");
+        let nearby =
+            nearby_body.histogram(nearby_field, 2, LevelSel::Exact(1), TimeSel::Static).unwrap();
+        assert_eq!(nearby.bins[0].lower, 100.0);
+        assert_eq!(nearby.bins[0].upper, 100.5);
+        assert_eq!(nearby.bins[1].lower, 100.5);
+        assert_eq!(nearby.bins[1].upper, 101.0);
+        assert_eq!(nearby.bins.iter().map(|bin| bin.cells).collect::<Vec<_>>(), vec![1, 1]);
+
+        let (negative_body, negative_field) = radial_scalar_values_body([-4, -2], "1");
+        let negative = negative_body
+            .histogram(negative_field, 2, LevelSel::Exact(1), TimeSel::Static)
+            .unwrap();
+        assert_eq!(negative.bins[0].lower, -4.0);
+        assert_eq!(negative.bins[0].upper, -3.0);
+        assert_eq!(negative.bins[1].lower, -3.0);
+        assert_eq!(negative.bins[1].upper, -2.0);
+        assert_eq!(negative.bins.iter().map(|bin| bin.cells).collect::<Vec<_>>(), vec![1, 1]);
+
+        let (uniform_body, uniform_field) = radial_scalar_values_body([7, 7], "1");
+        let uniform =
+            uniform_body.histogram(uniform_field, 3, LevelSel::Exact(1), TimeSel::Static).unwrap();
+        assert_eq!(uniform.minimum, Some(7.0));
+        assert_eq!(uniform.maximum, Some(7.0));
+        assert!(uniform.bins.iter().all(|bin| bin.lower == 7.0 && bin.upper == 7.0));
+        assert_eq!(uniform.bins.iter().map(|bin| bin.cells).collect::<Vec<_>>(), vec![2, 0, 0]);
+
+        let (ordinary_body, ordinary_field) = radial_scalar_values_body([0, 4], "1");
+        let ordinary = ordinary_body
+            .histogram(ordinary_field, 4, LevelSel::Exact(1), TimeSel::Static)
+            .unwrap();
+        assert_eq!(
+            ordinary.bins.iter().map(|bin| bin.lower).collect::<Vec<_>>(),
+            vec![0.0, 1.0, 2.0, 3.0]
+        );
+        assert_eq!(ordinary.bins.last().unwrap().upper, 4.0);
+        assert_eq!(ordinary.bins.iter().map(|bin| bin.cells).sum::<u64>(), 2);
     }
 }

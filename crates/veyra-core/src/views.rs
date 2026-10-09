@@ -17,6 +17,9 @@ pub struct ViewDescriptor {
     pub field: Option<FieldId>,
     /// Declared field name when field-backed.
     pub field_name: Option<String>,
+    /// Canonical field identities required by a capability-derived view.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_fields: Vec<FieldId>,
     /// Declaring capability for a capability-derived or field-backed view.
     pub capability: Option<String>,
     /// Core operator for a derived view.
@@ -30,6 +33,15 @@ pub struct ViewDescriptor {
     pub label: String,
     /// Preserved display declaration for consumers.
     pub display: Option<Value>,
+}
+
+impl ViewDescriptor {
+    pub(crate) fn accepts_field(&self, field: FieldId) -> bool {
+        match (self.capability.is_some(), self.operator.is_some()) {
+            (true, true) => self.required_fields.contains(&field),
+            _ => true,
+        }
+    }
 }
 
 impl Body {
@@ -50,6 +62,7 @@ impl Body {
                             domain: domain.id.clone(),
                             field: None,
                             field_name: None,
+                            required_fields: Vec::new(),
                             capability: None,
                             operator: Some(id.to_owned()),
                             group: "Spatial".to_owned(),
@@ -64,6 +77,7 @@ impl Body {
                     domain: domain.id.clone(),
                     field: None,
                     field_name: None,
+                    required_fields: Vec::new(),
                     capability: None,
                     operator: Some("topology.radial_profile".to_owned()),
                     group: "Spatial".to_owned(),
@@ -91,6 +105,7 @@ impl Body {
                 domain: field.domain.clone(),
                 field: Some(field.id),
                 field_name: Some(field.name.clone()),
+                required_fields: Vec::new(),
                 capability: Some(field.capability.clone()),
                 operator: None,
                 group: display.get("group").and_then(Value::as_str).unwrap_or("Fields").to_owned(),
@@ -145,8 +160,8 @@ impl Body {
                         .find(|item| item.id == *capability_id)
                         .and_then(|item| item.params.get("domain"))
                         .and_then(Value::as_str);
-                    let Some(domain) =
-                        required_view_domain(needs, self.fields(), capability_domain)
+                    let Some((domain, required_fields)) =
+                        resolve_required_view_fields(needs, self.fields(), capability_domain)
                     else {
                         continue;
                     };
@@ -155,6 +170,7 @@ impl Body {
                         domain,
                         field: None,
                         field_name: None,
+                        required_fields,
                         capability: Some((*capability_id).to_owned()),
                         operator: Some(operator.to_owned()),
                         group: group.clone(),
@@ -196,33 +212,38 @@ fn dependencies_available(contract: &Value, declared: &std::collections::BTreeSe
     })
 }
 
-fn required_view_domain(
+fn resolve_required_view_fields(
     needs: &[Value],
     fields: &[crate::body::FieldDescriptor],
     capability_domain: Option<&str>,
-) -> Option<String> {
+) -> Option<(String, Vec<FieldId>)> {
     let names: Vec<&str> = needs.iter().filter_map(Value::as_str).collect();
     if names.len() != needs.len() || names.is_empty() {
         return None;
     }
-    let first = *names.first()?;
-    let domain = fields.iter().find(|field| field.name == first)?.domain.as_str();
-    if capability_domain.is_some_and(|required| required != domain)
-        || !names.iter().all(|name| {
-            fields.iter().any(|field| field.name.as_str() == *name && field.domain == domain)
-        })
-    {
-        return None;
+    let mut domain: Option<&str> = capability_domain;
+    let mut field_ids = Vec::with_capacity(names.len());
+    for name in names {
+        let mut matches = fields.iter().filter(|field| {
+            field.name == name && domain.is_none_or(|required| field.domain == required)
+        });
+        let field = matches.next()?;
+        if matches.next().is_some() || domain.is_some_and(|required| required != field.domain) {
+            return None;
+        }
+        domain = Some(field.domain.as_str());
+        field_ids.push(field.id);
     }
-    Some(domain.to_owned())
+    Some((domain?.to_owned(), field_ids))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ViewDescriptor, capability_display_order, dependencies_available, required_view_domain,
-        sort_views,
+        ViewDescriptor, capability_display_order, dependencies_available,
+        resolve_required_view_fields, sort_views,
     };
+    use crate::body::FieldId;
     use serde_json::json;
     use std::collections::BTreeSet;
 
@@ -237,6 +258,7 @@ mod tests {
             domain: "surface".to_owned(),
             field: None,
             field_name: None,
+            required_fields: Vec::new(),
             capability: capability.map(|value| value.to_owned()),
             operator: Some(id.to_owned()),
             group: group.to_owned(),
@@ -257,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn derived_views_require_all_declared_fields_in_one_compatible_domain() {
+    fn derived_views_resolve_required_fields_unambiguously() {
         let fields: Vec<crate::body::FieldDescriptor> = serde_json::from_value(json!([
             {"id":"0x01010001","name":"field.one","capability":"cap.sample/1","domain":"domain-a","semantic":"scalar.value","persistence":"invariant","storage":{"dtype":"u16","scale":"1","offset":"0"},"native_level":0,"temporal":{"kind":"static"},"sampling":{"interp":"nearest"},"downsample":"mean","compat":"ancillary"},
             {"id":"0x01010002","name":"field.two","capability":"cap.sample/1","domain":"domain-a","semantic":"scalar.value","persistence":"invariant","storage":{"dtype":"u16","scale":"1","offset":"0"},"native_level":0,"temporal":{"kind":"static"},"sampling":{"interp":"nearest"},"downsample":"mean","compat":"ancillary"}
@@ -267,16 +289,96 @@ mod tests {
         let missing_needs = json!(["field.one", "missing"]);
         let malformed_needs = json!(["field.one", 7]);
         let one_need = json!(["field.one"]);
+        let valid = resolve_required_view_fields(
+            valid_needs.as_array().unwrap(),
+            &fields,
+            Some("domain-a"),
+        )
+        .unwrap();
         assert_eq!(
-            required_view_domain(valid_needs.as_array().unwrap(), &fields, Some("domain-a")),
-            Some("domain-a".to_owned())
+            valid,
+            ("domain-a".to_owned(), vec![FieldId::new(0x0101, 1), FieldId::new(0x0101, 2)])
         );
-        assert_eq!(required_view_domain(missing_needs.as_array().unwrap(), &fields, None), None);
-        assert_eq!(required_view_domain(malformed_needs.as_array().unwrap(), &fields, None), None);
+        let bound_view = ViewDescriptor {
+            id: "derived.one".to_owned(),
+            domain: "domain-a".to_owned(),
+            field: None,
+            field_name: None,
+            required_fields: valid.1.clone(),
+            capability: Some("cap.sample/1".to_owned()),
+            operator: Some("core.test/1".to_owned()),
+            group: "Fields".to_owned(),
+            display_order: None,
+            label: "Derived one".to_owned(),
+            display: None,
+        };
+        assert!(bound_view.accepts_field(FieldId::new(0x0101, 1)));
+        assert!(!bound_view.accepts_field(FieldId::new(0x0101, 3)));
         assert_eq!(
-            required_view_domain(one_need.as_array().unwrap(), &fields, Some("domain-b")),
+            resolve_required_view_fields(missing_needs.as_array().unwrap(), &fields, None),
             None
         );
+        assert_eq!(
+            resolve_required_view_fields(malformed_needs.as_array().unwrap(), &fields, None),
+            None
+        );
+        assert_eq!(
+            resolve_required_view_fields(one_need.as_array().unwrap(), &fields, Some("domain-b")),
+            None
+        );
+
+        let same_domain_duplicates: Vec<crate::body::FieldDescriptor> =
+            serde_json::from_value(json!([
+                {"id":"0x01010001","name":"field.duplicate","capability":"cap.sample/1","domain":"domain-a","semantic":"scalar.value","persistence":"invariant","storage":{"dtype":"u16","scale":"1","offset":"0"},"native_level":0,"temporal":{"kind":"static"},"sampling":{"interp":"nearest"},"downsample":"mean","compat":"ancillary"},
+                {"id":"0x01010002","name":"field.duplicate","capability":"cap.sample/1","domain":"domain-a","semantic":"scalar.value","persistence":"invariant","storage":{"dtype":"u16","scale":"1","offset":"0"},"native_level":0,"temporal":{"kind":"static"},"sampling":{"interp":"nearest"},"downsample":"mean","compat":"ancillary"}
+            ]))
+            .unwrap();
+        let duplicate_need = json!(["field.duplicate"]);
+        assert_eq!(
+            resolve_required_view_fields(
+                duplicate_need.as_array().unwrap(),
+                &same_domain_duplicates,
+                Some("domain-a"),
+            ),
+            None
+        );
+
+        let cross_domain_duplicates: Vec<crate::body::FieldDescriptor> =
+            serde_json::from_value(json!([
+                {"id":"0x01010001","name":"field.duplicate","capability":"cap.sample/1","domain":"domain-a","semantic":"scalar.value","persistence":"invariant","storage":{"dtype":"u16","scale":"1","offset":"0"},"native_level":0,"temporal":{"kind":"static"},"sampling":{"interp":"nearest"},"downsample":"mean","compat":"ancillary"},
+                {"id":"0x01010002","name":"field.duplicate","capability":"cap.sample/1","domain":"domain-b","semantic":"scalar.value","persistence":"invariant","storage":{"dtype":"u16","scale":"1","offset":"0"},"native_level":0,"temporal":{"kind":"static"},"sampling":{"interp":"nearest"},"downsample":"mean","compat":"ancillary"}
+            ]))
+            .unwrap();
+        assert_eq!(
+            resolve_required_view_fields(
+                duplicate_need.as_array().unwrap(),
+                &cross_domain_duplicates,
+                None,
+            ),
+            None
+        );
+        let domain_resolved = resolve_required_view_fields(
+            duplicate_need.as_array().unwrap(),
+            &cross_domain_duplicates,
+            Some("domain-b"),
+        )
+        .unwrap();
+        assert_eq!(domain_resolved, ("domain-b".to_owned(), vec![FieldId::new(0x0101, 2)]));
+        let cross_domain_view = ViewDescriptor {
+            id: "derived.two".to_owned(),
+            domain: domain_resolved.0,
+            field: None,
+            field_name: None,
+            required_fields: domain_resolved.1,
+            capability: Some("cap.sample/1".to_owned()),
+            operator: Some("core.test/1".to_owned()),
+            group: "Fields".to_owned(),
+            display_order: None,
+            label: "Derived two".to_owned(),
+            display: None,
+        };
+        assert!(!cross_domain_view.accepts_field(FieldId::new(0x0101, 1)));
+        assert!(cross_domain_view.accepts_field(FieldId::new(0x0101, 2)));
     }
 
     #[test]

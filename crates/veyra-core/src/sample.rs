@@ -578,17 +578,12 @@ impl Body {
                 let descriptor = self
                     .views()
                     .into_iter()
-                    .find(|view| view.id == *id && view.domain == field.domain)
+                    .find(|view| {
+                        view.id == *id
+                            && view.domain == field.domain
+                            && view.accepts_field(field.id)
+                    })
                     .ok_or(SampleError::UnsupportedSelection)?;
-                if descriptor.display.as_ref().and_then(|display| display.get("needs")).is_some_and(
-                    |needs| {
-                        !needs.as_array().is_some_and(|needs| {
-                            needs.iter().any(|name| name.as_str() == Some(&field.name))
-                        })
-                    },
-                ) {
-                    return Err(SampleError::UnsupportedSelection);
-                }
                 Some(descriptor)
             }
             _ => None,
@@ -1827,6 +1822,7 @@ mod tests {
             domain: "surface".to_owned(),
             field: None,
             field_name: None,
+            required_fields: Vec::new(),
             capability: None,
             operator: Some("topology.cube_face".to_owned()),
             group: "Spatial".to_owned(),

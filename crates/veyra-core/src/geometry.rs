@@ -38,6 +38,9 @@ impl Body {
             return Err(SampleError::UnsupportedField);
         }
         DirCube.validate_tile_key(tile, domain.tile_log2)?;
+        if tile.level > domain.max_level {
+            return Err(SampleError::UnsupportedResolution);
+        }
         let layout = DirCube.tile_layout_for(tile, domain.tile_log2)?;
         let radius_field = if self.figure().kind == "star_convex_radial" {
             let name = self

@@ -5,7 +5,7 @@ use core::mem::size_of;
 
 use serde_json::Value;
 
-use crate::body::{FieldDescriptor, FieldId, parse_hash};
+use crate::body::{Compatibility, FieldDescriptor, FieldId, parse_hash};
 use crate::canon::blob::{BlobKind, CanonicalBlobView, DType};
 use crate::canon::hash;
 use crate::canon::index::{IndexEntry, IndexValue};
@@ -550,6 +550,18 @@ impl Body {
                     issue: None,
                 }),
                 Err(SampleError::InvalidPosition) => continue,
+                Err(error @ SampleError::UnknownDomain)
+                    if field.compat == Compatibility::Ancillary =>
+                {
+                    fields.push(FieldInspection {
+                        field: field.id,
+                        name: field.name.clone(),
+                        semantic: field.semantic.clone(),
+                        unit: field.extra.get("unit").and_then(Value::as_str).map(str::to_owned),
+                        sample: None,
+                        issue: Some(error.to_string()),
+                    });
+                }
                 Err(
                     error @ (SampleError::UnsupportedField
                     | SampleError::UnsupportedSelection
@@ -616,7 +628,7 @@ impl Body {
     /// Returns a topology-aware tile, assembling its halo through the topology contract.
     pub fn tile(&self, request: &TileRequest) -> Result<TileData, SampleError> {
         if request.halo > 1 {
-            return Err(SampleError::UnsupportedSelection);
+            return Err(SampleError::Spatial(SpatialError::InvalidHalo));
         }
         let field = self.field(request.field)?;
         let domain = self.domain(&field.domain)?;
@@ -742,7 +754,7 @@ impl Body {
     /// Returns a topology-derived view tile without requiring a registered field.
     pub fn topology_tile(&self, request: &TopologyTileRequest) -> Result<TileData, SampleError> {
         if request.halo > 1 {
-            return Err(SampleError::UnsupportedSelection);
+            return Err(SampleError::Spatial(SpatialError::InvalidHalo));
         }
         let domain = self.domain(&request.domain)?;
         let topology = topology_for(domain)?;
@@ -1847,13 +1859,13 @@ mod tests {
         materialized_tile_cell_count, merge_contributing_source, merge_discrete_corner_value,
         slope_from_cardinal_samples, stable_weighted_mean, temporal_mean,
     };
-    use crate::body::{FieldDescriptor, FieldId};
+    use crate::body::{Compatibility, FieldDescriptor, FieldId};
     use crate::canon::blob::{BlobKind, CanonicalBlob, DType};
     use crate::canon::hash;
     use crate::canon::index::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
     use crate::ids::Hash32;
     use crate::io::{Body, Need};
-    use crate::spatial::{Dir, DirCube, Radial1d, TileKey, Topology};
+    use crate::spatial::{Dir, DirCube, Radial1d, SpatialError, TileKey, Topology};
     use serde_json::json;
 
     fn weighted_cell(value: Option<f64>, measure: f64) -> super::WeightedCell {
@@ -2066,6 +2078,15 @@ mod tests {
             })
             .unwrap();
         assert!(latitude.values[0].is_some_and(|value| (0.0..=11.0).contains(&value)));
+        assert!(matches!(
+            cube.topology_tile(&super::TopologyTileRequest {
+                domain: "empty-domain".to_owned(),
+                key: cube_tile,
+                halo: 2,
+                view: "topology.cube_face".to_owned(),
+            }),
+            Err(super::SampleError::Spatial(SpatialError::InvalidHalo))
+        ));
 
         let radial = fieldless_topology_body("radial_1d");
         assert!(radial.fields().is_empty());
@@ -2560,6 +2581,16 @@ mod tests {
         assert_eq!(stats.minimum, Some(1.0));
         assert_eq!(stats.maximum, Some(96.0));
         assert!((stats.mean.unwrap() - expected_weighted_sum / total_measure).abs() < 1.0e-12);
+        assert!(matches!(
+            body.tile(&super::TileRequest {
+                field,
+                key: DirCube.tile_key(affected_key, 0).unwrap(),
+                time: TimeSel::Static,
+                halo: 2,
+                view: super::TileView::Raw,
+            }),
+            Err(super::SampleError::Spatial(SpatialError::InvalidHalo))
+        ));
 
         let off_center = DirCube.direction_at_face_st(0, 0.5, 0.375).unwrap();
         let mixed = body
@@ -2572,6 +2603,108 @@ mod tests {
             .unwrap();
         assert!((mixed.value.unwrap() - 8.0).abs() < 1.0e-12);
         assert_eq!(mixed.raw, None);
+    }
+
+    #[test]
+    fn inspect_reports_ancillary_undeclared_domains_without_hiding_missing_data() {
+        let (mut body, supported_field) = cube_bilinear_cell_values_body();
+        let ancillary: FieldDescriptor = serde_json::from_value(json!({
+            "id":"0x7ffe0064","name":"future.temperature",
+            "capability":"veyra.cap.conformance_probe/1","domain":"future-domain",
+            "semantic":"scalar.temperature","persistence":"invariant","unit":"K",
+            "storage":{"dtype":"i16","scale":"1","offset":"0"},
+            "native_level":0,"temporal":{"kind":"static"},
+            "sampling":{"interp":"bilinear"},"downsample":"mean","compat":"ancillary"
+        }))
+        .unwrap();
+        body.registry.fields.push(ancillary);
+        assert_eq!(body.registry.fields[1].compat, Compatibility::Ancillary);
+        assert!(body.root.validate_registry(&body.registry).is_ok());
+
+        let report = body
+            .inspect(
+                &Position::Direction(Dir::new(1.0, 0.0, 0.0).unwrap()),
+                LevelSel::Exact(2),
+                TimeSel::Static,
+            )
+            .unwrap();
+        let supported = report.fields.iter().find(|item| item.field == supported_field).unwrap();
+        assert!(supported.sample.as_ref().is_some_and(|sample| sample.value.is_some()));
+        let ancillary =
+            report.fields.iter().find(|item| item.name == "future.temperature").unwrap();
+        assert!(ancillary.sample.is_none());
+        assert_eq!(ancillary.issue.as_deref(), Some("field domain is not declared"));
+
+        let (mut corrupted, field) = cube_bilinear_cell_values_body();
+        let key = DirCube::key(0, 0, 0, 2).unwrap();
+        corrupted
+            .indexes
+            .get_mut(&field)
+            .unwrap()
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == key.0)
+            .unwrap()
+            .value = IndexValue::Blob(Hash32([0x5a; 32]));
+        assert!(matches!(
+            corrupted.inspect(
+                &Position::Cell { domain: "interior".to_owned(), key },
+                LevelSel::Exact(2),
+                TimeSel::Static,
+            ),
+            Err(super::SampleError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn inspect_isolates_ancillary_unknown_domains_but_keeps_missing_data_fatal() {
+        let (mut body, supported_field) = cube_bilinear_cell_values_body();
+        let ancillary: FieldDescriptor = serde_json::from_value(json!({
+            "id":"0x7ffe0064","name":"future.temperature",
+            "capability":"veyra.cap.conformance_probe/1","domain":"future-domain",
+            "semantic":"scalar.temperature","persistence":"invariant","unit":"K",
+            "storage":{"dtype":"i16","scale":"1","offset":"0"},
+            "native_level":0,"temporal":{"kind":"static"},
+            "sampling":{"interp":"bilinear"},"downsample":"mean","compat":"ancillary"
+        }))
+        .unwrap();
+        body.registry.fields.push(ancillary);
+        assert!(body.root.validate_registry(&body.registry).is_ok());
+
+        let report = body
+            .inspect(
+                &Position::Direction(Dir::new(1.0, 0.0, 0.0).unwrap()),
+                LevelSel::Exact(2),
+                TimeSel::Static,
+            )
+            .unwrap();
+        let supported = report.fields.iter().find(|field| field.field == supported_field).unwrap();
+        assert!(supported.sample.as_ref().is_some_and(|sample| sample.value.is_some()));
+        let ancillary =
+            report.fields.iter().find(|field| field.name == "future.temperature").unwrap();
+        assert!(ancillary.sample.is_none());
+        assert_eq!(ancillary.issue.as_deref(), Some("field domain is not declared"));
+
+        let (mut missing_body, field) = cube_bilinear_cell_values_body();
+        let missing_key = DirCube::key(0, 0, 0, 2).unwrap();
+        let missing_hash = Hash32([0x5a; 32]);
+        missing_body
+            .indexes
+            .get_mut(&field)
+            .unwrap()
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == missing_key.0)
+            .unwrap()
+            .value = IndexValue::Blob(missing_hash);
+        assert!(matches!(
+            missing_body.inspect(
+                &Position::Cell { domain: "interior".to_owned(), key: missing_key },
+                LevelSel::Exact(2),
+                TimeSel::Static
+            ),
+            Err(super::SampleError::Missing(_))
+        ));
     }
 
     #[test]

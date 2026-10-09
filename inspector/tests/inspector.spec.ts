@@ -401,8 +401,19 @@ test('loading, partial response, and each explicit provider failure are visible'
 
   await switchFixture(page, 'fixture:partial-data');
   await waitForReady(page);
+  await expect(page.locator('#provider-state')).toBeVisible();
   await expect(page.locator('#provider-state')).toContainText('INCOMPLETE DATA');
+  await expect(page.locator('#provider-error')).toBeHidden();
   await expect(page.locator('#legend-panel .incomplete-note')).toContainText('tile/03');
+
+  await switchFixture(page, 'fixture:normal-surface');
+  await waitForReady(page);
+  await expect(page.locator('#provider-state')).toBeHidden();
+  await expect(page.locator('#provider-error')).toBeHidden();
+
+  await switchFixture(page, 'fixture:missing-content');
+  await expect(page.locator('#provider-error')).toBeVisible();
+  await expect(page.locator('#provider-state')).toBeHidden();
 
   const cases = [
     ['missing-content', 'E_CONTENT_MISSING', 'Required content missing', 'Retry'],

@@ -6,6 +6,13 @@ export interface OverlayMaterialState {
   transparent: boolean;
 }
 
+export interface ViewportCameraPose {
+  position: readonly [number, number, number];
+  target: readonly [number, number, number];
+  distance: number;
+  fitDistance: number;
+}
+
 export interface RegressionControlHandle {
   failNext(operation: string, key: string): void;
   operationCount(operation: string, key: string): number;
@@ -31,6 +38,8 @@ export interface RegressionControlHandle {
   normalizeColor(value: unknown): { css: string; hex: string; rgba: readonly [number, number, number, number] } | null;
   normalizeOverlayColor(value: unknown): NormalizedColor | null;
   overlayMaterialStates(): readonly OverlayMaterialState[];
+  overlaySurfaceClearance(): { minOverlayRadius: number; maxMeshRadius: number } | null;
+  cameraPose(): ViewportCameraPose | null;
   samplePalette(stops: readonly { at: number; color: string }[], value: number): { css: string; hex: string; rgba: readonly [number, number, number, number] };
   pickPoint(position: { kind: 'surface-direction'; direction: readonly [number, number, number] }): void;
   resolveExplain(viewId: string, label: string, fixtureId?: string): void;

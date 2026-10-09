@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { DEFAULT_CATEGORICAL_COLOR, normalizeCssColor, normalizeCssColorWithAlpha, normalizePaletteStops, sampleNormalizedPalette } from './css-color';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { DisplayTile, FeatureTable, PickPosition, RenderGeometry, ViewDescriptor } from '../provider/contracts';
+import type { DisplayTile, FeatureTable, PickPosition, RenderGeometry, Vec3, ViewDescriptor } from '../provider/contracts';
 
 type PickHandler = (position: PickPosition) => void;
 
@@ -16,6 +16,9 @@ export class Viewport {
   private readonly pickables: THREE.Mesh[] = [];
   private readonly overlayObjects: THREE.Object3D[] = [];
   private readonly observer: ResizeObserver;
+  private modelMesh: THREE.Mesh | null = null;
+  private currentModelKey: string | null = null;
+  private currentGeometry: RenderGeometry | null = null;
   private currentKind: RenderGeometry['kind'] | null = null;
   private fitDistance = 4.55;
   private pointerStart: { x: number; y: number } | null = null;
@@ -57,8 +60,12 @@ export class Viewport {
     this.resize();
   }
 
-  setData(geometry: RenderGeometry, descriptor: ViewDescriptor, tile: DisplayTile): void {
+  setData(geometry: RenderGeometry, descriptor: ViewDescriptor, tile: DisplayTile, modelKey: string): void {
+    const preserveCamera = this.currentModelKey === modelKey && this.currentGeometry === geometry;
     this.clearRoot();
+    this.modelMesh = null;
+    this.currentModelKey = modelKey;
+    this.currentGeometry = geometry;
     this.currentKind = geometry.kind;
     const meshGeometry = new THREE.BufferGeometry();
     meshGeometry.setAttribute('position', new THREE.BufferAttribute(geometry.positions, 3));
@@ -73,18 +80,22 @@ export class Viewport {
     model.name = 'provider-geometry';
     model.scale.setScalar(1.25);
     this.root.add(model);
+    this.modelMesh = model;
     this.pickables.push(model);
     if (geometry.kind === 'radial-profile') this.addProfileGuides();
     this.controls.enableRotate = geometry.kind === 'surface-mesh';
-    this.controls.target.set(0, 0, 0);
-    this.fitDistance = this.distanceForAspect(this.camera.aspect);
-    this.camera.position.set(0, 0, this.fitDistance);
+    if (!preserveCamera) {
+      this.controls.target.set(0, 0, 0);
+      this.fitDistance = this.distanceForAspect(this.camera.aspect);
+      this.camera.position.set(0, 0, this.fitDistance);
+    }
     this.controls.update();
     this.render();
   }
 
   clearData(): void {
     this.clearRoot();
+    this.modelMesh = null;
     this.currentKind = null;
     this.render();
   }
@@ -98,9 +109,10 @@ export class Viewport {
       this.root.remove(object);
       disposeObject(object);
     }
+    if (this.currentKind === 'surface-mesh' && this.modelMesh) this.scene.updateMatrixWorld(true);
     for (const table of tables) {
       for (const path of table.geometry?.paths ?? []) {
-        const points = path.map((point) => new THREE.Vector3(point[0], point[1], point[2]).multiplyScalar(1.26));
+        const points = path.map((point) => this.placeFeaturePoint(point));
         const geometry = new THREE.BufferGeometry().setFromPoints(points);
         const color = normalizeCssColorWithAlpha(table.geometry?.color);
         const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({
@@ -181,6 +193,23 @@ export class Viewport {
         this.root.add(guide);
       }
     }
+  }
+
+  private placeFeaturePoint(point: Vec3): THREE.Vector3 {
+    const source = new THREE.Vector3(point[0], point[1], point[2]);
+    if (this.currentKind !== 'surface-mesh' || !this.modelMesh || source.lengthSq() === 0) return source.multiplyScalar(1.26);
+
+    const origin = this.root.localToWorld(new THREE.Vector3());
+    const direction = source.normalize().transformDirection(this.root.matrixWorld);
+    this.raycaster.set(origin, direction);
+    const hit = this.raycaster.intersectObject(this.modelMesh, false).find(({ distance }) => distance > 0);
+    if (!hit?.face) return source.multiplyScalar(1.31);
+
+    const surfacePoint = this.root.worldToLocal(hit.point.clone());
+    const surfaceNormal = hit.face.normal.clone()
+      .applyMatrix3(new THREE.Matrix3().getNormalMatrix(this.modelMesh.matrix))
+      .normalize();
+    return surfacePoint.addScaledVector(surfaceNormal, 0.01);
   }
 
   private clearRoot(): void {

@@ -456,7 +456,7 @@ export class InspectorApp {
     if (!this.isCurrentRequest(version)) return;
     this.geometry = geometry;
     this.loadState = 'ready';
-    this.viewport.setData(geometry, view, tile);
+    this.viewport.setData(geometry, view, tile, JSON.stringify([this.fixtureId, domain.id]));
     this.viewport.setOverlays(this.featureCatalog.tables.filter((table) => this.selectedOverlays.has(table.id)));
     const missingResources = tile.missingResources ?? [];
     this.renderAll(missingResources);

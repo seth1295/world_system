@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { buildFixture, SCENARIOS } from '../src/fixtures/scenarios';
 import { MAX_PROFILE_PLOT_POINTS } from '../src/ui/profile-plot';
 import { orderedGroups } from '../src/ui/view-model';
+import type { ViewportCameraPose } from './remediation-types';
 
 const viewSizes = [
   { width: 3440, height: 1440 },
@@ -731,6 +732,71 @@ test('feature overlays preserve alpha in CSS colors and reject hostile colors', 
   await page.screenshot({ path: testInfo.outputPath('invalid-overlay-fallback.png') });
 });
 
+test('surface feature paths are projected just outside the displayed mesh', async ({ page }, testInfo) => {
+  await startRegressionHarness(page, 'fixture:normal-surface');
+  await page.getByRole('button', { name: /Features/ }).click();
+  await page.locator('#features-menu input[data-feature-id]:not([disabled])').first().check();
+
+  const clearance = await page.evaluate(() => window.remediationControl.overlaySurfaceClearance());
+  expect(clearance).not.toBeNull();
+  expect(clearance!.minOverlayRadius).toBeGreaterThan(clearance!.maxMeshRadius);
+  await page.locator('#viewport canvas').screenshot({ path: testInfo.outputPath('surface-feature-paths.png') });
+});
+
+test('camera pose and zoom persist when the selected view changes', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:normal-surface');
+  await orbitAndZoomViewport(page);
+  await settleCamera(page);
+  const before = await readCameraPose(page);
+  expect(before.distance).not.toBeCloseTo(before.fitDistance, 1);
+
+  await selectRegressionView(page, 1);
+  await settleCamera(page);
+  assertCameraPoseClose(await readCameraPose(page), before);
+});
+
+test('camera pose and zoom persist when time selection changes', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:temporal-heavy');
+  await orbitAndZoomViewport(page);
+  await settleCamera(page);
+  const before = await readCameraPose(page);
+
+  await page.locator('#time-selector').selectOption('slice-2');
+  await waitForReady(page);
+  await settleCamera(page);
+  assertCameraPoseClose(await readCameraPose(page), before);
+});
+
+test('camera pose and zoom persist when diagnostic stage changes', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:diagnostics');
+  await orbitAndZoomViewport(page);
+  await settleCamera(page);
+  const before = await readCameraPose(page);
+
+  await selectRegressionStage(page, 0);
+  await waitForReady(page);
+  await settleCamera(page);
+  assertCameraPoseClose(await readCameraPose(page), before);
+});
+
+test('camera refits when a new domain model is selected', async ({ page }) => {
+  await startRegressionHarness(page, 'fixture:multi-domain');
+  const initial = await readCameraPose(page);
+  await orbitAndZoomViewport(page);
+  await settleCamera(page);
+  const orbited = await readCameraPose(page);
+  expect(orbited.distance).not.toBeCloseTo(initial.fitDistance, 1);
+
+  await page.locator('#domain-selector').selectOption('domain-profile');
+  await waitForReady(page);
+  await settleCamera(page);
+  const refitted = await readCameraPose(page);
+  expect(refitted.position[0]).toBeCloseTo(0, 2);
+  expect(refitted.position[1]).toBeCloseTo(0, 2);
+  expect(refitted.position[2]).toBeGreaterThan(0);
+  expect(refitted.distance).toBeCloseTo(refitted.fitDistance, 2);
+});
+
 for (const outcome of ['success', 'failure'] as const) {
   test(`destroy invalidates a deferred fixture open followed by ${outcome}`, async ({ page }) => {
     const fixtureId = 'fixture:multi-domain';
@@ -1410,6 +1476,51 @@ async function selectRegressionStage(page: Page, index: number): Promise<string>
   if (!stageId) throw new Error(`Diagnostic stage ${index} has no identifier`);
   await option.click();
   return stageId;
+}
+
+async function orbitAndZoomViewport(page: Page): Promise<void> {
+  const canvas = page.locator('#viewport canvas');
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error('Viewport canvas has no visible bounds');
+  const x = bounds.x + bounds.width / 2;
+  const y = bounds.y + bounds.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  for (let index = 1; index <= 8; index += 1) {
+    await page.mouse.move(x + index * 12, y + index * 4, { steps: 1 });
+  }
+  await page.mouse.up();
+  await page.mouse.wheel(0, -260);
+  await page.waitForTimeout(900);
+}
+
+async function readCameraPose(page: Page): Promise<ViewportCameraPose> {
+  const pose = await page.evaluate(() => window.remediationControl.cameraPose());
+  if (!pose) throw new Error('Viewport camera state is unavailable');
+  return pose;
+}
+
+async function settleCamera(page: Page): Promise<void> {
+  let previous = await readCameraPose(page);
+  let stableSamples = 0;
+  await expect.poll(async () => {
+    const current = await readCameraPose(page);
+    const delta = Math.max(
+      Math.abs(current.position[0] - previous.position[0]),
+      Math.abs(current.position[1] - previous.position[1]),
+      Math.abs(current.position[2] - previous.position[2]),
+      Math.abs(current.distance - previous.distance),
+    );
+    stableSamples = delta < 0.0005 ? stableSamples + 1 : 0;
+    previous = current;
+    return stableSamples;
+  }, { intervals: [100], timeout: 5000 }).toBeGreaterThanOrEqual(3);
+}
+
+function assertCameraPoseClose(actual: ViewportCameraPose, expected: ViewportCameraPose): void {
+  actual.position.forEach((coordinate, index) => expect(coordinate).toBeCloseTo(expected.position[index]!, 2));
+  actual.target.forEach((coordinate, index) => expect(coordinate).toBeCloseTo(expected.target[index]!, 2));
+  expect(actual.distance).toBeCloseTo(expected.distance, 2);
 }
 
 async function openRetryableViewFailureWithInspection(page: Page): Promise<void> {

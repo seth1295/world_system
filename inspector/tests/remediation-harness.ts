@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { Viewport } from '../src/render/viewport';
 import { InspectorApp } from '../src/ui/app';
 import { buildFixture, SCENARIOS, type FixtureModel } from '../src/fixtures/scenarios';
-import type { OverlayMaterialState, RegressionControlHandle } from './remediation-types';
+import type { OverlayMaterialState, RegressionControlHandle, ViewportCameraPose } from './remediation-types';
 
 const hostileColors = [
   '#fff" onmouseover="alert(1)',
@@ -18,7 +18,7 @@ const hostileColors = [
   'var(--injected, url(javascript:alert(1)))',
   '#fff" onmouseover="window.hostileColorExecuted=true',
 ] as const;
-const fixtureIds = ['fixture:category-heavy', 'fixture:multi-domain', 'fixture:diagnostics', 'fixture:radial', 'fixture:normal-surface', 'fixture:void'] as const;
+const fixtureIds = ['fixture:category-heavy', 'fixture:multi-domain', 'fixture:diagnostics', 'fixture:radial', 'fixture:normal-surface', 'fixture:temporal-heavy', 'fixture:void'] as const;
 const fixtureModels = new Map<string, FixtureModel>(fixtureIds.map((id) => {
   const spec = SCENARIOS.find((candidate) => candidate.id === id);
   if (!spec) throw new Error(`Missing fixture ${id}`);
@@ -210,6 +210,10 @@ class ControlledCatalog implements BodyCatalog {
 
 interface ViewportProbe {
   root: THREE.Group;
+  camera: THREE.PerspectiveCamera;
+  controls: { target: THREE.Vector3 };
+  fitDistance: number;
+  modelMesh: THREE.Mesh | null;
   setData: Viewport['setData'];
   setOverlays: Viewport['setOverlays'];
   clearData: Viewport['clearData'];
@@ -378,6 +382,43 @@ const control: RegressionControl = {
       return [{ color: `#${material.color.getHexString()}`, opacity: material.opacity, transparent: material.transparent }];
     });
   },
+  overlaySurfaceClearance() {
+    const probe = viewportProbe;
+    const model = probe?.modelMesh;
+    if (!probe || !model) return null;
+    probe.root.updateMatrixWorld(true);
+    model.updateMatrix();
+    const meshPositions = model.geometry.getAttribute('position');
+    let maxMeshRadius = 0;
+    for (let index = 0; index < meshPositions.count; index += 1) {
+      const point = new THREE.Vector3().fromBufferAttribute(meshPositions, index).applyMatrix4(model.matrix);
+      maxMeshRadius = Math.max(maxMeshRadius, point.length());
+    }
+    let minOverlayRadius = Number.POSITIVE_INFINITY;
+    let hasOverlayPoint = false;
+    for (const line of probe.root.children.filter((object): object is THREE.Line => object instanceof THREE.Line)) {
+      line.updateMatrix();
+      const positions = line.geometry.getAttribute('position');
+      for (let index = 0; index < positions.count; index += 1) {
+        const point = new THREE.Vector3().fromBufferAttribute(positions, index).applyMatrix4(line.matrix);
+        minOverlayRadius = Math.min(minOverlayRadius, point.length());
+        hasOverlayPoint = true;
+      }
+    }
+    if (!hasOverlayPoint) return null;
+    return { minOverlayRadius, maxMeshRadius };
+  },
+  cameraPose(): ViewportCameraPose | null {
+    const probe = viewportProbe;
+    if (!probe) return null;
+    const { camera, controls, fitDistance } = probe;
+    return {
+      position: [camera.position.x, camera.position.y, camera.position.z],
+      target: [controls.target.x, controls.target.y, controls.target.z],
+      distance: camera.position.distanceTo(controls.target),
+      fitDistance,
+    };
+  },
   samplePalette(stops, value) { return sampleNormalizedPalette(normalizePaletteStops(stops), value); },
   resolveStage(stageId, label) {
     const request = this.stages.find((item) => !item.settled && item.stageId === stageId);
@@ -458,9 +499,9 @@ appRenderProbe.renderInspection = () => {
   originalRenderInspection();
 };
 const originalSetData = viewportProbe.setData.bind(viewportProbe);
-viewportProbe.setData = (geometry, descriptor, tile) => {
+viewportProbe.setData = (geometry, descriptor, tile, modelKey) => {
   if (destroyedApp) postDestroyViewportCalls += 1;
-  originalSetData(geometry, descriptor, tile);
+  originalSetData(geometry, descriptor, tile, modelKey);
 };
 const originalSetOverlays = viewportProbe.setOverlays.bind(viewportProbe);
 viewportProbe.setOverlays = (tables) => {

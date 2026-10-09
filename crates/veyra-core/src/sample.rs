@@ -2318,19 +2318,19 @@ mod tests {
 
     fn cube_bilinear_cell_values_body() -> (Body, FieldId) {
         let (mut body, field) = cube_constant_body(0);
-        body.root.domains[0].max_level = 1;
+        body.root.domains[0].max_level = 2;
         body.root_value["domains"] = json!(body.root.domains);
-        body.registry.fields[0].native_level = 1;
+        body.registry.fields[0].native_level = 2;
         body.registry.fields[0].sampling["interp"] = json!("bilinear");
         let index = body.indexes.get_mut(&field).unwrap();
         index.tile_log2 = 0;
         index.entries = (0..6_u8)
             .flat_map(|face| {
-                (0..2_u64).flat_map(move |i| {
-                    (0..2_u64).map(move |j| IndexEntry {
-                        level: 1,
-                        key: DirCube::key(face, i, j, 1).unwrap().0,
-                        value: IndexValue::Const(i64::from(face) * 4 + (i * 2 + j) as i64 + 1),
+                (0..4_u64).flat_map(move |i| {
+                    (0..4_u64).map(move |j| IndexEntry {
+                        level: 2,
+                        key: DirCube::key(face, i, j, 2).unwrap().0,
+                        value: IndexValue::Const(i64::from(face) * 16 + (i * 4 + j) as i64 + 1),
                     })
                 })
             })
@@ -2493,17 +2493,38 @@ mod tests {
     #[test]
     fn cell_center_bilinear_reads_preserve_raw_values_across_faces_and_stats() {
         let (body, field) = cube_bilinear_cell_values_body();
+        let affected_key = DirCube::key(0, 0, 0, 2).unwrap();
+        let roundtrip_stencil = DirCube
+            .interpolation_stencil(
+                crate::spatial::TopologyPoint::Direction(
+                    DirCube.cell_center(affected_key).unwrap(),
+                ),
+                2,
+                crate::spatial::InterpolationMode::Bilinear,
+            )
+            .unwrap();
+        assert_eq!(roundtrip_stencil.len(), 4);
+        assert!(roundtrip_stencil.iter().any(|cell| {
+            cell.key != affected_key && cell.weight > 0.0 && cell.weight < 1.0e-14
+        }));
+        let (legacy_weighted_value, legacy_weight) =
+            roundtrip_stencil.iter().fold((0.0, 0.0), |(sum, weight), cell| {
+                let (face, i, j, _) = DirCube::decode(cell.key).unwrap();
+                let raw = i64::from(face) * 16 + (i * 4 + j) as i64 + 1;
+                (sum + raw as f64 * cell.weight, weight + cell.weight)
+            });
+        assert_ne!(legacy_weighted_value / legacy_weight, 1.0);
         let mut expected_weighted_sum = 0.0;
         let mut total_measure = 0.0;
         for face in 0..6_u8 {
-            for i in 0..2_u64 {
-                for j in 0..2_u64 {
-                    let key = DirCube::key(face, i, j, 1).unwrap();
-                    let raw = i64::from(face) * 4 + (i * 2 + j) as i64 + 1;
+            for i in 0..4_u64 {
+                for j in 0..4_u64 {
+                    let key = DirCube::key(face, i, j, 2).unwrap();
+                    let raw = i64::from(face) * 16 + (i * 4 + j) as i64 + 1;
                     let query = SampleQuery {
                         field,
                         pos: Position::Cell { domain: "interior".to_owned(), key },
-                        level: LevelSel::Exact(1),
+                        level: LevelSel::Exact(2),
                         time: TimeSel::Static,
                     };
                     assert!(body.plan(&query).unwrap().is_empty());
@@ -2513,7 +2534,7 @@ mod tests {
                     assert_eq!(sample.value, Some(raw as f64));
 
                     let report =
-                        body.inspect(&query.pos, LevelSel::Exact(1), TimeSel::Static).unwrap();
+                        body.inspect(&query.pos, LevelSel::Exact(2), TimeSel::Static).unwrap();
                     assert_eq!(report.fields[0].sample.as_ref().unwrap().raw, sample.raw);
 
                     let tile_key = DirCube.tile_key(key, 0).unwrap();
@@ -2534,22 +2555,22 @@ mod tests {
                 }
             }
         }
-        let stats = body.stats(field, LevelSel::Exact(1), TimeSel::Static).unwrap();
-        assert_eq!(stats.cells, 24);
+        let stats = body.stats(field, LevelSel::Exact(2), TimeSel::Static).unwrap();
+        assert_eq!(stats.cells, 96);
         assert_eq!(stats.minimum, Some(1.0));
-        assert_eq!(stats.maximum, Some(24.0));
+        assert_eq!(stats.maximum, Some(96.0));
         assert!((stats.mean.unwrap() - expected_weighted_sum / total_measure).abs() < 1.0e-12);
 
-        let off_center = DirCube.direction_at_face_st(0, 0.625, 0.25).unwrap();
+        let off_center = DirCube.direction_at_face_st(0, 0.5, 0.375).unwrap();
         let mixed = body
             .sample(&SampleQuery {
                 field,
                 pos: Position::Direction(off_center),
-                level: LevelSel::Exact(1),
+                level: LevelSel::Exact(2),
                 time: TimeSel::Static,
             })
             .unwrap();
-        assert!((mixed.value.unwrap() - 2.5).abs() < 1.0e-12);
+        assert!((mixed.value.unwrap() - 8.0).abs() < 1.0e-12);
         assert_eq!(mixed.raw, None);
     }
 

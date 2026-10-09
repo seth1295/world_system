@@ -292,13 +292,18 @@ fn parse_level(args: &[String]) -> Result<LevelSel, Box<dyn Error>> {
 }
 
 fn parse_time(args: &[String]) -> Result<TimeSel, Box<dyn Error>> {
-    if let Some(slice) = option_value_optional(args, "--slice")? {
+    let slice = option_value_optional(args, "--slice")?;
+    let time = option_value_optional(args, "--time")?;
+    if slice.is_some() && time.is_some() {
+        return Err("--slice and --time are mutually exclusive".into());
+    }
+    if let Some(slice) = slice {
         if slice == "mean" {
             return Ok(TimeSel::Mean);
         }
         return Ok(TimeSel::Slice(slice.parse()?));
     }
-    match option_value_optional(args, "--time")?.as_deref().unwrap_or("static") {
+    match time.as_deref().unwrap_or("static") {
         "static" => Ok(TimeSel::Static),
         "mean" => Ok(TimeSel::Mean),
         "min" => Ok(TimeSel::Min),
@@ -400,7 +405,12 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::format_json;
+    use super::{format_json, parse_time};
+    use veyra_core::sample::TimeSel;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
 
     #[test]
     fn pretty_and_canonical_modes_reject_root_and_nested_duplicate_keys() {
@@ -417,5 +427,31 @@ mod tests {
         let output = format_json(br#"{"values":[1.5,1.5]}"#, "--pretty").unwrap();
         assert_eq!(output, b"{\n  \"values\": [\n    1.5,\n    1.5\n  ]\n}");
         assert!(format_json(br#"{"values":[1.5,1.5]}"#, "--canonical").is_err());
+    }
+
+    #[test]
+    fn time_selector_parser_rejects_conflicts_and_preserves_valid_forms() {
+        for conflicting in [
+            args(&["--slice", "1", "--time", "min"]),
+            args(&["--time", "min", "--slice", "1"]),
+            args(&["--slice", "1", "--time", "invalid"]),
+            args(&["--time", "invalid", "--slice", "1"]),
+            args(&["--slice", "invalid", "--time", "min"]),
+        ] {
+            assert!(parse_time(&conflicting).is_err(), "{conflicting:?}");
+        }
+
+        assert_eq!(parse_time(&args(&["--slice", "1"])).unwrap(), TimeSel::Slice(1));
+        assert_eq!(parse_time(&args(&["--slice", "mean"])).unwrap(), TimeSel::Mean);
+        for (value, expected) in [
+            ("static", TimeSel::Static),
+            ("mean", TimeSel::Mean),
+            ("min", TimeSel::Min),
+            ("max", TimeSel::Max),
+            ("phase:0.25", TimeSel::Phase(0.25)),
+            ("slice:2", TimeSel::Slice(2)),
+        ] {
+            assert_eq!(parse_time(&args(&["--time", value])).unwrap(), expected);
+        }
     }
 }

@@ -110,6 +110,8 @@ pub enum SampleSource {
     TimeReduced,
     /// A descriptor-declared or topology-derived view produced the value.
     Derived,
+    /// A tile combined values with more than one contributing source class.
+    Mixed,
 }
 
 /// Result of a canonical field query.
@@ -252,6 +254,8 @@ pub enum SampleError {
     UnsupportedRefinement,
     /// Requested interpolation or time selection is not valid for this descriptor.
     UnsupportedSelection,
+    /// Different discrete values cannot be averaged at a cube-corner halo.
+    UnsupportedDiscreteCornerHalo,
     /// The body does not declare the field's domain.
     UnknownDomain,
     /// A query position does not belong to the field domain.
@@ -282,6 +286,9 @@ impl fmt::Display for SampleError {
                 formatter.write_str("normative refinement is not implemented")
             }
             Self::UnsupportedSelection => formatter.write_str("sample selection is unsupported"),
+            Self::UnsupportedDiscreteCornerHalo => {
+                formatter.write_str("discrete values cannot be averaged at a cube-corner halo")
+            }
             Self::UnknownDomain => formatter.write_str("field domain is not declared"),
             Self::InvalidPosition => {
                 formatter.write_str("position is invalid for the field domain")
@@ -621,6 +628,7 @@ impl Body {
         let dim_j = u16::try_from(dim_j).map_err(|_| SampleError::InvalidRaster)?;
         let mut values = Vec::with_capacity(usize::from(dim_i) * usize::from(dim_j));
         let mut source = None;
+        let discrete_output = is_discrete_tile_output(field, derived_view.as_ref());
         for j in 0..i64::from(dim_j) {
             for i in 0..i64::from(dim_i) {
                 let local_i = i + layout.offset_i;
@@ -629,6 +637,7 @@ impl Body {
                     topology.tile_halo_cells(request.key, domain.tile_log2, local_i, local_j)?;
                 let mut sum = 0.0;
                 let mut weight = 0.0;
+                let mut discrete_value = None;
                 for cell in cells {
                     let (sampled_value, sampled_source) = if let Some(view) = derived_view.as_ref()
                     {
@@ -654,17 +663,20 @@ impl Body {
                         (sample.value, sample.source)
                     };
                     if let Some(value) = sampled_value {
-                        sum += value * cell.weight;
-                        weight += cell.weight;
+                        if discrete_output {
+                            discrete_value = merge_discrete_corner_value(discrete_value, value)?;
+                        } else {
+                            sum += value * cell.weight;
+                            weight += cell.weight;
+                        }
+                        source = merge_contributing_source(source, Some(value), sampled_source);
                     }
-                    source = Some(match (source, sampled_source) {
-                        (_, SampleSource::TimeReduced) => SampleSource::TimeReduced,
-                        (None, value) => value,
-                        (Some(SampleSource::Nodata), value) => value,
-                        (Some(value), _) => value,
-                    });
                 }
-                values.push((weight > 0.0).then_some(sum / weight));
+                values.push(if discrete_output {
+                    discrete_value
+                } else {
+                    (weight > 0.0).then_some(sum / weight)
+                });
             }
         }
         let final_source = if values.iter().all(Option::is_none) {
@@ -895,7 +907,7 @@ impl Body {
             mean: None,
         };
         let mut weighted_sum = 0.0;
-        for (value, measure) in values {
+        for &(value, measure) in &values {
             let Some(value) = value else {
                 stats.nodata_cells += 1;
                 continue;
@@ -905,11 +917,12 @@ impl Body {
             stats.minimum = Some(stats.minimum.map_or(value, |minimum| minimum.min(value)));
             stats.maximum = Some(stats.maximum.map_or(value, |maximum| maximum.max(value)));
         }
-        if !stats.valid_measure.is_finite() || !weighted_sum.is_finite() {
+        if !stats.valid_measure.is_finite() {
             return Err(SampleError::InvalidScale);
         }
         if stats.valid_measure > 0.0 {
-            stats.mean = Some(weighted_sum / stats.valid_measure);
+            let mean = weighted_sum / stats.valid_measure;
+            stats.mean = if mean.is_finite() { Some(mean) } else { stable_weighted_mean(&values)? };
         }
         Ok(stats)
     }
@@ -1411,13 +1424,94 @@ fn query_level_is_pyramid(field: &FieldDescriptor, selection: LevelSel, level: u
     selection != LevelSel::Native && level < field.native_level
 }
 
+fn is_discrete_tile_output(
+    field: &FieldDescriptor,
+    view: Option<&crate::views::ViewDescriptor>,
+) -> bool {
+    matches!(field.semantic.as_str(), "category" | "feature_ref" | "flags")
+        || view.and_then(|descriptor| descriptor.operator.as_deref()).is_some_and(|operator| {
+            matches!(
+                operator,
+                "topology.cube_face"
+                    | "topology.tile_level"
+                    | "topology.axial_latitude"
+                    | "core.threshold_partition/1"
+            )
+        })
+}
+
+// V1 defines a mean for corner contributors, but category-like codes have no
+// arithmetic mean; equal contributors remain representable and unequal ones refuse.
+fn merge_discrete_corner_value(
+    previous: Option<f64>,
+    next: f64,
+) -> Result<Option<f64>, SampleError> {
+    if !next.is_finite() {
+        return Err(SampleError::InvalidScale);
+    }
+    match previous {
+        None => Ok(Some(next)),
+        Some(previous) if previous == next => Ok(Some(previous)),
+        Some(_) => Err(SampleError::UnsupportedDiscreteCornerHalo),
+    }
+}
+
+fn merge_contributing_source(
+    previous: Option<SampleSource>,
+    value: Option<f64>,
+    next: SampleSource,
+) -> Option<SampleSource> {
+    if value.is_none() {
+        return previous;
+    }
+    match previous {
+        None => Some(next),
+        Some(previous) if previous == next => Some(previous),
+        Some(_) => Some(SampleSource::Mixed),
+    }
+}
+
+fn stable_weighted_mean(values: &[(Option<f64>, f64)]) -> Result<Option<f64>, SampleError> {
+    let mut total_measure = 0.0;
+    let mut mean: Option<f64> = None;
+    for &(value, measure) in values {
+        let Some(value) = value else { continue };
+        if !value.is_finite() || !measure.is_finite() || measure <= 0.0 {
+            return Err(SampleError::InvalidScale);
+        }
+        let next_measure = total_measure + measure;
+        if !next_measure.is_finite() || next_measure <= 0.0 {
+            return Err(SampleError::InvalidScale);
+        }
+        mean = Some(match mean {
+            None => value,
+            Some(previous) => {
+                let share = measure / next_measure;
+                let updated =
+                    if (previous >= 0.0 && value >= 0.0) || (previous <= 0.0 && value <= 0.0) {
+                        previous + (value - previous) * share
+                    } else {
+                        previous * (1.0 - share) + value * share
+                    };
+                if !updated.is_finite() {
+                    return Err(SampleError::InvalidScale);
+                }
+                updated
+            }
+        });
+        total_measure = next_measure;
+    }
+    Ok(mean)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LevelSel, Position, SampleQuery, TimeSel, angular_distance, slope_from_cardinal_samples,
-        temporal_mean,
+        LevelSel, Position, SampleQuery, TimeSel, angular_distance, is_discrete_tile_output,
+        merge_contributing_source, merge_discrete_corner_value, slope_from_cardinal_samples,
+        stable_weighted_mean, temporal_mean,
     };
-    use crate::body::FieldId;
+    use crate::body::{FieldDescriptor, FieldId};
     use crate::canon::blob::{BlobKind, CanonicalBlob, DType};
     use crate::canon::hash;
     use crate::canon::index::{IndexBlob, IndexEntry, IndexValue, TopologyTag};
@@ -1506,6 +1600,50 @@ mod tests {
         assert_eq!(body.sample(&query).unwrap().value, Some(42.0));
         let tile_key = DirCube.tile_key(cell, 0).unwrap();
         assert_eq!(tile_key, TileKey { level: 0, address: cell });
+
+        let ordinary_stats = body.stats(field_id, LevelSel::Exact(0), TimeSel::Static).unwrap();
+        assert_eq!(ordinary_stats.mean, Some(42.0));
+        body.indexes.get_mut(&field_id).unwrap().entries[0].value = IndexValue::Const(1);
+        body.registry.fields[0].storage["scale"] = json!("1e308");
+        let extreme_stats = body.stats(field_id, LevelSel::Exact(0), TimeSel::Static).unwrap();
+        assert_eq!(extreme_stats.mean, Some(1.0e308));
+        assert_eq!(extreme_stats.minimum, Some(1.0e308));
+        assert_eq!(extreme_stats.maximum, Some(1.0e308));
+        body.registry.fields[0].storage["nodata"] = json!(1);
+        let nodata_stats = body.stats(field_id, LevelSel::Exact(0), TimeSel::Static).unwrap();
+        assert_eq!(nodata_stats.nodata_cells, 1);
+        assert_eq!(nodata_stats.valid_measure, 0.0);
+        assert_eq!(nodata_stats.mean, None);
+
+        body.registry.fields[0].storage.as_object_mut().unwrap().remove("nodata");
+        body.registry.fields[0].storage["scale"] = json!("1");
+        body.indexes.get_mut(&field_id).unwrap().entries = (0..6_u8)
+            .map(|face| IndexEntry {
+                level: 0,
+                key: DirCube::key(face, 0, 0, 0).unwrap().0,
+                value: if face == 5 { IndexValue::Const(7) } else { IndexValue::Blob(blob_hash) },
+            })
+            .collect();
+        let blob_first_tile = body
+            .tile(&super::TileRequest {
+                field: field_id,
+                key: DirCube.tile_key(DirCube::key(0, 0, 0, 0).unwrap(), 0).unwrap(),
+                time: TimeSel::Static,
+                halo: 1,
+                view: super::TileView::Raw,
+            })
+            .unwrap();
+        let const_first_tile = body
+            .tile(&super::TileRequest {
+                field: field_id,
+                key: DirCube.tile_key(DirCube::key(5, 0, 0, 0).unwrap(), 0).unwrap(),
+                time: TimeSel::Static,
+                halo: 1,
+                view: super::TileView::Raw,
+            })
+            .unwrap();
+        assert_eq!(blob_first_tile.source, super::SampleSource::Mixed);
+        assert_eq!(const_first_tile.source, super::SampleSource::Mixed);
     }
 
     #[test]
@@ -1535,5 +1673,106 @@ mod tests {
         assert!(temporal_mean(&[]).is_err());
         assert!(temporal_mean(&[f64::NAN]).is_err());
         assert!(temporal_mean(&[f64::INFINITY]).is_err());
+    }
+
+    #[test]
+    fn discrete_corner_values_are_preserved_or_refused_without_averaging() {
+        let mut field: FieldDescriptor = serde_json::from_value(json!({
+            "id":"0x7ffe0001","name":"discrete","capability":"veyra.cap.conformance_probe/1",
+            "domain":"surface","semantic":"category","persistence":"invariant",
+            "storage":{"dtype":"u8","scale":"1","offset":"0"},"native_level":0,
+            "temporal":{"kind":"static"},"sampling":{"interp":"nearest"},
+            "downsample":"mode_lowest_tiebreak","compat":"ancillary"
+        }))
+        .unwrap();
+        for semantic in ["category", "feature_ref", "flags"] {
+            field.semantic = semantic.to_owned();
+            assert!(is_discrete_tile_output(&field, None));
+        }
+        field.semantic = "scalar.value".to_owned();
+        let cube_face = crate::views::ViewDescriptor {
+            id: "topology.cube_face".to_owned(),
+            domain: "surface".to_owned(),
+            field: None,
+            field_name: None,
+            capability: None,
+            operator: Some("topology.cube_face".to_owned()),
+            group: "Spatial".to_owned(),
+            display_order: None,
+            label: "Cube face".to_owned(),
+            display: None,
+        };
+        assert!(is_discrete_tile_output(&field, Some(&cube_face)));
+
+        assert_eq!(merge_discrete_corner_value(None, 2.0).unwrap(), Some(2.0));
+        assert_eq!(merge_discrete_corner_value(Some(2.0), 2.0).unwrap(), Some(2.0));
+        assert!(matches!(
+            merge_discrete_corner_value(Some(2.0), 4.0),
+            Err(super::SampleError::UnsupportedDiscreteCornerHalo)
+        ));
+    }
+
+    #[test]
+    fn tile_source_aggregation_is_order_independent_and_ignores_nodata() {
+        let const_then_stored = merge_contributing_source(
+            merge_contributing_source(None, Some(2.0), super::SampleSource::Const),
+            Some(4.0),
+            super::SampleSource::Stored,
+        );
+        let stored_then_const = merge_contributing_source(
+            merge_contributing_source(None, Some(4.0), super::SampleSource::Stored),
+            Some(2.0),
+            super::SampleSource::Const,
+        );
+        assert_eq!(const_then_stored, Some(super::SampleSource::Mixed));
+        assert_eq!(stored_then_const, const_then_stored);
+        assert_eq!(
+            merge_contributing_source(
+                Some(super::SampleSource::Const),
+                None,
+                super::SampleSource::Nodata,
+            ),
+            Some(super::SampleSource::Const)
+        );
+        let const_then_reduced = merge_contributing_source(
+            merge_contributing_source(None, Some(2.0), super::SampleSource::Const),
+            Some(4.0),
+            super::SampleSource::TimeReduced,
+        );
+        let reduced_then_const = merge_contributing_source(
+            merge_contributing_source(None, Some(4.0), super::SampleSource::TimeReduced),
+            Some(2.0),
+            super::SampleSource::Const,
+        );
+        assert_eq!(const_then_reduced, Some(super::SampleSource::Mixed));
+        assert_eq!(reduced_then_const, const_then_reduced);
+        assert_eq!(
+            merge_contributing_source(None, Some(10.0), super::SampleSource::TimeReduced,),
+            Some(super::SampleSource::TimeReduced)
+        );
+        assert_eq!(
+            merge_contributing_source(
+                Some(super::SampleSource::TimeReduced),
+                None,
+                super::SampleSource::Nodata,
+            ),
+            Some(super::SampleSource::TimeReduced)
+        );
+    }
+
+    #[test]
+    fn weighted_mean_stays_finite_for_extreme_values_and_ignores_nodata() {
+        let ordinary = stable_weighted_mean(&[(Some(1.0), 1.0), (Some(3.0), 3.0)]).unwrap();
+        assert_eq!(ordinary, Some(2.5));
+
+        let extreme = stable_weighted_mean(&[(Some(1.0e308), 1.0), (Some(1.0e308), 2.0)]).unwrap();
+        assert_eq!(extreme, Some(1.0e308));
+        let mixed_signs =
+            stable_weighted_mean(&[(Some(-1.0e308), 1.0), (Some(1.0e308), 1.0)]).unwrap();
+        assert_eq!(mixed_signs, Some(0.0));
+
+        let with_nodata = stable_weighted_mean(&[(None, 100.0), (Some(7.0), 2.0)]).unwrap();
+        assert_eq!(with_nodata, Some(7.0));
+        assert_eq!(stable_weighted_mean(&[(None, 1.0)]).unwrap(), None);
     }
 }

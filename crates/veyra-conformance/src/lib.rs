@@ -998,6 +998,21 @@ fn stage4_queries() -> Vec<Value> {
 fn verify_stage4(world_root: &Path) -> Result<Vec<FixtureResult>, ConformanceError> {
     let cb1 = open_directory(world_root.join("cb1-seams")).map_err(ConformanceError::Writer)?;
     let scalar_field = FieldId::new(0x7ffe, 1);
+    let cube_face_tile = DirCube.tile_key(DirCube::key(0, 0, 0, 2).unwrap(), 2).unwrap();
+    if !matches!(
+        cb1.tile(&veyra_core::sample::TileRequest {
+            field: scalar_field,
+            key: cube_face_tile,
+            time: veyra_core::sample::TimeSel::Static,
+            halo: 1,
+            view: veyra_core::sample::TileView::Derived("topology.cube_face".to_owned()),
+        }),
+        Err(veyra_core::sample::SampleError::UnsupportedDiscreteCornerHalo)
+    ) {
+        return Err(ConformanceError::Assertion(
+            "discrete cube-face values must not be averaged at corner halos",
+        ));
+    }
     for face in 0..6_u8 {
         for i in 0..4_u64 {
             for j in 0..4_u64 {

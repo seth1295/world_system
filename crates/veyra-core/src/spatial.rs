@@ -246,7 +246,8 @@ pub trait Topology {
     fn point_for_cell(&self, key: CellKey) -> Result<TopologyPoint, SpatialError>;
     /// Returns the data layout and origin for a canonical tile key.
     fn tile_layout_for(&self, tile: TileKey, tile_log2: u8) -> Result<TileLayout, SpatialError>;
-    /// Returns raster dimensions and halo-local origin for a tile.
+    /// Returns raster dimensions and halo-local origin for a tile with a zero- or one-cell halo.
+    /// Wider V1 halos return [`SpatialError::InvalidHalo`].
     fn tile_raster_layout(
         &self,
         tile: TileKey,
@@ -262,6 +263,7 @@ pub trait Topology {
         j: u64,
     ) -> Result<CellKey, SpatialError>;
     /// Returns halo cells at a tile-local signed coordinate, applying topology boundary rules.
+    /// Coordinates more than one cell outside the tile return [`SpatialError::InvalidHalo`].
     fn tile_halo_cells(
         &self,
         tile: TileKey,
@@ -720,6 +722,9 @@ impl Topology for DirCube {
         tile_log2: u8,
         halo: u8,
     ) -> Result<TileRasterLayout, SpatialError> {
+        if halo > 1 {
+            return Err(SpatialError::InvalidHalo);
+        }
         let layout = self.tile_layout_for(tile, tile_log2)?;
         let edge = i64::try_from(layout.edge).map_err(|_| SpatialError::InvalidTileKey)?;
         let halo = i64::from(halo);
@@ -753,6 +758,10 @@ impl Topology for DirCube {
         j: i64,
     ) -> Result<Vec<WeightedCell>, SpatialError> {
         let layout = self.tile_layout_for(tile, tile_log2)?;
+        let edge = i64::try_from(layout.edge).map_err(|_| SpatialError::InvalidTileKey)?;
+        if i < -1 || i > edge || j < -1 || j > edge {
+            return Err(SpatialError::InvalidHalo);
+        }
         let count = 1_i64 << tile.level;
         let global_i = layout.i_start as i64 + i;
         let global_j = layout.j_start as i64 + j;
@@ -989,6 +998,9 @@ impl Topology for Radial1d {
         tile_log2: u8,
         halo: u8,
     ) -> Result<TileRasterLayout, SpatialError> {
+        if halo > 1 {
+            return Err(SpatialError::InvalidHalo);
+        }
         let layout = self.tile_layout_for(tile, tile_log2)?;
         let edge = i64::try_from(layout.edge).map_err(|_| SpatialError::InvalidTileKey)?;
         let halo = i64::from(halo);
@@ -1025,6 +1037,10 @@ impl Topology for Radial1d {
             return Err(SpatialError::InvalidCellKey);
         }
         let layout = self.tile_layout_for(tile, tile_log2)?;
+        let edge = i64::try_from(layout.edge).map_err(|_| SpatialError::InvalidTileKey)?;
+        if i < -1 || i > edge {
+            return Err(SpatialError::InvalidHalo);
+        }
         let count = 1_i64 << tile.level;
         let index = (layout.i_start as i64 + i).clamp(0, count - 1) as u64;
         Ok(vec![WeightedCell { key: Self::key(tile.level, index)?, weight: 1.0 }])
@@ -1167,6 +1183,8 @@ pub enum SpatialError {
     InvalidTileLog2,
     /// Tile address is not the canonical tile ancestor for its level.
     InvalidTileKey,
+    /// Requested V1 halo width or tile-local coordinate exceeds one cell.
+    InvalidHalo,
     /// Radial extent is nonpositive, nonfinite, or yields unrepresentable V1 shell measures.
     InvalidExtent,
 }
@@ -1182,6 +1200,7 @@ impl fmt::Display for SpatialError {
             Self::InvalidFace => "face number is outside the V1 range",
             Self::InvalidTileLog2 => "tile_log2 is outside the V1 range",
             Self::InvalidTileKey => "tile key is not canonical for its topology",
+            Self::InvalidHalo => "V1 topology halos may be at most one cell wide",
             Self::InvalidExtent => {
                 "radial extent must yield finite positive measures for all V1 shells"
             }
@@ -1451,6 +1470,139 @@ mod tests {
     }
 
     #[test]
+    fn cube_tile_halos_are_consistently_limited_to_one_cell() {
+        let topology = DirCube;
+        let level = 2;
+        let tile_log2 = 2;
+        for face in 0..6_u8 {
+            let base = DirCube::key(face, 0, 0, level).unwrap();
+            let tile = topology.tile_key(base, tile_log2).unwrap();
+            let no_halo = topology.tile_raster_layout(tile, tile_log2, 0).unwrap();
+            assert_eq!((no_halo.dim_i, no_halo.dim_j), (4, 4));
+            assert_eq!((no_halo.offset_i, no_halo.offset_j), (0, 0));
+            let halo = topology.tile_raster_layout(tile, tile_log2, 1).unwrap();
+            assert_eq!((halo.dim_i, halo.dim_j), (6, 6));
+            assert_eq!((halo.offset_i, halo.offset_j), (-1, -1));
+
+            for out_j in 0..no_halo.dim_j {
+                for out_i in 0..no_halo.dim_i {
+                    let cells = topology
+                        .tile_halo_cells(tile, tile_log2, out_i as i64, out_j as i64)
+                        .unwrap();
+                    assert_eq!(cells.len(), 1);
+                    assert_eq!(
+                        cells[0].key,
+                        topology.tile_cell(tile, tile_log2, out_i, out_j).unwrap()
+                    );
+                }
+            }
+            for out_j in 0..halo.dim_j {
+                for out_i in 0..halo.dim_i {
+                    let local_i = out_i as i64 + halo.offset_i;
+                    let local_j = out_j as i64 + halo.offset_j;
+                    let cells =
+                        topology.tile_halo_cells(tile, tile_log2, local_i, local_j).unwrap();
+                    assert!(!cells.is_empty());
+                    assert!(cells.iter().all(|cell| topology.level(cell.key).unwrap() == level));
+                    assert!(
+                        (cells.iter().map(|cell| cell.weight).sum::<f64>() - 1.0).abs() < 1e-12
+                    );
+                    if (0..4).contains(&local_i) && (0..4).contains(&local_j) {
+                        assert_eq!(cells.len(), 1);
+                        assert_eq!(
+                            cells[0].key,
+                            topology
+                                .tile_cell(tile, tile_log2, local_i as u64, local_j as u64)
+                                .unwrap()
+                        );
+                    }
+                }
+            }
+
+            for index in 0..4_u64 {
+                for (local_i, local_j, boundary, edge) in [
+                    (
+                        -1,
+                        index as i64,
+                        DirCube::key(face, 0, index, level).unwrap(),
+                        FaceEdge::UMinus,
+                    ),
+                    (
+                        4,
+                        index as i64,
+                        DirCube::key(face, 3, index, level).unwrap(),
+                        FaceEdge::UPlus,
+                    ),
+                    (
+                        index as i64,
+                        -1,
+                        DirCube::key(face, index, 0, level).unwrap(),
+                        FaceEdge::VMinus,
+                    ),
+                    (
+                        index as i64,
+                        4,
+                        DirCube::key(face, index, 3, level).unwrap(),
+                        FaceEdge::VPlus,
+                    ),
+                ] {
+                    let cells =
+                        topology.tile_halo_cells(tile, tile_log2, local_i, local_j).unwrap();
+                    assert_eq!(
+                        cells,
+                        vec![super::WeightedCell {
+                            key: topology.neighbor(boundary, edge).unwrap(),
+                            weight: 1.0,
+                        }]
+                    );
+                }
+            }
+
+            for (local_i, local_j, boundary, edge_i, edge_j) in [
+                (
+                    -1,
+                    -1,
+                    DirCube::key(face, 0, 0, level).unwrap(),
+                    FaceEdge::UMinus,
+                    FaceEdge::VMinus,
+                ),
+                (
+                    -1,
+                    4,
+                    DirCube::key(face, 0, 3, level).unwrap(),
+                    FaceEdge::UMinus,
+                    FaceEdge::VPlus,
+                ),
+                (
+                    4,
+                    -1,
+                    DirCube::key(face, 3, 0, level).unwrap(),
+                    FaceEdge::UPlus,
+                    FaceEdge::VMinus,
+                ),
+                (4, 4, DirCube::key(face, 3, 3, level).unwrap(), FaceEdge::UPlus, FaceEdge::VPlus),
+            ] {
+                let cells = topology.tile_halo_cells(tile, tile_log2, local_i, local_j).unwrap();
+                assert_eq!(cells.len(), 2);
+                assert_eq!(cells[0].key, topology.neighbor(boundary, edge_i).unwrap());
+                assert_eq!(cells[1].key, topology.neighbor(boundary, edge_j).unwrap());
+                assert_eq!((cells[0].weight, cells[1].weight), (0.5, 0.5));
+            }
+
+            assert_eq!(
+                topology.tile_raster_layout(tile, tile_log2, 2),
+                Err(SpatialError::InvalidHalo)
+            );
+            for (local_i, local_j) in [(-2, 0), (5, 0), (0, -2), (0, 5), (-2, -2), (5, 5)] {
+                assert_eq!(
+                    topology.tile_halo_cells(tile, tile_log2, local_i, local_j),
+                    Err(SpatialError::InvalidHalo)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn radial_heap_keys_parent_children_measure_and_clamped_halo() {
         let topology = Radial1d::default();
         for level in 0..=10 {
@@ -1484,6 +1636,33 @@ mod tests {
         let whole_shell = doubled.cell_measure(Radial1d::key(0, 0).unwrap()).unwrap();
         assert!((whole_shell - 8.0 * 4.0 * core::f64::consts::PI / 3.0).abs() < 1.0e-12);
         assert!(Radial1d::with_extent(1.0).is_ok());
+    }
+
+    #[test]
+    fn radial_tile_halos_reject_widths_beyond_one_shell() {
+        let topology = Radial1d::default();
+        let tile = topology.tile_key(Radial1d::key(3, 0).unwrap(), 2).unwrap();
+        let no_halo = topology.tile_raster_layout(tile, 2, 0).unwrap();
+        let one_shell = topology.tile_raster_layout(tile, 2, 1).unwrap();
+        assert_eq!((no_halo.dim_i, no_halo.dim_j), (4, 1));
+        assert_eq!((one_shell.dim_i, one_shell.dim_j), (6, 1));
+        assert_eq!(one_shell.offset_i, -1);
+        assert!(matches!(topology.tile_raster_layout(tile, 2, 2), Err(SpatialError::InvalidHalo)));
+
+        assert_eq!(
+            topology.tile_halo_cells(tile, 2, -1, 0).unwrap()[0].key,
+            Radial1d::key(3, 0).unwrap()
+        );
+        assert_eq!(
+            topology.tile_halo_cells(tile, 2, 4, 0).unwrap()[0].key,
+            Radial1d::key(3, 4).unwrap()
+        );
+        for index in [-2, 5] {
+            assert!(matches!(
+                topology.tile_halo_cells(tile, 2, index, 0),
+                Err(SpatialError::InvalidHalo)
+            ));
+        }
     }
 
     #[test]

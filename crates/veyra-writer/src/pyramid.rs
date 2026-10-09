@@ -1,6 +1,6 @@
 //! Deterministic integer pyramid construction for V1 raster tiles.
 
-use veyra_core::canon::blob::{BlobKind, CanonicalBlob, DType};
+use veyra_core::canon::blob::{BlobKind, CanonicalBlob, DType, MAX_CANONICAL_BLOB_BYTES};
 use veyra_core::canon::index::TopologyTag;
 
 use crate::WriterError;
@@ -67,12 +67,16 @@ impl PyramidBuilder {
         if dtype == DType::Raw || children.is_empty() {
             return Err(WriterError::InvalidPyramid);
         }
-        if children.iter().any(|blob| {
-            blob.kind != BlobKind::RasterTile
-                || blob.dtype != dtype
-                || blob.slices != children[0].slices
-        }) {
-            return Err(WriterError::InvalidPyramid);
+        let slices = children[0].slices;
+        for child in children {
+            if child.kind != BlobKind::RasterTile || child.dtype != dtype || child.slices != slices
+            {
+                return Err(WriterError::InvalidPyramid);
+            }
+            let expected = canonical_raster_payload_len(child, dtype)?;
+            if child.payload.len() != expected {
+                return Err(WriterError::InvalidPyramid);
+            }
         }
         let (width, height) = match topology {
             TopologyTag::DirCube => Self::assemble_cube(children)?,
@@ -172,11 +176,14 @@ fn assemble_cube_bytes(children: &[CanonicalBlob], dtype: DType) -> Result<Vec<u
     let tile_width = usize::from(children[0].dim_i);
     let tile_height = usize::from(children[0].dim_j);
     if children.len() == 1 {
-        return Ok(children[0].payload.clone());
+        return copy_payload(&children[0].payload);
     }
     let width = tile_width * 2;
     let height = tile_height * 2;
-    let mut output = vec![0; width * height * slices * bytes_per_value];
+    let output_len = checked_payload_len(width, height, slices, bytes_per_value)?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| WriterError::InvalidPyramid)?;
+    output.resize(output_len, 0);
     for (quadrant, child) in children.iter().enumerate() {
         let origin_i = (quadrant >> 1) * tile_width;
         let origin_j = (quadrant & 1) * tile_height;
@@ -197,17 +204,61 @@ fn assemble_cube_bytes(children: &[CanonicalBlob], dtype: DType) -> Result<Vec<u
 
 fn assemble_radial_bytes(children: &[CanonicalBlob], dtype: DType) -> Result<Vec<u8>, WriterError> {
     if children.len() == 1 {
-        return Ok(children[0].payload.clone());
+        return copy_payload(&children[0].payload);
     }
     let width = usize::from(children[0].dim_i);
     let bytes_per_value = dtype.width().ok_or(WriterError::InvalidPyramid)?;
-    let mut output = Vec::with_capacity(children[0].payload.len() * 2);
-    for slice in 0..usize::from(children[0].slices) {
+    let slices = usize::from(children[0].slices);
+    let slice_bytes = width.checked_mul(bytes_per_value).ok_or(WriterError::InvalidPyramid)?;
+    let output_len = slice_bytes
+        .checked_mul(slices)
+        .and_then(|length| length.checked_mul(children.len()))
+        .ok_or(WriterError::InvalidPyramid)?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| WriterError::InvalidPyramid)?;
+    for slice in 0..slices {
         for child in children {
-            let start = slice * width * bytes_per_value;
-            output.extend_from_slice(&child.payload[start..start + width * bytes_per_value]);
+            let start = slice.checked_mul(slice_bytes).ok_or(WriterError::InvalidPyramid)?;
+            let end = start.checked_add(slice_bytes).ok_or(WriterError::InvalidPyramid)?;
+            let source = child.payload.get(start..end).ok_or(WriterError::InvalidPyramid)?;
+            output.extend_from_slice(source);
         }
     }
+    Ok(output)
+}
+
+fn canonical_raster_payload_len(blob: &CanonicalBlob, dtype: DType) -> Result<usize, WriterError> {
+    let dim_i = usize::from(blob.dim_i);
+    let dim_j = usize::from(blob.dim_j);
+    let slices = usize::from(blob.slices);
+    let bytes_per_value = dtype.width().ok_or(WriterError::InvalidPyramid)?;
+    if dim_i == 0 || dim_j == 0 || slices == 0 {
+        return Err(WriterError::InvalidPyramid);
+    }
+    let length = checked_payload_len(dim_i, dim_j, slices, bytes_per_value)?;
+    if length.checked_add(16).is_none_or(|size| size > MAX_CANONICAL_BLOB_BYTES) {
+        return Err(WriterError::InvalidPyramid);
+    }
+    Ok(length)
+}
+
+fn checked_payload_len(
+    width: usize,
+    height: usize,
+    slices: usize,
+    bytes_per_value: usize,
+) -> Result<usize, WriterError> {
+    width
+        .checked_mul(height)
+        .and_then(|length| length.checked_mul(slices))
+        .and_then(|length| length.checked_mul(bytes_per_value))
+        .ok_or(WriterError::InvalidPyramid)
+}
+
+fn copy_payload(payload: &[u8]) -> Result<Vec<u8>, WriterError> {
+    let mut output = Vec::new();
+    output.try_reserve_exact(payload.len()).map_err(|_| WriterError::InvalidPyramid)?;
+    output.extend_from_slice(payload);
     Ok(output)
 }
 
@@ -399,5 +450,102 @@ mod tests {
         .unwrap();
         assert_eq!((parent.dim_i, parent.dim_j), (2, 1));
         assert_eq!(u16_values(&parent), vec![2, 5]);
+    }
+
+    #[test]
+    fn malformed_public_cube_children_return_invalid_pyramid() {
+        let valid_children = [
+            u8_blob(2, 2, &[1, 2, 3, 4]),
+            u8_blob(2, 2, &[5, 6, 7, 8]),
+            u8_blob(2, 2, &[9, 10, 11, 12]),
+            u8_blob(2, 2, &[13, 14, 15, 16]),
+        ];
+        for child_index in 0..valid_children.len() {
+            let mut children = valid_children.clone();
+            children[child_index].payload.pop();
+            assert!(matches!(
+                PyramidBuilder::downsample_tile(
+                    TopologyTag::DirCube,
+                    DType::U8,
+                    "mean",
+                    None,
+                    &children
+                ),
+                Err(WriterError::InvalidPyramid)
+            ));
+        }
+
+        let mut oversized = valid_children.clone();
+        oversized[0].payload.push(99);
+        assert!(matches!(
+            PyramidBuilder::downsample_tile(
+                TopologyTag::DirCube,
+                DType::U8,
+                "mean",
+                None,
+                &oversized
+            ),
+            Err(WriterError::InvalidPyramid)
+        ));
+
+        let mut inconsistent_dimensions = valid_children;
+        inconsistent_dimensions[0].dim_i = 3;
+        inconsistent_dimensions[0].payload = vec![1, 2, 3, 4, 5, 6];
+        assert!(matches!(
+            PyramidBuilder::downsample_tile(
+                TopologyTag::DirCube,
+                DType::U8,
+                "mean",
+                None,
+                &inconsistent_dimensions
+            ),
+            Err(WriterError::InvalidPyramid)
+        ));
+    }
+
+    #[test]
+    fn malformed_public_radial_children_return_invalid_pyramid() {
+        let valid_children = [u8_blob(2, 1, &[1, 2]), u8_blob(2, 1, &[3, 4])];
+        for child_index in 0..valid_children.len() {
+            let mut children = valid_children.clone();
+            children[child_index].payload.pop();
+            assert!(matches!(
+                PyramidBuilder::downsample_tile(
+                    TopologyTag::Radial1d,
+                    DType::U8,
+                    "mean",
+                    None,
+                    &children
+                ),
+                Err(WriterError::InvalidPyramid)
+            ));
+        }
+
+        let mut oversized = valid_children.clone();
+        oversized[1].payload.push(99);
+        assert!(matches!(
+            PyramidBuilder::downsample_tile(
+                TopologyTag::Radial1d,
+                DType::U8,
+                "mean",
+                None,
+                &oversized
+            ),
+            Err(WriterError::InvalidPyramid)
+        ));
+
+        let mut inconsistent_dimensions = valid_children;
+        inconsistent_dimensions[1].dim_i = 3;
+        inconsistent_dimensions[1].payload.push(5);
+        assert!(matches!(
+            PyramidBuilder::downsample_tile(
+                TopologyTag::Radial1d,
+                DType::U8,
+                "mean",
+                None,
+                &inconsistent_dimensions
+            ),
+            Err(WriterError::InvalidPyramid)
+        ));
     }
 }

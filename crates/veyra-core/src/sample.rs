@@ -1185,13 +1185,19 @@ impl Body {
                 if domain.topology != "veyra.topo.dir_cube/1" {
                     return Err(SampleError::InvalidPosition);
                 }
-                let key = DirCube::key(
+                let coordinate_count = 1_u32 << 30;
+                if position.face > 5
+                    || position.i30 >= coordinate_count
+                    || position.j30 >= coordinate_count
+                {
+                    return Err(SampleError::InvalidPosition);
+                }
+                let coordinate_scale = f64::from(coordinate_count);
+                TopologyPoint::Direction(DirCube.direction_at_face_st(
                     position.face,
-                    u64::from(position.i30),
-                    u64::from(position.j30),
-                    30,
-                )?;
-                topology.point_for_cell(key)?
+                    f64::from(position.i30) / coordinate_scale,
+                    f64::from(position.j30) / coordinate_scale,
+                )?)
             }
             Position::Local(local) => {
                 if domain.topology == "veyra.topo.radial_1d/1" {
@@ -1949,6 +1955,44 @@ mod tests {
         (body, field)
     }
 
+    fn cube_pos30_boundary_body() -> (Body, FieldId) {
+        let (mut body, field) = cube_constant_body(30);
+        body.root.domains[0].tile_log2 = 0;
+        body.root_value["domains"][0]["tile_log2"] = json!(0);
+        body.registry.fields[0].sampling["interp"] = json!("bilinear");
+        let lower = (1_u64 << 29) - 1;
+        let upper = 1_u64 << 29;
+        let index = body.indexes.get_mut(&field).unwrap();
+        index.tile_log2 = 0;
+        index.entries =
+            [(lower, lower, 0), (upper, lower, 10), (lower, upper, 20), (upper, upper, 30)]
+                .into_iter()
+                .map(|(i, j, value)| IndexEntry {
+                    level: 30,
+                    key: DirCube::key(0, i, j, 30).unwrap().0,
+                    value: IndexValue::Const(value),
+                })
+                .collect();
+        index.entries.sort_by_key(|entry| (entry.level, entry.key));
+        let index_hash = hash::hash(&index.encode().unwrap());
+        body.root.indexes.insert(field.to_string(), index_hash.to_string());
+        body.root_value["indexes"][field.to_string()] = json!(index_hash.to_string());
+        (body, field)
+    }
+
+    fn cube_face_value_body() -> (Body, FieldId) {
+        let (mut body, field) = cube_constant_body(30);
+        let index = body.indexes.get_mut(&field).unwrap();
+        for entry in &mut index.entries {
+            let (face, _, _, _) = DirCube::decode(crate::spatial::CellKey(entry.key)).unwrap();
+            entry.value = IndexValue::Const(i64::from(face) + 1);
+        }
+        let index_hash = hash::hash(&index.encode().unwrap());
+        body.root.indexes.insert(field.to_string(), index_hash.to_string());
+        body.root_value["indexes"][field.to_string()] = json!(index_hash.to_string());
+        (body, field)
+    }
+
     #[test]
     fn angular_distance_and_slope_remain_stable_at_level_thirty() {
         let key = DirCube::key(0, 1 << 29, 1 << 29, 30).unwrap();
@@ -2051,6 +2095,73 @@ mod tests {
                     Err(super::SampleError::TileOutputLimitExceeded)
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn pos30_sampling_preserves_chart_boundaries_interior_and_face_edges() {
+        let (body, field) = cube_pos30_boundary_body();
+        assert!(body.root.validate().is_ok());
+        assert!(body.root.validate_registry(&body.registry).is_ok());
+        let boundary = super::Pos30 { face: 0, i30: 1 << 29, j30: 1 << 29 };
+        let sample = body
+            .sample(&SampleQuery {
+                field,
+                pos: Position::Pos30(boundary),
+                level: LevelSel::Exact(30),
+                time: TimeSel::Static,
+            })
+            .unwrap();
+        assert_eq!(sample.value, Some(15.0));
+
+        let (body, field) = cube_face_value_body();
+        let coordinate_count = f64::from(1_u32 << 30);
+        for position in [
+            super::Pos30 { face: 0, i30: 123_456_789, j30: 876_543_210 },
+            super::Pos30 { face: 0, i30: 0, j30: 1 << 29 },
+            super::Pos30 { face: 2, i30: 1 << 29, j30: (1 << 30) - 1 },
+        ] {
+            let direction = DirCube
+                .direction_at_face_st(
+                    position.face,
+                    f64::from(position.i30) / coordinate_count,
+                    f64::from(position.j30) / coordinate_count,
+                )
+                .unwrap();
+            let from_pos30 = body
+                .sample(&SampleQuery {
+                    field,
+                    pos: Position::Pos30(position),
+                    level: LevelSel::Exact(30),
+                    time: TimeSel::Static,
+                })
+                .unwrap();
+            let from_direction = body
+                .sample(&SampleQuery {
+                    field,
+                    pos: Position::Direction(direction),
+                    level: LevelSel::Exact(30),
+                    time: TimeSel::Static,
+                })
+                .unwrap();
+            assert_eq!(from_pos30.value, from_direction.value);
+            assert_eq!(from_pos30.cell, from_direction.cell);
+        }
+
+        for invalid in [
+            super::Pos30 { face: 6, i30: 0, j30: 0 },
+            super::Pos30 { face: 0, i30: 1 << 30, j30: 0 },
+            super::Pos30 { face: 0, i30: 0, j30: 1 << 30 },
+        ] {
+            assert!(matches!(
+                body.sample(&SampleQuery {
+                    field,
+                    pos: Position::Pos30(invalid),
+                    level: LevelSel::Exact(30),
+                    time: TimeSel::Static,
+                }),
+                Err(super::SampleError::InvalidPosition)
+            ));
         }
     }
 

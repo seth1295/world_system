@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +42,7 @@ def main() -> int:
             if not requirement.get("requirement"):
                 raise SystemExit(f"acceptance item {identifier} has no requirement text")
             status = requirement.get("status", "verified")
-            if status not in ("verified", "deferred"):
+            if status not in ("verified", "pass", "deferred"):
                 raise SystemExit(f"acceptance item {identifier} has unsupported status {status!r}")
             if status == "deferred":
                 deferred += 1
@@ -50,12 +51,30 @@ def main() -> int:
             checks = requirement.get("checks")
             if not isinstance(checks, list) or not checks:
                 raise SystemExit(f"acceptance item {identifier} has no machine-checkable evidence")
+            if status == "pass" and not any(isinstance(check.get("run"), list) for check in checks):
+                raise SystemExit(f"passed acceptance item {identifier} must execute a regression check")
             for check in checks:
+                run = check.get("run")
                 relative = check.get("path")
                 contains = check.get("contains")
                 absent = check.get("absent")
-                if not isinstance(relative, str) or (isinstance(contains, str) == isinstance(absent, str)):
+                evidence_kinds = sum((isinstance(run, list), isinstance(contains, str), isinstance(absent, str)))
+                if evidence_kinds != 1:
                     raise SystemExit(f"acceptance item {identifier} has a malformed evidence check")
+                if isinstance(run, list):
+                    if not run or not all(isinstance(part, str) and part for part in run):
+                        raise SystemExit(f"acceptance item {identifier} has an invalid command check")
+                    result = subprocess.run(run, cwd=ROOT, text=True, capture_output=True, check=False)
+                    if result.returncode != 0:
+                        raise SystemExit(
+                            f"acceptance item {identifier} command failed ({result.returncode}): "
+                            f"{' '.join(run)}\n{result.stdout}{result.stderr}"
+                        )
+                    if result.stdout:
+                        print(result.stdout.rstrip())
+                    continue
+                if not isinstance(relative, str):
+                    raise SystemExit(f"acceptance item {identifier} has a malformed source check")
                 path = (ROOT / relative).resolve()
                 if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
                     raise SystemExit(f"acceptance item {identifier} references missing or out-of-root file {relative}")
@@ -65,7 +84,7 @@ def main() -> int:
                 if isinstance(absent, str) and absent in text:
                     raise SystemExit(f"acceptance item {identifier} deferred boundary changed in {relative}: {absent!r}")
             count += 1
-    print(f"PASS: {count} Stage 0-3 acceptance requirements map to checked source, tests, vectors, or CI evidence; {deferred} deferred with reasons")
+    print(f"PASS: {count - deferred} Stage 0-3 requirements passed source or executable checks; {deferred} deferred with reasons")
     return 0
 
 

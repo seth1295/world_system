@@ -60,4 +60,22 @@ fn canonical_fmt_stdout_is_exact_jcs_and_hashes_as_canonical_json() {
     assert!(raw_hash.status.success());
     assert!(canonical_hash.status.success());
     assert_eq!(raw_hash.stdout, canonical_hash.stdout);
+
+    let number_path = directory.0.join("rfc-number.json");
+    let number_input = br#"{"z":1e+21,"a":1e-6}"#;
+    fs::write(&number_path, number_input).expect("write RFC 8785 numeric input");
+    let number_output = Command::new(env!("CARGO_BIN_EXE_veyra"))
+        .args(["fmt", "--canonical"])
+        .arg(&number_path)
+        .output()
+        .expect("run RFC 8785 formatter");
+    assert!(number_output.status.success());
+    assert_eq!(number_output.stdout, br#"{"a":0.000001,"z":1e+21}"#);
+    assert!(!number_output.stdout.ends_with(b"\n"));
+    let hashed_number = Command::new(env!("CARGO_BIN_EXE_veyra"))
+        .arg("hash-json")
+        .arg(&number_path)
+        .output()
+        .expect("verify hashed JSON number restriction");
+    assert!(!hashed_number.status.success());
 }

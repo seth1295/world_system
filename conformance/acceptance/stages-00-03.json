@@ -1,0 +1,46 @@
+{
+  "schema": "veyra.foundation_acceptance_matrix/1",
+  "base": "970a00beaebb6f64542dd48d50650b64dba5c440",
+  "stages": [
+    {
+      "stage": 0,
+      "requirements": [
+        {"id":"S0-DOC","requirement":"The owner architecture remains at DOC/VEYRA_WORLD_SYSTEM_ARCHITECTURE.md and CodeRabbit instructions point reviewers to it.","checks":[{"path":"DOC/VEYRA_WORLD_SYSTEM_ARCHITECTURE.md","contains":"## 17.2 Crates and dependency direction"},{"path":".coderabbit.yaml","contains":"DOC/VEYRA_WORLD_SYSTEM_ARCHITECTURE.md"}]},
+        {"id":"S0-TOOLCHAIN","requirement":"The stable toolchain and four architecture targets are pinned.","checks":[{"path":"rust-toolchain.toml","contains":"channel = \"1.99.0\""},{"path":"rust-toolchain.toml","contains":"wasm32-unknown-unknown"}]},
+        {"id":"S0-CI","requirement":"CI includes Windows, Linux, macOS, formatting, lint, tests, dependency policy, and WASM compilation.","checks":[{"path":".github/workflows/ci.yml","contains":"windows-latest, ubuntu-latest, macos-latest"},{"path":".github/workflows/ci.yml","contains":"Build WebAssembly targets"},{"path":".github/workflows/ci.yml","contains":"Dependency policy"}]},
+        {"id":"S0-GUARDRAILS","requirement":"The dependency direction and determinism lint fail when deliberately violated.","checks":[{"path":"crates/veyra-core/tests/architecture_guards.rs","contains":"workspace_dependencies_preserve_the_declared_direction"},{"path":"scripts/check_lint_guardrails.ps1","contains":"PASS: Clippy rejected the disallowed float method and unordered collection fixture."}]}
+      ]
+    },
+    {
+      "stage": 1,
+      "requirements": [
+        {"id":"S1-JCS","requirement":"Published RFC 8785 Appendix B number samples are asserted while hashed JSON remains float-rejecting.","checks":[{"path":"conformance/vectors/canon/rfc8785-appendix-b.json","contains":"rfc8785_number_vectors/1"},{"path":"crates/veyra-core/src/canon/jcs.rs","contains":"general_rfc8785_serializes_binary64_while_hashed_json_stays_integer_only"}]},
+        {"id":"S1-IDENTITY","requirement":"Object addresses, ObjectIds, and seed derivations have committed golden vectors and CLI address derivation evidence.","checks":[{"path":"conformance/vectors/canon/golden.json","contains":"address_kinds"},{"path":"crates/veyra-conformance/src/lib.rs","contains":"ObjectId derivation vector mismatch"},{"path":"crates/veyra-cli/src/main.rs","contains":"parse_object_address"},{"path":"crates/veyra-cli/tests/id_vectors.rs","contains":"id_command_derives_every_v1_birth_address"}]},
+        {"id":"S1-CODECS","requirement":"Canonical blob/index bytes, shuffle decoding, and hash identity have round-trip and negative coverage.","checks":[{"path":"crates/veyra-core/src/canon/blob.rs","contains":"header_round_trip_and_shuffle_round_trip"},{"path":"crates/veyra-core/src/canon/blob.rs","contains":"compressed_bytes_do_not_define_blob_identity"},{"path":"crates/veyra-core/src/canon/index.rs","contains":"blob_and_const_entries_round_trip"},{"path":"conformance/vectors/canon/golden.json","contains":"\"index\""}]},
+        {"id":"S1-LEDGER-TIME","requirement":"UTime decimal forms and hash-chained ledger tampering/sequence failures are covered.","checks":[{"path":"crates/veyra-core/src/time.rs","contains":"utime_is_i128_and_text_is_canonical"},{"path":"crates/veyra-core/src/canon/ledger.rs","contains":"verification_rejects_hash_valid_broken_sequence_and_predecessor_links"}]},
+        {"id":"S1-WASM","requirement":"The same Stage 1 vectors execute in native and wasm32 builds and compare byte-for-byte.","checks":[{"path":"crates/veyra-capi/src/foundation_parity.rs","contains":"VEYRA-FOUNDATION-PARITY"},{"path":"scripts/compare_foundation_wasm.mjs","contains":"wasmOutput.equals(native)"},{"path":".github/workflows/ci.yml","contains":"Foundation native/WASM parity"}]}
+      ]
+    },
+    {
+      "stage": 2,
+      "requirements": [
+        {"id":"S2-CUBE-10M","requirement":"Ten million deterministic cube and radial topology round-trip cases execute.","checks":[{"path":"crates/veyra-core/src/spatial.rs","contains":"stage2_ten_million_random_topology_roundtrips"},{"path":"crates/veyra-core/src/spatial.rs","contains":"0x6a09_e667_f3bc_c909_u64"},{"path":"conformance/vectors/topology/stage2-parity.json","contains":"\"stress_roundtrip_count\": 10000000"},{"path":".github/workflows/ci.yml","contains":"Stage 2 10M topology round trips"}]},
+        {"id":"S2-PARITY-100K","requirement":"One hundred thousand deterministic paired cube/radial cases are compared between native and WASM.","checks":[{"path":"conformance/vectors/topology/stage2-parity.json","contains":"\"sample_count\": 100000"},{"path":"crates/veyra-capi/src/foundation_parity.rs","contains":"TOPOLOGY-RANDOM-100000"}]},
+        {"id":"S2-CUBE-BOUNDARIES","requirement":"Axis/diagonal ties, all adjacency transforms, edges, corners, and solid-angle measure are checked.","checks":[{"path":"crates/veyra-core/src/spatial.rs","contains":"axis_ties_prefer_x_then_y_then_z"},{"path":"crates/veyra-core/src/spatial.rs","contains":"face_adjacency_is_involutive_including_flips"},{"path":"crates/veyra-core/src/spatial.rs","contains":"corner_query_exposes_two_edge_cells"},{"path":"crates/veyra-core/src/spatial.rs","contains":"cube_cell_measures_partition_four_pi"},{"path":"conformance/vectors/topology/cb0-addressing.json","contains":"dir_cube"}]},
+        {"id":"S2-RADIAL","requirement":"Radial heap key arithmetic, parent/child relationships, shell measure, and finite positive extent bounds are checked.","checks":[{"path":"crates/veyra-core/src/spatial.rs","contains":"radial_heap_keys_parent_children_measure_and_clamped_halo"},{"path":"crates/veyra-core/src/spatial.rs","contains":"accepted_radial_extents_have_finite_positive_measures_across_v1_levels"}]},
+        {"id":"S2-ADJACENCY","requirement":"The adjacency table is independently derived and compared against the committed schema.","checks":[{"path":"scripts/derive_adjacency.py","contains":"Independently derive the direction-cube face-edge adjacency table"},{"path":"schema/face_adjacency.toml","contains":"face = 0"}]}
+      ]
+    },
+    {
+      "stage": 3,
+      "requirements": [
+        {"id":"S3-SCHEMAS","requirement":"All JSON Schemas and capability documents are validated against the embedded contract projection.","checks":[{"path":"scripts/validate_schemas.py","contains":"embedded capability contracts are stale"},{"path":"schema/capability_ids.toml","contains":"stellar_structure"}]},
+        {"id":"S3-BODY-MODEL","requirement":"Identity, frames, figures, fields, compatibility, ancillary model-preservation, and zero-capability invariants have runtime coverage.","checks":[{"path":"crates/veyra-core/src/body.rs","contains":"body_identity_must_derive_from_its_fixture_origin"},{"path":"crates/veyra-core/src/body.rs","contains":"root_accepts_zero_capabilities_without_required_domains"},{"path":"crates/veyra-core/src/body.rs","contains":"unknown_ancillary_root_capability_and_field_metadata_survive_model_rewrite"}]},
+        {"id":"S3-LOADER-WRITER","requirement":"Sans-IO loading verifies closure hashes; writer output round-trips; tampering is refused consistently by library and CLI.","checks":[{"path":"crates/veyra-core/src/io.rs","contains":"loader_begin_provide_finish_verifies_a_minimal_body"},{"path":"crates/veyra-conformance/src/lib.rs","contains":"tampered-blob"},{"path":"crates/veyra-writer/tests/contracts.rs","contains":"writer_roundtrip_checks_named_refs_indexes_constants_and_ledger"},{"path":"crates/veyra-cli/tests/tamper_errors.rs","contains":"cli_and_library_report_the_same_tampered_blob_code_and_hash"}]},
+        {"id":"S3-REWRITE-API","status":"deferred","reason":"Stage 0-3 exposes verified root/section values and a new-artifact writer, but no end-to-end body rewrite API. Typed ancillary metadata round-trip is tested; artifact rewrite closure coverage belongs with a future rewrite operation.","requirement":"Preserve ancillary data through a complete artifact rewrite.","checks":[{"path":"crates/veyra-core/src/body.rs","contains":"unknown_ancillary_root_capability_and_field_metadata_survive_model_rewrite"},{"path":"crates/veyra-writer/src/lib.rs","contains":"pub fn write_body_json"},{"path":"crates/veyra-writer/src/lib.rs","absent":"pub fn rewrite_body"}]},
+        {"id":"S3-FIXTURES","requirement":"CB5, all CB6 compatibility cases, and CB9 minimal-void retain pinned identities and pass conformance.","checks":[{"path":"conformance/vectors/canon/golden.json","contains":"cb9-minimal-void"},{"path":"crates/veyra-conformance/src/lib.rs","contains":"ancillary, minor, critical, major, and tamper cases PASS"},{"path":"conformance/worlds/cb9-minimal-void/body.json","contains":"\"capabilities\": []"}]},
+        {"id":"S3-SOURCE-SCAN","requirement":"Core remains sans-IO and contains no terrestrial root ontology terms.","checks":[{"path":"crates/veyra-core/tests/architecture_guards.rs","contains":"core_source_has_no_io_authority_or_terrestrial_vocabulary"},{"path":"crates/veyra-core/src/lib.rs","contains":"#![forbid(unsafe_code)]"}]}
+      ]
+    }
+  ]
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -88,6 +89,22 @@ def main() -> int:
         {"$ref": "https://veyra.invalid/schema/decimal/1#/$defs/utime"},
         registry=schema_registry,
     )
+
+    rfc_number_vectors = read_json(ROOT / "conformance" / "vectors" / "canon" / "rfc8785-appendix-b.json")
+    if (
+        rfc_number_vectors.get("schema") != "veyra.conformance.rfc8785_number_vectors/1"
+        or len(rfc_number_vectors.get("vectors", [])) != 26
+        or any(not isinstance(row.get("bits"), str) or len(row["bits"]) != 16 for row in rfc_number_vectors["vectors"])
+    ):
+        raise SystemExit("published RFC 8785 Appendix B vector inventory is malformed")
+    topology_parity = read_json(ROOT / "conformance" / "vectors" / "topology" / "stage2-parity.json")
+    if (
+        topology_parity.get("schema") != "veyra.conformance.stage2_parity/1"
+        or topology_parity.get("sample_count") != 100000
+        or topology_parity.get("stress_roundtrip_count") != 10000000
+        or not re.fullmatch(r"b3:[0-9a-f]{64}", topology_parity.get("expected_output_hash", ""))
+    ):
+        raise SystemExit("Stage 2 parity vector metadata is malformed")
 
     # Paired with DecimalString::parse tests in time.rs. The effective exponent uses i64,
     # so every canonical i32 exponent token remains accepted regardless of fraction length.

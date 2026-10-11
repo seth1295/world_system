@@ -111,7 +111,41 @@ pub fn verify_foundation(
         cb5.baseline_id(),
         cb9.baseline_id(),
     )?;
+    let rfc_number_vectors =
+        verify_rfc8785_vectors(vector_root.join("canon/rfc8785-appendix-b.json"))?;
+    results.push(FixtureResult {
+        name: "rfc8785-appendix-b".to_owned(),
+        evidence: format!("{rfc_number_vectors} published number samples PASS"),
+    });
     Ok(results)
+}
+
+fn verify_rfc8785_vectors(path: PathBuf) -> Result<usize, ConformanceError> {
+    let vectors: Value = serde_json::from_slice(&fs::read(path).map_err(ConformanceError::Io)?)
+        .map_err(|_| ConformanceError::Assertion("RFC 8785 vector JSON"))?;
+    if vectors["schema"] != "veyra.conformance.rfc8785_number_vectors/1"
+        || vectors["source"] != "https://www.rfc-editor.org/rfc/rfc8785.html#appendix-B"
+    {
+        return Err(ConformanceError::Assertion("RFC 8785 vector provenance"));
+    }
+    let rows =
+        vectors["vectors"].as_array().ok_or(ConformanceError::Assertion("RFC 8785 vector list"))?;
+    for row in rows {
+        let bits =
+            row["bits"].as_str().ok_or(ConformanceError::Assertion("RFC 8785 number bits"))?;
+        if bits.len() != 16 {
+            return Err(ConformanceError::Assertion("RFC 8785 number bits length"));
+        }
+        let bits = u64::from_str_radix(bits, 16)
+            .map_err(|_| ConformanceError::Assertion("RFC 8785 number bits"))?;
+        let actual = veyra_core::canon::jcs::serialize_rfc8785_number(f64::from_bits(bits));
+        match row["canonical"].as_str() {
+            Some(expected) if actual.as_deref() == Ok(expected) => {}
+            None if actual.is_err() => {}
+            _ => return Err(ConformanceError::Assertion("RFC 8785 Appendix B number mismatch")),
+        }
+    }
+    Ok(rows.len())
 }
 
 fn generate_cb0(path: &Path) -> Result<Hash32, ConformanceError> {

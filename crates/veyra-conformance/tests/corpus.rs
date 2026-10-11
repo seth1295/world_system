@@ -8,5 +8,5 @@ fn committed_core_fixtures_match_golden_vectors() {
         root.join("conformance/vectors"),
     )
     .unwrap();
-    assert_eq!(results.len(), 4);
+    assert_eq!(results.len(), 5);
 }

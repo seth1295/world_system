@@ -138,6 +138,222 @@ fn writer_roundtrip_checks_named_refs_indexes_constants_and_ledger() {
 }
 
 #[test]
+fn rewrite_preserves_unknown_ancillary_artifact_closure() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../conformance/worlds/cb6-compat/ancillary");
+    let mut root: Value =
+        serde_json::from_slice(&fs::read(fixture.join("body.json")).unwrap()).unwrap();
+    let mut registry: Value =
+        serde_json::from_slice(&fs::read(fixture.join("registry/fields.json")).unwrap()).unwrap();
+
+    root["x-future-root"] = json!({"revision":7,"opaque":["kept",true]});
+    root["capabilities"][1]["x-future-capability"] = json!({"configuration":{"mode":"preserve"}});
+    registry["fields"][0]["x-future-metadata"]["rewrite-check"] = json!("retained");
+    registry["fields"][0]["storage"]["dtype"] = json!("u8");
+    root["required_features"].as_array_mut().unwrap().push(json!("veyra.topo.dir_cube/1"));
+    root["domains"] = json!([{
+        "id":"surface","topology":"veyra.topo.dir_cube/1","frame":"body_fixed",
+        "vertical":{"kind":"none"},"tile_log2":0,"max_level":0
+    }]);
+
+    let source_path = temp_path("ancillary-rewrite-source");
+    let mut source_writer = ArtifactWriter::new(&source_path).unwrap();
+    let registry_hash = source_writer
+        .write_json_section("registry/fields.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    root["sections"]["registry"]["hash"] = json!(registry_hash.to_string());
+
+    for relative in ["dynamics/descriptor.json", "dynamics/origin.json"] {
+        let bytes = fs::read(fixture.join(relative)).unwrap();
+        let hash = source_writer.write_json_section(relative, &bytes).unwrap();
+        let reference = if relative.ends_with("descriptor.json") {
+            &mut root["dynamics"]["descriptor"]
+        } else {
+            &mut root["dynamics"]["origin_keyframe"]
+        };
+        reference["hash"] = json!(hash.to_string());
+    }
+
+    let field_id = FieldId::new(0x7ffe, 1);
+    let canonical_blob =
+        CanonicalBlob::new(BlobKind::RasterTile, DType::U8, 1, 1, 1, vec![42]).unwrap().encode();
+    let blob_hash = source_writer.write_blob(&canonical_blob).unwrap();
+    let index = IndexBlob {
+        field_id: field_id.0,
+        topology: TopologyTag::DirCube,
+        tile_log2: 0,
+        entries: vec![IndexEntry {
+            level: 0,
+            key: DirCube::key(0, 0, 0, 0).unwrap().0,
+            value: IndexValue::Blob(blob_hash),
+        }],
+    };
+    let index_hash = source_writer.write_index(field_id, &index).unwrap();
+    root["indexes"][field_id.to_string()] = json!(index_hash.to_string());
+    let (ledger_bytes, ledger_head) = append_extension();
+    source_writer
+        .write_ledger("extensions", "extensions/ledger.jsonl", &ledger_bytes, ledger_head)
+        .unwrap();
+    root["extensions_ledger"] = json!({
+        "path":"extensions/ledger.jsonl","hash":ledger_head.to_string()
+    });
+    source_writer.write_body_json(&serde_json::to_vec(&root).unwrap()).unwrap();
+
+    let loaded = open_directory(&source_path).unwrap();
+    assert_eq!(loaded.root_value()["x-future-root"], root["x-future-root"]);
+    assert_eq!(
+        loaded.root_value()["capabilities"][1]["x-future-capability"],
+        root["capabilities"][1]["x-future-capability"]
+    );
+    assert_eq!(loaded.fields()[0].extra["x-future-metadata"]["rewrite-check"], "retained");
+
+    let rewritten_path = temp_path("ancillary-rewrite-output");
+    let rewritten_baseline = write_loaded_body(&loaded, &rewritten_path);
+    let rewritten = open_directory(&rewritten_path).unwrap();
+    assert_eq!(rewritten_baseline, loaded.baseline_id());
+    assert_body_closure_equal(&loaded, &rewritten);
+    assert_eq!(rewritten.fields()[0].extra["x-future-metadata"]["rewrite-check"], "retained");
+
+    drop(source_writer);
+    remove_artifact(&source_path);
+    remove_artifact(&rewritten_path);
+}
+
+fn write_loaded_body(
+    body: &veyra_core::io::Body,
+    destination: &PathBuf,
+) -> veyra_core::ids::Hash32 {
+    let root = body.root_value();
+    let mut writer = ArtifactWriter::new(destination).unwrap();
+
+    let mut section_refs = std::collections::BTreeMap::new();
+    collect_section_refs(&root["sections"], &mut section_refs);
+    collect_section_refs(&root["dynamics"], &mut section_refs);
+    for (path, expected) in section_refs {
+        let section = body.section(&path).unwrap();
+        let bytes = serde_json::to_vec(section).unwrap();
+        let actual = writer.write_json_section(&path, &bytes).unwrap();
+        assert_eq!(actual.to_string(), expected, "section identity changed at {path}");
+    }
+
+    let mut blob_hashes = std::collections::BTreeSet::new();
+    for field_text in root["indexes"].as_object().unwrap().keys() {
+        let field_id = FieldId::parse(field_text).unwrap();
+        let index = body.index(field_id).unwrap();
+        for entry in &index.entries {
+            if let IndexValue::Blob(hash) = entry.value {
+                blob_hashes.insert(hash);
+            }
+        }
+    }
+    for hash in blob_hashes {
+        assert_eq!(writer.write_blob(body.blob(hash).unwrap()).unwrap(), hash);
+    }
+
+    for field_text in root["indexes"].as_object().unwrap().keys() {
+        let field_id = FieldId::parse(field_text).unwrap();
+        let index = body.index(field_id).unwrap();
+        let actual = writer.write_index(field_id, index).unwrap();
+        assert_eq!(actual.to_string(), root["indexes"][field_text].as_str().unwrap());
+    }
+
+    if let Some(reference) = root.get("extensions_ledger") {
+        let expected = veyra_core::body::parse_hash(reference["hash"].as_str().unwrap()).unwrap();
+        writer
+            .write_ledger(
+                "extensions",
+                reference["path"].as_str().unwrap(),
+                body.ledger("extensions").unwrap(),
+                expected,
+            )
+            .unwrap();
+    }
+
+    writer.write_body_json(&serde_json::to_vec(root).unwrap()).unwrap()
+}
+
+fn collect_section_refs(value: &Value, refs: &mut std::collections::BTreeMap<String, String>) {
+    match value {
+        Value::Object(object) => {
+            if let (Some(path), Some(hash)) = (
+                object.get("path").and_then(Value::as_str),
+                object.get("hash").and_then(Value::as_str),
+            ) {
+                assert!(
+                    refs.insert(path.to_owned(), hash.to_owned()).is_none_or(|old| old == hash)
+                );
+            }
+            for value in object.values() {
+                collect_section_refs(value, refs);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_section_refs(value, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn assert_body_closure_equal(left: &veyra_core::io::Body, right: &veyra_core::io::Body) {
+    assert_eq!(left.baseline_id(), right.baseline_id());
+    assert_eq!(left.root_value(), right.root_value());
+    let left_root: veyra_core::body::BodyRoot =
+        serde_json::from_value(left.root_value().clone()).unwrap();
+    let right_root: veyra_core::body::BodyRoot =
+        serde_json::from_value(right.root_value().clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&left_root).unwrap(),
+        serde_json::to_value(&right_root).unwrap()
+    );
+    assert_eq!(left_root.extra.get("x-future-root"), right_root.extra.get("x-future-root"));
+    assert_eq!(
+        left_root.capabilities[1].extra.get("x-future-capability"),
+        right_root.capabilities[1].extra.get("x-future-capability")
+    );
+    assert_eq!(
+        serde_json::to_value(left.field_registry()).unwrap(),
+        serde_json::to_value(right.field_registry()).unwrap()
+    );
+
+    let mut section_refs = std::collections::BTreeMap::new();
+    collect_section_refs(left.root_value().get("sections").unwrap(), &mut section_refs);
+    collect_section_refs(left.root_value().get("dynamics").unwrap(), &mut section_refs);
+    for (path, expected) in section_refs {
+        assert_eq!(left.section(&path), right.section(&path), "section changed at {path}");
+        let bytes = serde_json::to_vec(left.section(&path).unwrap()).unwrap();
+        let canonical = veyra_core::canon::jcs::canonicalize_json(&bytes).unwrap();
+        assert_eq!(hash::hash(&canonical).to_string(), expected);
+    }
+
+    for field_text in left.root_value()["indexes"].as_object().unwrap().keys() {
+        let field_id = FieldId::parse(field_text).unwrap();
+        assert_eq!(left.index(field_id), right.index(field_id));
+        let index = left.index(field_id).unwrap();
+        let canonical = index.encode().unwrap();
+        assert_eq!(
+            hash::hash(&canonical).to_string(),
+            left.root_value()["indexes"][field_text].as_str().unwrap()
+        );
+        for entry in &index.entries {
+            if let IndexValue::Blob(blob_hash) = entry.value {
+                assert_eq!(left.blob(blob_hash), right.blob(blob_hash));
+                assert_eq!(hash::hash(left.blob(blob_hash).unwrap()), blob_hash);
+            }
+        }
+    }
+    if let Some(reference) = left.root_value().get("extensions_ledger") {
+        let bytes = left.ledger("extensions").unwrap();
+        assert_eq!(Some(bytes), right.ledger("extensions"));
+        assert_eq!(
+            veyra_core::canon::ledger::verify(bytes).unwrap().hash,
+            veyra_core::body::parse_hash(reference["hash"].as_str().unwrap()).unwrap()
+        );
+    }
+}
+
+#[test]
 fn writer_roundtrip_verifies_materialized_star_convex_radius_field() {
     let path = temp_path("star-convex-radius");
     let mut writer = ArtifactWriter::new(&path).unwrap();

@@ -652,6 +652,36 @@ pub enum LoaderError {
     Model(ModelError),
 }
 
+impl LoaderError {
+    /// Stable machine-readable category for CLI and language-binding diagnostics.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidBodyJson => "invalid_body_json",
+            Self::InvalidSection => "invalid_section",
+            Self::InvalidPath => "invalid_path",
+            Self::ConflictingSectionReference => "conflicting_section_reference",
+            Self::ArtifactPathConflict => "artifact_path_conflict",
+            Self::UnexpectedNeed => "unexpected_need",
+            Self::Missing(_) => "missing_content",
+            Self::HashMismatch(_) => "hash_mismatch",
+            Self::InvalidCodec => "invalid_codec",
+            Self::DecompressedContentTooLarge => "decompressed_content_too_large",
+            Self::DecompressionAllocationFailed => "decompression_allocation_failed",
+            Self::InvalidBlob => "invalid_blob",
+            Self::InvalidIndex => "invalid_index",
+            Self::IndexFieldMismatch => "index_field_mismatch",
+            Self::RasterKindMismatch => "raster_kind_mismatch",
+            Self::RasterDTypeMismatch => "raster_dtype_mismatch",
+            Self::RasterDimensionsMismatch => "raster_dimensions_mismatch",
+            Self::RasterSlicesMismatch => "raster_slices_mismatch",
+            Self::ConstValueOutOfRange => "const_value_out_of_range",
+            Self::InvalidLedger => "invalid_ledger",
+            Self::Jcs(_) => "invalid_jcs",
+            Self::Model(_) => "invalid_body_model",
+        }
+    }
+}
+
 impl fmt::Display for LoaderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -6,7 +6,16 @@ rust-version.workspace = true
 publish = false
 
 [lib]
-crate-type = ["rlib", "staticlib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[example]]
+name = "foundation_parity"
+path = "examples/foundation_parity.rs"
+required-features = ["foundation-parity"]
+
+[features]
+default = []
+foundation-parity = []
 
 [dependencies]
 veyra-core = { version = "0.1.0", path = "../veyra-core" }

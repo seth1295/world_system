@@ -7,11 +7,15 @@ use std::str::FromStr;
 use veyra_core::canon::{hash, jcs};
 use veyra_core::ids::{ObjectAddress, ObjectId, UniverseId};
 use veyra_core::spatial::{CellKey, Dir, DirCube, Radial1d, Topology};
-use veyra_writer::{open_directory, verify_directory};
+use veyra_writer::{WriterError, open_directory, verify_directory};
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("error: {error}");
+        if let Some(writer_error) = error.downcast_ref::<WriterError>() {
+            eprintln!("error[{}]: {error}", writer_error.code());
+        } else {
+            eprintln!("error: {error}");
+        }
         std::process::exit(2);
     }
 }
@@ -52,7 +56,7 @@ fn command_fmt(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 fn format_json(input: &[u8], mode: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     match mode {
-        "--canonical" => Ok(jcs::canonicalize_json(input)?),
+        "--canonical" => Ok(jcs::canonicalize_rfc8785_json(input)?),
         "--pretty" => {
             let value = jcs::parse_unique_json(input)?;
             Ok(serde_json::to_vec_pretty(&value)?)
@@ -71,16 +75,68 @@ fn command_hash(args: &[String], canonical_json: bool) -> Result<(), Box<dyn Err
 
 fn command_id(args: &[String]) -> Result<(), Box<dyn Error>> {
     if args.first().map(String::as_str) != Some("object") {
-        return Err("usage: veyra id object --fixture <name>".into());
+        return Err("usage: veyra id object (--address <kind:fields>|--fixture <name>) [--universe uni:b3:<hex>]".into());
     }
-    let fixture = option_value(args, "--fixture")?;
+    let fixture = option_value_optional(args, "--fixture")?;
+    let address_text = option_value_optional(args, "--address")?;
+    if fixture.is_some() == address_text.is_some() {
+        return Err("provide exactly one of --address or --fixture".into());
+    }
+    let address = if let Some(fixture) = fixture {
+        if fixture.is_empty() {
+            return Err("fixture address name must not be empty".into());
+        }
+        ObjectAddress::Fixture { name: fixture }
+    } else {
+        parse_object_address(&address_text.ok_or("missing --address")?)?
+    };
     let universe = match option_value_optional(args, "--universe")? {
         Some(text) => UniverseId::parse(&text)?,
-        None => UniverseId::fixture_sentinel(),
+        None if matches!(&address, ObjectAddress::Fixture { .. }) => UniverseId::fixture_sentinel(),
+        None => return Err("--universe is required for non-fixture object addresses".into()),
     };
-    let address = ObjectAddress::Fixture { name: fixture };
     println!("{}", ObjectId::derive(universe, &address)?);
     Ok(())
+}
+
+fn parse_object_address(text: &str) -> Result<ObjectAddress, Box<dyn Error>> {
+    let (kind, fields) = text.split_once(':').ok_or("address must start with a kind:")?;
+    match kind {
+        "fixture" if !fields.is_empty() => Ok(ObjectAddress::Fixture { name: fields.to_owned() }),
+        "system_seed" | "free_object" => {
+            let parts: Vec<_> = fields.split(',').collect();
+            if parts.len() != 4 {
+                return Err("region address requires ix,iy,iz,slot".into());
+            }
+            let region = veyra_core::ids::RegionKey {
+                level: 0,
+                ix: parts[0].parse()?,
+                iy: parts[1].parse()?,
+                iz: parts[2].parse()?,
+            };
+            let slot = parts[3].parse()?;
+            if kind == "system_seed" {
+                Ok(ObjectAddress::SystemSeed { region, slot })
+            } else {
+                Ok(ObjectAddress::FreeObject { region, slot })
+            }
+        }
+        "body_in_system" => {
+            let parts: Vec<_> = fields.split(',').collect();
+            if parts.len() != 3 {
+                return Err("body address requires system_object_id,role,ordinal".into());
+            }
+            Ok(ObjectAddress::BodyInSystem {
+                system: ObjectId::parse(parts[0])?,
+                role: parts[1].parse()?,
+                ordinal: parts[2].parse()?,
+            })
+        }
+        "fixture" => Err("fixture address name must not be empty".into()),
+        _ => {
+            Err("address kind must be system_seed, body_in_system, free_object, or fixture".into())
+        }
+    }
 }
 
 fn command_cell(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -198,7 +254,7 @@ fn print_help() {
            fmt --canonical|--pretty <file>\n\
            hash <file>\n\
            hash-json <file>\n\
-           id object --fixture <name> [--universe uni:b3:<hex>]\n\
+           id object (--address <kind:fields>|--fixture <name>) [--universe uni:b3:<hex>]\n\
            cell --dir x,y,z --level <0..30>\n\
            tile-key --topology dir_cube|radial_1d --cell <key> --tile-log2 <n>\n\
            body verify|info|fields <artifact-directory>\n\
@@ -208,7 +264,7 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::format_json;
+    use super::{format_json, parse_object_address};
 
     #[test]
     fn pretty_and_canonical_modes_reject_root_and_nested_duplicate_keys() {
@@ -224,6 +280,30 @@ mod tests {
     fn pretty_mode_accepts_normal_json_floats_and_repeated_array_values() {
         let output = format_json(br#"{"values":[1.5,1.5]}"#, "--pretty").unwrap();
         assert_eq!(output, b"{\n  \"values\": [\n    1.5,\n    1.5\n  ]\n}");
-        assert!(format_json(br#"{"values":[1.5,1.5]}"#, "--canonical").is_err());
+        assert_eq!(
+            format_json(br#"{"values":[1.5,1.5]}"#, "--canonical").unwrap(),
+            br#"{"values":[1.5,1.5]}"#
+        );
+    }
+
+    #[test]
+    fn object_address_cli_forms_match_the_committed_binary_vectors() {
+        let vectors = [
+            ("system_seed:-1,64,0,300", "0101800100ac02"),
+            (
+                "body_in_system:obj:11111111111111111111111111111111,2,128",
+                "0211111111111111111111111111111111028001",
+            ),
+            ("free_object:-2,3,-4,1", "0303060701"),
+            ("fixture:cb0-addressing", "040e6362302d61646472657373696e67"),
+        ];
+        for (text, expected) in vectors {
+            let address = parse_object_address(text).unwrap();
+            let encoded = address.encode().unwrap();
+            let hex: String = encoded.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(hex, expected, "{text}");
+        }
+        assert!(parse_object_address("system_seed:1,2,3").is_err());
+        assert!(parse_object_address("body_in_system:not-an-object,1,2").is_err());
     }
 }

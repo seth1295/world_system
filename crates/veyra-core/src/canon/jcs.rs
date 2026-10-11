@@ -14,6 +14,15 @@ pub fn canonicalize_json(input: &[u8]) -> Result<Vec<u8>, JcsError> {
     canonicalize_value(&value)
 }
 
+/// Canonicalizes general I-JSON according to RFC 8785, including binary64 values.
+///
+/// [`canonicalize_json`] remains the stricter VEYRA hashed-document path, which rejects
+/// non-integer JSON numbers and integers outside the exact interoperable range.
+pub fn canonicalize_rfc8785_json(input: &[u8]) -> Result<Vec<u8>, JcsError> {
+    let value = parse_unique_json(input)?;
+    canonicalize_rfc8785_value(&value)
+}
+
 /// Parses JSON while rejecting duplicate object names without applying JCS number restrictions.
 pub fn parse_unique_json(input: &[u8]) -> Result<Value, JcsError> {
     let mut deserializer = serde_json::Deserializer::from_slice(input);
@@ -115,6 +124,153 @@ pub fn canonicalize_value(value: &Value) -> Result<Vec<u8>, JcsError> {
     Ok(output)
 }
 
+/// Canonicalizes a parsed JSON value using RFC 8785 number serialization.
+pub fn canonicalize_rfc8785_value(value: &Value) -> Result<Vec<u8>, JcsError> {
+    let mut output = Vec::new();
+    write_rfc8785_value(value, &mut output)?;
+    Ok(output)
+}
+
+/// Serializes one finite binary64 value according to RFC 8785 Appendix B / ECMAScript.
+pub fn serialize_rfc8785_number(value: f64) -> Result<String, JcsError> {
+    if !value.is_finite() {
+        return Err(JcsError::InvalidNumber);
+    }
+    if value == 0.0 {
+        return Ok("0".to_owned());
+    }
+
+    let raw = serde_json::Number::from_f64(value).ok_or(JcsError::InvalidNumber)?.to_string();
+    let (mantissa, exponent) = if let Some((mantissa, exponent)) = raw.split_once('e') {
+        (mantissa, exponent.parse::<i32>().map_err(|_| JcsError::InvalidNumber)?)
+    } else if let Some((mantissa, exponent)) = raw.split_once('E') {
+        (mantissa, exponent.parse::<i32>().map_err(|_| JcsError::InvalidNumber)?)
+    } else {
+        (raw.as_str(), 0_i32)
+    };
+    let negative = mantissa.starts_with('-');
+    let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
+    let decimal_position = unsigned.find('.').unwrap_or(unsigned.len());
+    let mut digits: Vec<u8> = unsigned.bytes().filter(u8::is_ascii_digit).collect();
+    let leading_zeros = digits.iter().take_while(|digit| **digit == b'0').count();
+    if leading_zeros == digits.len() {
+        return Ok("0".to_owned());
+    }
+    digits.drain(..leading_zeros);
+    let decimal_position = i32::try_from(decimal_position).map_err(|_| JcsError::InvalidNumber)?
+        + exponent
+        - i32::try_from(leading_zeros).map_err(|_| JcsError::InvalidNumber)?;
+    while digits.len() > 1 && digits.last() == Some(&b'0') {
+        digits.pop();
+    }
+
+    let scientific = value.abs() < 1.0e-6 || value.abs() >= 1.0e21;
+    let mut result = String::with_capacity(32);
+    if negative {
+        result.push('-');
+    }
+    if scientific {
+        result.push(char::from(digits[0]));
+        if digits.len() > 1 {
+            result.push('.');
+            result
+                .push_str(core::str::from_utf8(&digits[1..]).map_err(|_| JcsError::InvalidNumber)?);
+        }
+        result.push('e');
+        let exponent = decimal_position - 1;
+        if exponent >= 0 {
+            result.push('+');
+        }
+        result.push_str(&exponent.to_string());
+    } else if decimal_position <= 0 {
+        result.push_str("0.");
+        for _ in 0..decimal_position.unsigned_abs() {
+            result.push('0');
+        }
+        result.push_str(core::str::from_utf8(&digits).map_err(|_| JcsError::InvalidNumber)?);
+    } else if usize::try_from(decimal_position).map_err(|_| JcsError::InvalidNumber)?
+        >= digits.len()
+    {
+        result.push_str(core::str::from_utf8(&digits).map_err(|_| JcsError::InvalidNumber)?);
+        for _ in
+            digits.len()..usize::try_from(decimal_position).map_err(|_| JcsError::InvalidNumber)?
+        {
+            result.push('0');
+        }
+    } else {
+        let split = usize::try_from(decimal_position).map_err(|_| JcsError::InvalidNumber)?;
+        result
+            .push_str(core::str::from_utf8(&digits[..split]).map_err(|_| JcsError::InvalidNumber)?);
+        result.push('.');
+        result
+            .push_str(core::str::from_utf8(&digits[split..]).map_err(|_| JcsError::InvalidNumber)?);
+    }
+    Ok(result)
+}
+
+fn write_rfc8785_value(value: &Value, output: &mut Vec<u8>) -> Result<(), JcsError> {
+    match value {
+        Value::Null => output.extend_from_slice(b"null"),
+        Value::Bool(false) => output.extend_from_slice(b"false"),
+        Value::Bool(true) => output.extend_from_slice(b"true"),
+        Value::Number(number) => {
+            let value = number_to_binary64(number)?;
+            output.extend_from_slice(serialize_rfc8785_number(value)?.as_bytes());
+        }
+        Value::String(text) => output.extend_from_slice(
+            serde_json::to_string(text).map_err(|_| JcsError::InvalidString)?.as_bytes(),
+        ),
+        Value::Array(items) => {
+            output.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                write_rfc8785_value(item, output)?;
+            }
+            output.push(b']');
+        }
+        Value::Object(properties) => {
+            let mut keys: Vec<&String> = properties.keys().collect();
+            keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+            output.push(b'{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                output.extend_from_slice(
+                    serde_json::to_string(key).map_err(|_| JcsError::InvalidString)?.as_bytes(),
+                );
+                output.push(b':');
+                write_rfc8785_value(&properties[key], output)?;
+            }
+            output.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+fn number_to_binary64(number: &serde_json::Number) -> Result<f64, JcsError> {
+    if let Some(value) = number.as_i64() {
+        let binary64 = value as f64;
+        if binary64 < -9_223_372_036_854_775_808.0
+            || binary64 >= 9_223_372_036_854_775_808.0
+            || binary64 as i64 != value
+        {
+            return Err(JcsError::InvalidNumber);
+        }
+        return Ok(binary64);
+    }
+    if let Some(value) = number.as_u64() {
+        let binary64 = value as f64;
+        if binary64 >= 18_446_744_073_709_551_616.0 || binary64 as u64 != value {
+            return Err(JcsError::InvalidNumber);
+        }
+        return Ok(binary64);
+    }
+    number.as_f64().ok_or(JcsError::InvalidNumber)
+}
+
 fn write_value(value: &Value, output: &mut Vec<u8>) -> Result<(), JcsError> {
     match value {
         Value::Null => output.extend_from_slice(b"null"),
@@ -181,6 +337,8 @@ pub enum JcsError {
     UnsafeInteger,
     /// A string cannot be represented as valid JSON text.
     InvalidString,
+    /// A JSON number is outside the finite binary64 range.
+    InvalidNumber,
 }
 
 impl fmt::Display for JcsError {
@@ -192,6 +350,7 @@ impl fmt::Display for JcsError {
                 "hashed JSON integer must be within the exact interoperable range"
             }
             Self::InvalidString => "JSON string cannot be encoded",
+            Self::InvalidNumber => "RFC 8785 requires a finite binary64 number",
         })
     }
 }
@@ -200,7 +359,10 @@ impl std::error::Error for JcsError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{JcsError, canonicalize_json, parse_unique_json};
+    use super::{
+        JcsError, canonicalize_json, canonicalize_rfc8785_json, parse_unique_json,
+        serialize_rfc8785_number,
+    };
 
     #[test]
     fn sorts_keys_canonically_and_preserves_unicode() {
@@ -214,6 +376,19 @@ mod tests {
         assert_eq!(canonicalize_json(br#"{"n":1.5}"#), Err(JcsError::ForbiddenNumber));
         assert_eq!(canonicalize_json(br#"{"n":1e0}"#), Err(JcsError::ForbiddenNumber));
         assert_eq!(canonicalize_json(br#"{"n":9007199254740992}"#), Err(JcsError::UnsafeInteger));
+    }
+
+    #[test]
+    fn general_rfc8785_serializes_binary64_while_hashed_json_stays_integer_only() {
+        assert_eq!(canonicalize_json(br#"{"n":1.5}"#), Err(JcsError::ForbiddenNumber));
+        assert_eq!(canonicalize_rfc8785_json(br#"{"n":1.5}"#).unwrap(), br#"{"n":1.5}"#);
+        assert_eq!(canonicalize_rfc8785_json(br#"{"n":1e-6}"#).unwrap(), br#"{"n":0.000001}"#);
+        assert_eq!(canonicalize_rfc8785_json(br#"{"n":1e+21}"#).unwrap(), br#"{"n":1e+21}"#);
+        assert_eq!(canonicalize_rfc8785_json(b"9007199254740992").unwrap(), b"9007199254740992");
+        assert_eq!(canonicalize_rfc8785_json(b"9007199254740993"), Err(JcsError::InvalidNumber));
+        assert_eq!(serialize_rfc8785_number(-0.0).unwrap(), "0");
+        assert_eq!(serialize_rfc8785_number(f64::NAN), Err(JcsError::InvalidNumber));
+        assert_eq!(serialize_rfc8785_number(f64::INFINITY), Err(JcsError::InvalidNumber));
     }
 
     #[test]

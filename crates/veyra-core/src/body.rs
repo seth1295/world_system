@@ -2554,4 +2554,31 @@ mod tests {
             Err(super::ModelError::InvalidField)
         );
     }
+
+    #[test]
+    fn unknown_ancillary_root_capability_and_field_metadata_survive_model_rewrite() {
+        let mut root_value = minimal_root("ancillary-roundtrip");
+        root_value["x-future-root"] = json!({"version":7,"values":[1,2,3]});
+        root_value["capabilities"] = json!([{
+            "id":"x-veyra.future/1","params":{"setting":"opaque"},"compat":"ancillary",
+            "x-future-capability":{"preserved":true}
+        }]);
+        let root: BodyRoot = serde_json::from_value(root_value.clone()).unwrap();
+        let rewritten_root = serde_json::to_value(&root).unwrap();
+        assert_eq!(rewritten_root["x-future-root"], root_value["x-future-root"]);
+        assert_eq!(
+            rewritten_root["capabilities"][0]["x-future-capability"],
+            json!({"preserved":true})
+        );
+
+        let mut field_value = field_descriptor_json();
+        field_value["compat"] = json!("ancillary");
+        field_value["semantic"] = json!("x-future.semantic/1");
+        field_value["storage"]["dtype"] = json!("x-future-dtype");
+        field_value["x-future-field"] = json!({"version":2,"preserved":true});
+        let field: super::FieldDescriptor = serde_json::from_value(field_value.clone()).unwrap();
+        let rewritten_field = serde_json::to_value(field).unwrap();
+        assert_eq!(rewritten_field["x-future-field"], field_value["x-future-field"]);
+        assert_eq!(rewritten_field["storage"]["dtype"], json!("x-future-dtype"));
+    }
 }

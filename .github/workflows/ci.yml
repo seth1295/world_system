@@ -40,6 +40,8 @@ jobs:
         run: python scripts/derive_adjacency.py --check
       - name: Validate schemas and body fixtures
         run: python scripts/validate_schemas.py
+      - name: Validate Stage 0-3 acceptance evidence map
+        run: python scripts/validate_acceptance_matrix.py
       - name: Build WebAssembly targets
         run: cargo build --target wasm32-unknown-unknown -p veyra-core -p veyra-wasm
 
@@ -51,3 +53,36 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny check
+
+  foundation-wasm-parity:
+    name: Foundation native/WASM parity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Generate and validate native foundation payload
+        run: cargo run --release -p veyra-capi --example foundation_parity --features foundation-parity -- target/foundation-native.bin
+      - name: Lint the feature-gated parity harness
+        run: cargo clippy -p veyra-capi --all-targets --features foundation-parity -- -D warnings
+      - name: Build WASM parity export
+        run: cargo build --release --lib --target wasm32-unknown-unknown -p veyra-capi --features foundation-parity
+      - name: Execute WASM vectors and compare bytes
+        run: node scripts/compare_foundation_wasm.mjs target/wasm32-unknown-unknown/release/veyra_capi.wasm target/foundation-native.bin
+
+  stage2-random-roundtrips:
+    name: Stage 2 10M topology round trips
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Run full deterministic Stage 2 acceptance budget
+        run: cargo test --release -p veyra-core --lib spatial::tests::stage2_ten_million_random_topology_roundtrips -- --ignored --exact

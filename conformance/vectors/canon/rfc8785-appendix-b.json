@@ -1,0 +1,32 @@
+{
+  "schema": "veyra.conformance.rfc8785_number_vectors/1",
+  "source": "https://www.rfc-editor.org/rfc/rfc8785.html#appendix-B",
+  "vectors": [
+    {"name":"zero","bits":"0000000000000000","canonical":"0"},
+    {"name":"minus zero","bits":"8000000000000000","canonical":"0"},
+    {"name":"minimum positive","bits":"0000000000000001","canonical":"5e-324"},
+    {"name":"minimum negative","bits":"8000000000000001","canonical":"-5e-324"},
+    {"name":"maximum positive","bits":"7fefffffffffffff","canonical":"1.7976931348623157e+308"},
+    {"name":"maximum negative","bits":"ffefffffffffffff","canonical":"-1.7976931348623157e+308"},
+    {"name":"positive 2^53 integer sample","bits":"4340000000000000","canonical":"9007199254740992"},
+    {"name":"negative 2^53 integer sample","bits":"c340000000000000","canonical":"-9007199254740992"},
+    {"name":"approximately two to the sixty-eighth","bits":"4430000000000000","canonical":"295147905179352830000"},
+    {"name":"NaN","bits":"7fffffffffffffff","canonical":null},
+    {"name":"positive infinity","bits":"7ff0000000000000","canonical":null},
+    {"name":"large rounding lower","bits":"44b52d02c7e14af5","canonical":"9.999999999999997e+22"},
+    {"name":"one times ten to twenty-three","bits":"44b52d02c7e14af6","canonical":"1e+23"},
+    {"name":"large rounding upper","bits":"44b52d02c7e14af7","canonical":"1.0000000000000001e+23"},
+    {"name":"large decimal lower","bits":"444b1ae4d6e2ef4e","canonical":"999999999999999700000"},
+    {"name":"large decimal upper","bits":"444b1ae4d6e2ef4f","canonical":"999999999999999900000"},
+    {"name":"scientific notation boundary","bits":"444b1ae4d6e2ef50","canonical":"1e+21"},
+    {"name":"just below decimal notation boundary","bits":"3eb0c6f7a0b5ed8c","canonical":"9.999999999999997e-7"},
+    {"name":"decimal notation boundary","bits":"3eb0c6f7a0b5ed8d","canonical":"0.000001"},
+    {"name":"fraction lower one","bits":"41b3de4355555553","canonical":"333333333.3333332"},
+    {"name":"fraction lower two","bits":"41b3de4355555554","canonical":"333333333.33333325"},
+    {"name":"fraction center","bits":"41b3de4355555555","canonical":"333333333.3333333"},
+    {"name":"fraction upper one","bits":"41b3de4355555556","canonical":"333333333.3333334"},
+    {"name":"fraction upper two","bits":"41b3de4355555557","canonical":"333333333.33333343"},
+    {"name":"negative small decimal","bits":"becbf647612f3696","canonical":"-0.0000033333333333333333"},
+    {"name":"round to even","bits":"43143ff3c1cb0959","canonical":"1424953923781206.2"}
+  ]
+}

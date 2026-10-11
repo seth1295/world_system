@@ -1092,4 +1092,40 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[ignore = "Stage 2 acceptance workload; invoked explicitly by the foundation acceptance job"]
+    fn stage2_ten_million_random_topology_roundtrips() {
+        use crate::canon::hash::mix64;
+
+        const COUNT: u64 = 10_000_000;
+        const UNIT53: f64 = 1.0 / 9_007_199_254_740_992.0;
+        fn next(state: &mut u64) -> u64 {
+            *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            mix64(*state)
+        }
+        fn unit(state: &mut u64) -> f64 {
+            ((next(state) >> 11) as f64) * UNIT53
+        }
+
+        let mut state = 0x6a09_e667_f3bc_c909_u64;
+
+        for _ in 0..COUNT {
+            let x = unit(&mut state) * 2.0 - 1.0;
+            let y = unit(&mut state) * 2.0 - 1.0;
+            let z = unit(&mut state) * 2.0 - 1.0;
+            let direction = Dir::new(x, y, z).expect("fixed random sequence must not be zero");
+            let level = (next(&mut state) % 31) as u8;
+            let key = DirCube.locate(direction, level).unwrap();
+            let center = DirCube.cell_center(key).unwrap();
+            assert_eq!(DirCube.locate(center, level).unwrap(), key);
+
+            let radial_count = 1_u64 << level;
+            let radial_index = next(&mut state) % radial_count;
+            let radial_key = Radial1d::key(level, radial_index).unwrap();
+            let (decoded_level, decoded_index) = Radial1d::decode(radial_key).unwrap();
+            assert_eq!(Radial1d::key(decoded_level, decoded_index).unwrap(), radial_key);
+            assert!(Radial1d::default().center_radius(radial_key).unwrap().is_finite());
+        }
+    }
 }

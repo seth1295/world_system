@@ -1,0 +1,8 @@
+{
+  "schema": "veyra.conformance.stage2_parity/1",
+  "seed": "0x6a09e667f3bcc909",
+  "stress_roundtrip_count": 10000000,
+  "sample_count": 100000,
+  "random_case": "one DirCube direction round trip and one radial key/center round trip; level selected in 0..=30",
+  "expected_output_hash": "b3:f14ebebc858f3454eb8bf614524a8cf0eeb3f342760830af3ec550bdf0b6101f"
+}

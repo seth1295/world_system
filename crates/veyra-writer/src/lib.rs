@@ -394,6 +394,32 @@ pub enum WriterError {
     BodyIdMismatch,
 }
 
+impl WriterError {
+    /// Stable machine-readable category for CLI diagnostics.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "io_error",
+            Self::Jcs(_) => "invalid_jcs",
+            Self::Model(_) => "invalid_body_model",
+            Self::Loader(error) => error.code(),
+            Self::Source(_) => "content_source_error",
+            Self::InvalidJson => "invalid_json",
+            Self::InvalidSection => "invalid_section",
+            Self::InvalidPath => "invalid_path",
+            Self::DuplicateSection => "duplicate_section",
+            Self::DuplicatePath => "duplicate_path",
+            Self::DuplicateIndex => "duplicate_index",
+            Self::MissingBlob(_) => "missing_blob",
+            Self::InvalidIndex => "invalid_index",
+            Self::IndexFieldMismatch => "index_field_mismatch",
+            Self::InvalidBlob => "invalid_blob",
+            Self::InvalidLedger => "invalid_ledger",
+            Self::BodyAlreadyWritten => "body_already_written",
+            Self::BodyIdMismatch => "body_id_mismatch",
+        }
+    }
+}
+
 impl fmt::Display for WriterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

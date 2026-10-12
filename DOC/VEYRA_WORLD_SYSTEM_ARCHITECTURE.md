@@ -1502,7 +1502,7 @@ The paste-ready prompt for each stage is included at the end of that stage in §
 ```
 stage branch (stage/NN-slug) → implement → local verification (fmt, clippy -D warnings, tests, stage-specific evidence)
 → push → PR to main (template fills stage, invariants, evidence) → CI (3 OSes + wasm) + CodeRabbit review
-→ address review (fix, or reply with reasoning citing the architecture document) → squash-merge → delete branch
+→ address review (fix, or reply with reasoning citing the architecture document) → rebase and merge → delete branch
 ```
 
 - **Merge rule:** CI green, and every CodeRabbit comment either fixed or answered with a reason. A comment that identifies a **violated invariant** blocks the merge. Style comments do not.

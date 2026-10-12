@@ -392,14 +392,14 @@ impl BodyLoader {
 /// A completely verified, standalone logical body baseline.
 #[derive(Clone, Debug)]
 pub struct Body {
-    root: BodyRoot,
-    root_value: Value,
-    baseline_id: Hash32,
-    registry: FieldRegistry,
-    sections: std::collections::BTreeMap<String, Value>,
-    indexes: std::collections::BTreeMap<FieldId, IndexBlob>,
-    blobs: std::collections::BTreeMap<Hash32, Vec<u8>>,
-    ledgers: std::collections::BTreeMap<String, Vec<u8>>,
+    pub(crate) root: BodyRoot,
+    pub(crate) root_value: Value,
+    pub(crate) baseline_id: Hash32,
+    pub(crate) registry: FieldRegistry,
+    pub(crate) sections: std::collections::BTreeMap<String, Value>,
+    pub(crate) indexes: std::collections::BTreeMap<FieldId, IndexBlob>,
+    pub(crate) blobs: std::collections::BTreeMap<Hash32, Vec<u8>>,
+    pub(crate) ledgers: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 impl Body {
@@ -416,6 +416,36 @@ impl Body {
     /// Returns the generic body classification value.
     pub fn classification(&self) -> &Value {
         &self.root.classification
+    }
+
+    /// Returns the declared physical parameters.
+    pub fn physical(&self) -> &crate::body::Physical {
+        &self.root.physical
+    }
+
+    /// Returns the declared reference figure.
+    pub fn figure(&self) -> &crate::body::Figure {
+        &self.root.figure
+    }
+
+    /// Returns body reference frames.
+    pub fn frames(&self) -> &std::collections::BTreeMap<String, Value> {
+        &self.root.frames
+    }
+
+    /// Returns declared named reference surfaces.
+    pub fn reference_surfaces(&self) -> &[Value] {
+        &self.root.reference_surfaces
+    }
+
+    /// Returns declared capabilities.
+    pub fn capabilities(&self) -> &[crate::body::CapabilityRef] {
+        &self.root.capabilities
+    }
+
+    /// Returns declared spatial domains.
+    pub fn domains(&self) -> &[crate::body::Domain] {
+        &self.root.domains
     }
 
     /// Returns the full preserved JSON root value.

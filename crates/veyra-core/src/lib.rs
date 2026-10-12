@@ -6,11 +6,14 @@
 pub mod body;
 pub mod canon;
 mod capability;
+pub mod geometry;
 pub mod ids;
 pub mod io;
 pub mod path;
+pub mod sample;
 pub mod spatial;
 pub mod time;
+pub mod views;
 
 /// Version-one feature identifiers understood by this core build.
 pub mod features {

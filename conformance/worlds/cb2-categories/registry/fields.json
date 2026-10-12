@@ -1,0 +1,35 @@
+{
+  "fields": [
+    {
+      "capability": "veyra.cap.surface_material/1",
+      "compat": "critical",
+      "display": {
+        "group": "Surface material",
+        "label": "Material class",
+        "legend": "vocab_counts"
+      },
+      "domain": "surface",
+      "downsample": "mode_lowest_tiebreak",
+      "id": "0x01050001",
+      "name": "surface_material.class",
+      "native_level": 2,
+      "persistence": "invariant",
+      "sampling": {
+        "below_native": "pyramid",
+        "interp": "nearest"
+      },
+      "semantic": "category",
+      "storage": {
+        "dtype": "u8",
+        "nodata": 255,
+        "offset": "0",
+        "scale": "1",
+        "vocab": "surface_material.class/1"
+      },
+      "temporal": {
+        "kind": "static"
+      }
+    }
+  ],
+  "schema": "veyra.field_registry/1"
+}

@@ -114,6 +114,57 @@ pub struct CanonicalBlob {
     pub payload: Vec<u8>,
 }
 
+/// Validated view of a VYB1 blob that borrows its payload without copying it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanonicalBlobView<'a> {
+    /// Header kind.
+    pub kind: BlobKind,
+    /// Raster storage dtype or Raw for non-raster content.
+    pub dtype: DType,
+    /// First logical dimension.
+    pub dim_i: u16,
+    /// Second logical dimension.
+    pub dim_j: u16,
+    /// Number of slices.
+    pub slices: u16,
+    /// Canonical payload bytes borrowed from the encoded blob.
+    pub payload: &'a [u8],
+}
+
+impl<'a> CanonicalBlobView<'a> {
+    /// Parses and validates canonical VYB1 bytes without allocating a payload copy.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, BlobError> {
+        if bytes.len() > MAX_CANONICAL_BLOB_BYTES {
+            return Err(BlobError::OutputLimitExceeded);
+        }
+        if bytes.len() < 16
+            || &bytes[..4] != b"VYB1"
+            || bytes[6] != 0
+            || bytes[7] != 0
+            || bytes[14..16] != [0, 0]
+        {
+            return Err(BlobError::InvalidHeader);
+        }
+        let blob = Self {
+            kind: BlobKind::try_from(bytes[4])?,
+            dtype: DType::try_from(bytes[5])?,
+            dim_i: u16::from_le_bytes([bytes[8], bytes[9]]),
+            dim_j: u16::from_le_bytes([bytes[10], bytes[11]]),
+            slices: u16::from_le_bytes([bytes[12], bytes[13]]),
+            payload: &bytes[16..],
+        };
+        validate_blob_dimensions(
+            blob.kind,
+            blob.dtype,
+            blob.dim_i,
+            blob.dim_j,
+            blob.slices,
+            blob.payload.len(),
+        )?;
+        Ok(blob)
+    }
+}
+
 impl CanonicalBlob {
     /// Constructs a V1 blob and validates its dimensions.
     pub fn new(
@@ -147,27 +198,15 @@ impl CanonicalBlob {
 
     /// Parses and validates canonical VYB1 bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, BlobError> {
-        if bytes.len() > MAX_CANONICAL_BLOB_BYTES {
-            return Err(BlobError::OutputLimitExceeded);
-        }
-        if bytes.len() < 16
-            || &bytes[..4] != b"VYB1"
-            || bytes[6] != 0
-            || bytes[7] != 0
-            || bytes[14..16] != [0, 0]
-        {
-            return Err(BlobError::InvalidHeader);
-        }
-        let blob = Self {
-            kind: BlobKind::try_from(bytes[4])?,
-            dtype: DType::try_from(bytes[5])?,
-            dim_i: u16::from_le_bytes([bytes[8], bytes[9]]),
-            dim_j: u16::from_le_bytes([bytes[10], bytes[11]]),
-            slices: u16::from_le_bytes([bytes[12], bytes[13]]),
-            payload: bytes[16..].to_vec(),
-        };
-        blob.validate()?;
-        Ok(blob)
+        let view = CanonicalBlobView::decode(bytes)?;
+        Ok(Self {
+            kind: view.kind,
+            dtype: view.dtype,
+            dim_i: view.dim_i,
+            dim_j: view.dim_j,
+            slices: view.slices,
+            payload: view.payload.to_vec(),
+        })
     }
 
     /// Hashes the canonical uncompressed representation.
@@ -176,25 +215,43 @@ impl CanonicalBlob {
     }
 
     fn validate(&self) -> Result<(), BlobError> {
-        if self.payload.len().checked_add(16).is_none_or(|size| size > MAX_CANONICAL_BLOB_BYTES) {
-            return Err(BlobError::OutputLimitExceeded);
-        }
-        if self.kind == BlobKind::RasterTile {
-            if self.dim_i == 0 || self.dim_j == 0 || self.slices == 0 {
-                return Err(BlobError::InvalidDimensions);
-            }
-            let width = self.dtype.width().ok_or(BlobError::InvalidHeader)?;
-            let expected = usize::from(self.dim_i)
-                .checked_mul(usize::from(self.dim_j))
-                .and_then(|value| value.checked_mul(usize::from(self.slices)))
-                .and_then(|value| value.checked_mul(width))
-                .ok_or(BlobError::InvalidDimensions)?;
-            if expected != self.payload.len() {
-                return Err(BlobError::InvalidDimensions);
-            }
-        }
-        Ok(())
+        validate_blob_dimensions(
+            self.kind,
+            self.dtype,
+            self.dim_i,
+            self.dim_j,
+            self.slices,
+            self.payload.len(),
+        )
     }
+}
+
+fn validate_blob_dimensions(
+    kind: BlobKind,
+    dtype: DType,
+    dim_i: u16,
+    dim_j: u16,
+    slices: u16,
+    payload_len: usize,
+) -> Result<(), BlobError> {
+    if payload_len.checked_add(16).is_none_or(|size| size > MAX_CANONICAL_BLOB_BYTES) {
+        return Err(BlobError::OutputLimitExceeded);
+    }
+    if kind == BlobKind::RasterTile {
+        if dim_i == 0 || dim_j == 0 || slices == 0 {
+            return Err(BlobError::InvalidDimensions);
+        }
+        let width = dtype.width().ok_or(BlobError::InvalidHeader)?;
+        let expected = usize::from(dim_i)
+            .checked_mul(usize::from(dim_j))
+            .and_then(|value| value.checked_mul(usize::from(slices)))
+            .and_then(|value| value.checked_mul(width))
+            .ok_or(BlobError::InvalidDimensions)?;
+        if expected != payload_len {
+            return Err(BlobError::InvalidDimensions);
+        }
+    }
+    Ok(())
 }
 
 /// Reorders bytes into two lanes before compression.
@@ -307,8 +364,9 @@ impl std::error::Error for BlobError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        BlobError, BlobKind, CanonicalBlob, DType, MAX_DOCUMENTED_PRODUCTION_TILE_BYTES,
-        decode_zstd_shuffle2, decode_zstd_shuffle2_bounded, shuffle2, unshuffle2,
+        BlobError, BlobKind, CanonicalBlob, CanonicalBlobView, DType,
+        MAX_DOCUMENTED_PRODUCTION_TILE_BYTES, decode_zstd_shuffle2, decode_zstd_shuffle2_bounded,
+        shuffle2, unshuffle2,
     };
     use std::io::Write;
 
@@ -320,6 +378,27 @@ mod tests {
         assert_eq!(CanonicalBlob::decode(&canonical).unwrap(), blob);
         assert_eq!(unshuffle2(&shuffle2(&canonical)), canonical);
         assert_eq!(unshuffle2(&shuffle2(&[1, 2, 3, 4, 5])), [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn validated_blob_views_borrow_large_raster_payload_without_copying() {
+        let canonical = CanonicalBlob::new(
+            BlobKind::RasterTile,
+            DType::U32,
+            128,
+            128,
+            1,
+            vec![0; 128 * 128 * 4],
+        )
+        .unwrap()
+        .encode();
+        let expected_payload = &canonical[16..];
+        let expected_pointer = expected_payload.as_ptr();
+        for _ in 0..16_384 {
+            let view = CanonicalBlobView::decode(&canonical).unwrap();
+            assert_eq!(view.payload.as_ptr(), expected_pointer);
+            assert_eq!(view.payload.len(), expected_payload.len());
+        }
     }
 
     #[test]

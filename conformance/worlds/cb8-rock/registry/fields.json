@@ -1,0 +1,93 @@
+{
+  "fields": [
+    {
+      "capability": "veyra.cap.solid_surface/1",
+      "compat": "critical",
+      "display": {
+        "group": "Solid surface",
+        "label": "Radius",
+        "legend": "continuous"
+      },
+      "domain": "surface",
+      "downsample": "mean",
+      "id": "0x01000001",
+      "name": "figure.radius_m",
+      "native_level": 2,
+      "persistence": "invariant",
+      "sampling": {
+        "below_native": "pyramid",
+        "interp": "bilinear"
+      },
+      "semantic": "scalar.distance",
+      "storage": {
+        "dtype": "u32",
+        "offset": "0",
+        "scale": "1"
+      },
+      "temporal": {
+        "kind": "static"
+      },
+      "unit": "m"
+    },
+    {
+      "capability": "veyra.cap.surface_material/1",
+      "compat": "critical",
+      "display": {
+        "group": "Surface material",
+        "label": "Material class",
+        "legend": "vocab_counts"
+      },
+      "domain": "surface",
+      "downsample": "mode_lowest_tiebreak",
+      "id": "0x01050001",
+      "name": "surface_material.class",
+      "native_level": 2,
+      "persistence": "invariant",
+      "sampling": {
+        "below_native": "pyramid",
+        "interp": "nearest"
+      },
+      "semantic": "category",
+      "storage": {
+        "dtype": "u8",
+        "nodata": 255,
+        "offset": "0",
+        "scale": "1",
+        "vocab": "surface_material.class/1"
+      },
+      "temporal": {
+        "kind": "static"
+      }
+    },
+    {
+      "capability": "veyra.cap.thermal_state/1",
+      "compat": "critical",
+      "display": {
+        "group": "Thermal state",
+        "label": "Surface temperature",
+        "legend": "continuous"
+      },
+      "domain": "surface",
+      "downsample": "mean",
+      "id": "0x01060001",
+      "name": "thermal_state.surface_temperature",
+      "native_level": 2,
+      "persistence": "invariant",
+      "sampling": {
+        "below_native": "pyramid",
+        "interp": "bilinear"
+      },
+      "semantic": "scalar.temperature",
+      "storage": {
+        "dtype": "i16",
+        "offset": "0",
+        "scale": "0.1"
+      },
+      "temporal": {
+        "kind": "static"
+      },
+      "unit": "K"
+    }
+  ],
+  "schema": "veyra.field_registry/1"
+}

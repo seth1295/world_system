@@ -59,6 +59,6 @@ The UI and renderer cannot import fixture construction or `MockBodyProvider`; ES
 
 ## Explicit limits
 
-This prototype does not implement CellKey or address generation, topology projection, sampling, interpolation, refinement, field semantics or derived-field calculation, feature resolution, propagation, body-class interpretation, artifact or `.veyra` parsing, canonical validation, or generation of worlds. It has no Rust or WASM integration and does not consume the unmerged `phase/01-core-foundation` branch. Procedural values and geometry exist only as presentation fixtures and must not be treated as VEYRA data.
+This prototype does not implement CellKey or address generation, topology projection, sampling, interpolation, refinement, field semantics or derived-field calculation, feature resolution, propagation, body-class interpretation, artifact or `.veyra` parsing, canonical validation, or generation of worlds. It has no Rust or WASM integration and does not consume the Phase 1 core foundation available on `main`. Procedural values and geometry exist only as presentation fixtures and must not be treated as VEYRA data.
 
 Provider-shape gaps found while implementing the display contract are listed in [`docs/PROVIDER_CONTRACT_FINDINGS.md`](docs/PROVIDER_CONTRACT_FINDINGS.md).

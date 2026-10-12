@@ -139,6 +139,15 @@ fn writer_roundtrip_checks_named_refs_indexes_constants_and_ledger() {
 }
 
 #[test]
+fn pyramid_writer_errors_have_stable_codes() {
+    assert_eq!(WriterError::InvalidPyramid.code(), "invalid_pyramid");
+    assert_eq!(
+        WriterError::UnsupportedPyramidDType(DType::F32).code(),
+        "unsupported_pyramid_dtype"
+    );
+}
+
+#[test]
 fn rewrite_preserves_unknown_ancillary_artifact_closure() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../conformance/worlds/cb6-compat/ancillary");

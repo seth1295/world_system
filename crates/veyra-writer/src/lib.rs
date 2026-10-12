@@ -434,6 +434,8 @@ impl WriterError {
             Self::InvalidIndex => "invalid_index",
             Self::IndexFieldMismatch => "index_field_mismatch",
             Self::InvalidBlob => "invalid_blob",
+            Self::InvalidPyramid => "invalid_pyramid",
+            Self::UnsupportedPyramidDType(_) => "unsupported_pyramid_dtype",
             Self::InvalidLedger => "invalid_ledger",
             Self::BodyAlreadyWritten => "body_already_written",
             Self::BodyIdMismatch => "body_id_mismatch",
